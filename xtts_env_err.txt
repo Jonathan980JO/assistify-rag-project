@@ -1,0 +1,28 @@
+
+
+==> WARNING: A newer version of conda exists. <==
+    current version: 25.11.1
+    latest version: 26.1.1
+
+Please update conda by running
+
+    $ conda update -n base -c defaults conda
+
+
+Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /nvidia/win-64/libnpp-dev-11.8.0.86-0.tar.bz2
+
+Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /pytorch/win-64/pytorch-2.1.2-py3.10_cuda11.8_cudnn8_0.tar.bz2
+
+Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /nvidia/win-64/libcufft-dev-10.9.0.58-0.tar.bz2
+
+Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /nvidia/win-64/libcublas-dev-11.11.3.6-0.tar.bz2
+
+Retrying (Retry(total=2, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ConnectionResetError(10054, 'An existing connection was forcibly closed by the remote host', None, 10054, None)': /nvidia/win-64/libcusparse-dev-11.7.5.86-0.tar.bz2
+
+Pip subprocess error:
+ERROR: Cannot install -r G:\Grad_Project\assistify-rag-project-main\condaenv.du0q2iok.requirements.txt (line 1) and numpy==1.26.4 because these package versions have conflicting dependencies.
+ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts
+
+
+CondaEnvException: Pip failed
+

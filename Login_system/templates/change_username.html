@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Change Username - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+            --warning: #f39c12;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .box {
+            background: var(--sidebar);
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 500px;
+            width: 100%;
+            box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+        }
+        h2 {
+            text-align: center;
+            color: var(--accent);
+            font-size: 2rem;
+            margin-bottom: 0.5em;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--muted);
+            margin-bottom: 2em;
+            font-size: 0.95em;
+        }
+        .warning-box {
+            background: rgba(243, 156, 18, 0.2);
+            border-left: 4px solid var(--warning);
+            color: var(--warning);
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 24px;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        .warning-box strong {
+            display: block;
+            margin-bottom: 8px;
+            font-size: 1.1em;
+        }
+        .error {
+            background: rgba(255, 121, 121, 0.2);
+            border-left: 4px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        .success {
+            background: rgba(16, 163, 127, 0.2);
+            border-left: 4px solid var(--accent);
+            color: var(--accent);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--light);
+        }
+        input[type=text],
+        input[type=email],
+        input[type=password] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #171717;
+            color: var(--light);
+            font-size: 1em;
+            transition: border-color 0.22s;
+        }
+        input[type=text]:focus,
+        input[type=email]:focus,
+        input[type=password]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .info-text {
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-top: -15px;
+            margin-bottom: 20px;
+        }
+        input[type=submit] {
+            width: 100%;
+            background: var(--accent);
+            color: var(--light);
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1.1em;
+            transition: background 0.22s;
+            margin-top: 10px;
+        }
+        input[type=submit]:hover {
+            background: #0d8658;
+        }
+        input[type=submit]:disabled {
+            background: #444;
+            cursor: not-allowed;
+        }
+        .back-link {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            border-top: 1px solid #444;
+        }
+        .back-link a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: opacity 0.22s;
+        }
+        .back-link a:hover {
+            opacity: 0.8;
+        }
+    </style>
+    <script src="/static/security.js"></script>
+</head>
+<body>
+    <div class="box">
+        <h2>🔄 Change Username</h2>
+        <p class="subtitle">One-time username change</p>
+        
+        <div class="warning-box">
+            <strong>⚠️ Important Notice</strong>
+            • You can only change your username ONCE<br>
+            • This action will be logged for admin review<br>
+            • Choose carefully - it cannot be undone<br>
+            • Username must be unique and 3-20 characters
+        </div>
+        
+        {% if error %}
+        <div class="error">
+            {% if error == "already_changed" %}
+                ❌ You have already changed your username. No further changes allowed.
+            {% elif error == "username_taken" %}
+                ❌ This username is already taken. Please choose another.
+            {% elif error == "invalid_credentials" %}
+                ❌ Invalid email or password. Please try again.
+            {% elif error == "invalid_username" %}
+                ❌ Username must be 3-20 characters, alphanumeric and underscores only.
+            {% else %}
+                ❌ {{ error }}
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        {% if success %}
+        <div class="success">
+            ✅ Username changed successfully! Please login with your new username.
+        </div>
+        {% endif %}
+        
+        <form method="post" action="/change-username">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label for="email">Your Email Address</label>
+                <input type="email" id="email" name="email" required autofocus>
+                <p class="info-text">The email associated with your account</p>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Current Password</label>
+                <input type="password" id="password" name="password" required minlength="8" autocomplete="current-password">
+            </div>
+            
+            <div class="form-group">
+                <label for="new_username">New Username</label>
+                <input type="text" id="new_username" name="new_username" 
+                       pattern="[a-zA-Z0-9_]{3,20}" 
+                       title="3-20 characters, letters, numbers, and underscores only"
+                       required>
+                <p class="info-text">3-20 characters, alphanumeric and underscores only</p>
+            </div>
+            
+            <input type="submit" value="Change Username">
+        </form>
+        
+        <div class="back-link">
+            <a href="/">← Back to Login</a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ticket Management - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 0;
+        }
+        
+        /* Header and Menu Styles */
+        header {
+            background: var(--sidebar);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 998;
+        }
+        .menu-btn {
+            background: var(--accent);
+            color: var(--light);
+            border: none;
+            font-size: 24px;
+            width: 48px;
+            height: 48px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .menu-btn:hover {
+            background: #0e8c6d;
+        }
+        .header-title {
+            font-size: 1.5rem;
+            margin: 0;
+            color: var(--accent);
+        }
+        .header-spacer {
+            width: 72px;
+        }
+        .nav-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 999;
+        }
+        .nav-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .nav-menu {
+            position: fixed;
+            top: 0;
+            left: -280px;
+            width: 280px;
+            height: 100%;
+            background: var(--sidebar);
+            box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+            transition: left 0.3s;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        .nav-menu.open {
+            left: 0;
+        }
+        .nav-header {
+            padding: 24px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .nav-header h2 {
+            margin: 0;
+            color: var(--accent);
+            font-size: 1.5rem;
+        }
+        .nav-links {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .nav-links li {
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 16px 24px;
+            color: var(--light);
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .nav-link:hover {
+            background: rgba(16,163,127,0.2);
+        }
+        .nav-link svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+
+        .container {
+            max-width: 1400px;
+            padding: 20px;
+            margin: 0 auto;
+        }
+            margin: 0 auto;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 28px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-danger {
+            background: #dc3545;
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: #c82333;
+        }
+
+        .btn-success {
+            background: #28a745;
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: #218838;
+        }
+
+        .content {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .filter-tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 25px;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 10px;
+        }
+
+        .filter-tab {
+            padding: 10px 20px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 15px;
+            color: #6c757d;
+            border-bottom: 3px solid transparent;
+            transition: all 0.3s;
+        }
+
+        .filter-tab.active {
+            color: #667eea;
+            border-bottom-color: #667eea;
+            font-weight: 600;
+        }
+
+        .tickets-list {
+            margin-top: 20px;
+        }
+
+        .ticket-card {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .ticket-card:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+        }
+
+        .ticket-card.unassigned {
+            border-left: 5px solid #ffc107;
+        }
+
+        .ticket-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .ticket-number {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 16px;
+        }
+
+        .ticket-badges {
+            display: flex;
+            gap: 10px;
+        }
+
+        .badge {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-open {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-assigned {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .status-resolved {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .priority-high {
+            background: #f8d7da;
+            color: #721c24;
+        }
+
+        .priority-normal {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .ticket-subject {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .ticket-meta {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: #6c757d;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            background: white;
+            margin: 30px auto;
+            padding: 30px;
+            border-radius: 15px;
+            max-width: 900px;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e9ecef;
+        }
+
+        .modal-title {
+            font-size: 24px;
+            color: #667eea;
+        }
+
+        .close {
+            font-size: 28px;
+            cursor: pointer;
+            color: #6c757d;
+            transition: color 0.3s;
+        }
+
+        .close:hover {
+            color: #dc3545;
+        }
+
+        .ticket-actions {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group textarea {
+            min-height: 120px;
+            resize: vertical;
+        }
+
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .checkbox-group input[type="checkbox"] {
+            width: auto;
+        }
+
+        .messages-container {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .message {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        .message.internal {
+            background: #fff3cd;
+            border-left-color: #ffc107;
+        }
+
+        .message-header {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 5px;
+            font-size: 14px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .message-text {
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .message-time {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 8px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #667eea;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+    </style>
+    <script src="/static/security.js"></script>
+    <script>
+        function openNav() {
+            document.querySelector('.nav-menu').classList.add('open');
+            document.querySelector('.nav-overlay').classList.add('show');
+        }
+        
+        function closeNav() {
+            document.querySelector('.nav-menu').classList.remove('open');
+            document.querySelector('.nav-overlay').classList.remove('show');
+        }
+    </script>
+</head>
+<body>
+    <!-- Navigation Overlay -->
+    <div class="nav-overlay" onclick="closeNav()"></div>
+    
+    <!-- Side Navigation Menu -->
+    <nav class="nav-menu">
+        <div class="nav-header">
+            <h2>Menu</h2>
+        </div>
+        <ul class="nav-links">
+            <li>
+                <a href="/employee" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+                    Home
+                </a>
+            </li>
+            <li>
+                <a href="/frontend/index.html" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+                    Chat
+                </a>
+            </li>
+            <li>
+                <a href="/employee/customers" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z"/></svg>
+                    Customers
+                </a>
+            </li>
+            <li>
+                <a href="/employee" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/></svg>
+                    Knowledge Base
+                </a>
+            </li>
+            <li>
+                <a href="/profile" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                    Profile Settings
+                </a>
+            </li>
+            <li>
+                <a href="/logout" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+                    Logout
+                </a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Header with hamburger button -->
+    <header>
+        <button class="menu-btn" onclick="openNav()">☰</button>
+        <h1 class="header-title">Assistify Employee</h1>
+        <div class="header-spacer"></div>
+    </header>
+
+    <div class="container">
+        <div class="header">
+            <h1>🎫 Support Ticket Management</h1>
+        </div>
+
+        <div class="content">
+            <div class="filter-tabs">
+                <button class="filter-tab active" onclick="filterTickets('all')">All Tickets</button>
+                <button class="filter-tab" onclick="filterTickets('unassigned')">Unassigned</button>
+                <button class="filter-tab" onclick="filterTickets('my')">My Tickets</button>
+                <button class="filter-tab" onclick="filterTickets('open')">Open</button>
+                <button class="filter-tab" onclick="filterTickets('resolved')">Resolved</button>
+            </div>
+
+            <div id="ticketsContainer">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading tickets...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- View/Manage Ticket Modal -->
+    <div id="ticketModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="modalTicketNumber"></h2>
+                <span class="close" onclick="closeModal()">&times;</span>
+            </div>
+            <div id="ticketActions" class="ticket-actions"></div>
+            <div id="ticketDetails"></div>
+            <div class="messages-container" id="messagesContainer"></div>
+            <form id="addMessageForm" style="margin-top: 20px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="newMessage">Add a Message</label>
+                    <textarea id="newMessage" name="newMessage" placeholder="Type your message here..."></textarea>
+                </div>
+                <div class="checkbox-group">
+                    <input type="checkbox" id="internalNote" name="internalNote">
+                    <label for="internalNote" style="margin: 0;">Internal Note (hidden from customer)</label>
+                </div>
+                <button type="submit" class="btn btn-primary" style="margin-top: 15px;">Send Message</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Escalate Modal -->
+    <div id="escalateModal" class="modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 class="modal-title">Escalate to Admin</h2>
+                <span class="close" onclick="closeEscalateModal()">&times;</span>
+            </div>
+            <form id="escalateForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="escalationReason">Reason for Escalation *</label>
+                    <textarea id="escalationReason" name="escalationReason" required placeholder="Explain why this ticket needs admin attention..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-danger" style="width: 100%;">Escalate to Admin</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Resolve Modal -->
+    <div id="resolveModal" class="modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h2 class="modal-title">Resolve Ticket</h2>
+                <span class="close" onclick="closeResolveModal()">&times;</span>
+            </div>
+            <form id="resolveForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="resolutionNotes">Resolution Notes *</label>
+                    <textarea id="resolutionNotes" name="resolutionNotes" required placeholder="Describe how the issue was resolved..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-success" style="width: 100%;">Mark as Resolved</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let allTickets = [];
+        let currentTicketId = null;
+        let currentFilter = 'all';
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadTickets();
+        });
+
+        async function loadTickets() {
+            try {
+                const response = await fetch('/api/support/tickets');
+                const data = await response.json();
+                allTickets = data.tickets || [];
+                displayTickets();
+            } catch (error) {
+                console.error('Error loading tickets:', error);
+                Security.safeSetHTML('ticketsContainer', '<p style="color: red;">Error loading tickets. Please refresh the page.</p>';
+            }
+        }
+
+        function filterTickets(filter) {
+            currentFilter = filter;
+            
+            // Update active tab
+            document.querySelectorAll('.filter-tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            displayTickets();
+        }
+
+        function displayTickets() {
+            const container = document.getElementById('ticketsContainer');
+            
+            let filtered = allTickets;
+            
+            switch(currentFilter) {
+                case 'unassigned':
+                    filtered = allTickets.filter(t => !t.assigned_to);
+                    break;
+                case 'my':
+                    // This would need the current user's username - for now show assigned ones
+                    filtered = allTickets.filter(t => t.assigned_to);
+                    break;
+                case 'open':
+                    filtered = allTickets.filter(t => t.status === 'open');
+                    break;
+                case 'resolved':
+                    filtered = allTickets.filter(t => t.status === 'resolved');
+                    break;
+            }
+            
+            if (filtered.length === 0) {
+                Security.safeSetHTML(container, `
+                    <div class="empty-state">
+                        <div style="font-size: 64px; opacity: 0.3;">📭</div>
+                        <h3>No Tickets Found</h3>
+                        <p>No tickets match the current filter.</p>
+                    </div>
+                `;
+                return;
+            }
+            
+            let html = '<div class="tickets-list">';
+            filtered.forEach(ticket => {
+                const statusClass = `status-${ticket.status}`;
+                const priorityClass = `priority-${ticket.priority}`;
+                const createdDate = new Date(ticket.created_at).toLocaleDateString();
+                const unassignedClass = !ticket.assigned_to ? 'unassigned' : '';
+                
+                html += `
+                    <div class="ticket-card ${unassignedClass}" onclick="viewTicket(${ticket.id})">
+                        <div class="ticket-header">
+                            <span class="ticket-number">${ticket.ticket_number}</span>
+                            <div class="ticket-badges">
+                                <span class="badge ${statusClass}">${ticket.status}</span>
+                                <span class="badge ${priorityClass}">${ticket.priority}</span>
+                            </div>
+                        </div>
+                        <div class="ticket-subject">${ticket.subject}</div>
+                        <div class="ticket-meta">
+                            <span>Customer: ${ticket.customer_username}</span>
+                            <span>Created: ${createdDate}</span>
+                            ${ticket.assigned_to ? `<span>Assigned: ${ticket.assigned_to}</span>` : '<span style="color: #ffc107; font-weight: bold;">⚠ Unassigned</span>'}
+                        </div>
+                    </div>
+                `;
+            });
+            html += '</div>';
+            
+            Security.safeSetHTML(container, html);
+        }
+
+        async function viewTicket(ticketId) {
+            currentTicketId = ticketId;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${ticketId}`);
+                const ticket = await response.json();
+                
+                document.getElementById('modalTicketNumber').textContent = ticket.ticket_number;
+                
+                // Build action buttons
+                let actionsHtml = '';
+                if (!ticket.assigned_to) {
+                    actionsHtml += `<button class="btn btn-primary" onclick="assignToMe()">Assign to Me</button>`;
+                }
+                if (ticket.status !== 'resolved' && !ticket.escalated_to_admin) {
+                    actionsHtml += `<button class="btn btn-danger" onclick="openEscalateModal()">Escalate to Admin</button>`;
+                }
+                if (ticket.status !== 'resolved') {
+                    actionsHtml += `<button class="btn btn-success" onclick="openResolveModal()">Resolve Ticket</button>`;
+                }
+                Security.safeSetHTML(document.getElementById('ticketActions'), actionsHtml);
+                
+                // Build ticket details
+                const statusClass = `status-${ticket.status}`;
+                const priorityClass = `priority-${ticket.priority}`;
+                
+                let detailsHtml = `
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">${ticket.subject}</h3>
+                        <p style="margin-bottom: 15px; line-height: 1.6;">${ticket.description}</p>
+                        <div style="display: flex; gap: 20px; font-size: 14px; flex-wrap: wrap;">
+                            <span><strong>Customer:</strong> ${ticket.customer_username}</span>
+                            <span><strong>Status:</strong> <span class="badge ${statusClass}">${ticket.status}</span></span>
+                            <span><strong>Priority:</strong> <span class="badge ${priorityClass}">${ticket.priority}</span></span>
+                            ${ticket.assigned_to ? `<span><strong>Assigned:</strong> ${ticket.assigned_to}</span>` : '<span style="color: #ffc107;"><strong>⚠ Unassigned</strong></span>'}
+                            ${ticket.escalated_to_admin ? '<span style="color: #dc3545;"><strong>🚨 Escalated to Admin</strong></span>' : ''}
+                        </div>
+                        ${ticket.resolution_notes ? `
+                            <div style="margin-top: 15px; padding: 15px; background: #d4edda; border-left: 4px solid #28a745; border-radius: 5px;">
+                                <strong>Resolution:</strong><br>${ticket.resolution_notes}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+                
+                Security.safeSetHTML(document.getElementById('ticketDetails'), detailsHtml);
+                
+                // Build messages
+                let messagesHtml = '<h3 style="margin-bottom: 15px;">Conversation</h3>';
+                if (ticket.messages && ticket.messages.length > 0) {
+                    ticket.messages.forEach(msg => {
+                        const msgDate = new Date(msg.created_at).toLocaleString();
+                        const internalClass = msg.is_internal_note ? 'internal' : '';
+                        const internalBadge = msg.is_internal_note ? '<span class="badge" style="background: #ffc107; color: #856404;">Internal Note</span>' : '';
+                        
+                        messagesHtml += `
+                            <div class="message ${internalClass}">
+                                <div class="message-header">
+                                    <span>${msg.sender_username} (${msg.sender_role})</span>
+                                    ${internalBadge}
+                                </div>
+                                <div class="message-text">${msg.message}</div>
+                                <div class="message-time">${msgDate}</div>
+                            </div>
+                        `;
+                    });
+                } else {
+                    messagesHtml += '<p style="color: #6c757d; font-style: italic;">No messages yet.</p>';
+                }
+                
+                Security.safeSetHTML(document.getElementById('messagesContainer'), messagesHtml);
+                
+                // Show/hide message form
+                const form = document.getElementById('addMessageForm');
+                if (ticket.status === 'resolved') {
+                    form.style.display = 'none';
+                } else {
+                    form.style.display = 'block';
+                }
+                
+                document.getElementById('ticketModal').style.display = 'block';
+            } catch (error) {
+                console.error('Error loading ticket:', error);
+                alert('Error loading ticket details.');
+            }
+        }
+
+        async function assignToMe() {
+            try {
+                const response = await fetch(`/api/support/ticket/${currentTicketId}/assign`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({})
+                });
+                
+                if (response.ok) {
+                    alert('Ticket assigned to you successfully!');
+                    closeModal();
+                    loadTickets();
+                } else {
+                    alert('Error assigning ticket.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error assigning ticket.');
+            }
+        }
+
+        function openEscalateModal() {
+            document.getElementById('escalateModal').style.display = 'block';
+        }
+
+        function closeEscalateModal() {
+            document.getElementById('escalateModal').style.display = 'none';
+            document.getElementById('escalateForm').reset();
+        }
+
+        function openResolveModal() {
+            document.getElementById('resolveModal').style.display = 'block';
+        }
+
+        function closeResolveModal() {
+            document.getElementById('resolveModal').style.display = 'none';
+            document.getElementById('resolveForm').reset();
+        }
+
+        function closeModal() {
+            document.getElementById('ticketModal').style.display = 'none';
+            currentTicketId = null;
+        }
+
+        document.getElementById('addMessageForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const message = document.getElementById('newMessage').value;
+            const isInternal = document.getElementById('internalNote').checked;
+            
+            if (!message.trim()) return;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${currentTicketId}/message`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        message: message,
+                        is_internal_note: isInternal
+                    })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('newMessage').value = '';
+                    document.getElementById('internalNote').checked = false;
+                    viewTicket(currentTicketId);
+                } else {
+                    alert('Error sending message.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error sending message.');
+            }
+        });
+
+        document.getElementById('escalateForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const reason = document.getElementById('escalationReason').value;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${currentTicketId}/escalate`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ escalation_reason: reason })
+                });
+                
+                if (response.ok) {
+                    alert('Ticket escalated to admin successfully!');
+                    closeEscalateModal();
+                    closeModal();
+                    loadTickets();
+                } else {
+                    alert('Error escalating ticket.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error escalating ticket.');
+            }
+        });
+
+        document.getElementById('resolveForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const notes = document.getElementById('resolutionNotes').value;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${currentTicketId}/resolve`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ resolution_notes: notes })
+                });
+                
+                if (response.ok) {
+                    alert('Ticket marked as resolved!');
+                    closeResolveModal();
+                    closeModal();
+                    loadTickets();
+                } else {
+                    alert('Error resolving ticket.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error resolving ticket.');
+            }
+        });
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            if (event.target.className === 'modal') {
+                event.target.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

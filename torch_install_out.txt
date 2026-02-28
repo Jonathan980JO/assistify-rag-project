@@ -1,0 +1,6 @@
+Looking in indexes: https://download.pytorch.org/whl/cu121
+Collecting torch==2.5.1+cu121
+  Downloading https://download.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp311-cp311-win_amd64.whl (2449.4 MB)
+     --------------------------------------   2.4/2.4 GB ?  -:--:--
+  Resuming download https://download.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp311-cp311-win_amd64.whl (2381.9 MB/2449.4 MB)
+     ---------------------------------------  2.4/2.4 GB 2.8 MB/s eta 0:00:12

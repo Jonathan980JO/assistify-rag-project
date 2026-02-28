@@ -1,0 +1,70 @@
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+logs/
+*.log
+
+# Secrets and credentials
+secrets/
+credentials/
+*.pem
+*.key
+*.cert
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Model files - TOO LARGE FOR GITHUB
+backend/Models/
+*.gguf
+*.bin
+*.safetensors
+*.pth
+*.pt
+
+# Models (optional - uncomment if models are too large)
+# backend/Models/

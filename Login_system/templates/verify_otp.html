@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Email - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .box {
+            background: var(--sidebar);
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 480px;
+            width: 100%;
+            box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+        }
+        h2 {
+            text-align: center;
+            color: var(--accent);
+            font-size: 2.2rem;
+            margin-bottom: 0.5em;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--muted);
+            margin-bottom: 2em;
+            font-size: 0.95em;
+            line-height: 1.6;
+        }
+        .email-display {
+            background: rgba(16, 163, 127, 0.1);
+            border: 1px solid var(--accent);
+            border-radius: 8px;
+            padding: 12px;
+            text-align: center;
+            margin-bottom: 24px;
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .error {
+            background: rgba(255, 121, 121, 0.2);
+            border-left: 4px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--light);
+        }
+        input[type=text],
+        input[type=hidden] {
+            width: 100%;
+            padding: 16px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #171717;
+            color: var(--light);
+            font-size: 1.8em;
+            text-align: center;
+            letter-spacing: 8px;
+            font-family: 'Courier New', monospace;
+            transition: border-color 0.22s;
+        }
+        input[type=text]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        input[type=submit] {
+            width: 100%;
+            background: var(--accent);
+            color: var(--light);
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1.1em;
+            transition: background 0.22s;
+            margin-top: 10px;
+        }
+        input[type=submit]:hover {
+            background: #0d8658;
+        }
+        .form-group {
+            margin-bottom: 8px;
+        }
+        .helper-text {
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-top: -15px;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        .info-box {
+            background: rgba(16, 163, 127, 0.1);
+            border-left: 4px solid var(--accent);
+            padding: 16px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 0.9em;
+            line-height: 1.6;
+        }
+        .icon-large {
+            font-size: 4em;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        .resend-link {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .resend-link a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: opacity 0.22s;
+        }
+        .resend-link a:hover {
+            opacity: 0.8;
+        }
+        .success-box {
+            background: rgba(16, 163, 127, 0.2);
+            border-left: 4px solid var(--accent);
+            color: var(--accent);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        .error-box {
+            background: rgba(255, 121, 121, 0.2);
+            border-left: 4px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        #email-status {
+            display: none;
+            margin-bottom: 20px;
+        }
+    </style>
+    <script>
+        // Auto-focus and format OTP input
+        window.onload = function() {
+            const otpInput = document.getElementById('otp_code');
+            if (otpInput) {
+                otpInput.focus();
+                
+                otpInput.addEventListener('input', function(e) {
+                    // Only allow numbers
+                    this.value = this.value.replace(/[^0-9]/g, '');
+                    
+                    // Auto-submit when 6 digits entered
+                    if (this.value.length === 6) {
+                        document.getElementById('otpForm').submit();
+                    }
+                });
+            }
+        };
+    </script>
+    <script src="/static/security.js"></script>
+</head>
+<body>
+    <div class="box">
+        <div class="icon-large">📧</div>
+        <h2>Verify Your Email</h2>
+        <p class="subtitle">
+            We've sent a 6-digit verification code to:
+        </p>
+        
+        <div class="email-display">
+            {{ email }}
+        </div>
+        
+        <div class="info-box">
+            ℹ️ <strong>Check your inbox</strong><br>
+            A verification code has been sent to your email. The code will expire in 10 minutes.
+        </div>
+        
+        {% if error %}
+        <div class="error">
+            {% if error == "invalid_or_expired_otp" %}
+                ⚠️ Invalid or expired verification code. Please try again or request a new code.
+            {% else %}
+                ⚠️ {{ error }}
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <form method="post" action="/verify-otp" id="otpForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="email" value="{{ email }}">
+            
+            <div class="form-group">
+                <label for="otp_code">Verification Code</label>
+                <input 
+                    type="text" 
+                    id="otp_code" 
+                    name="otp_code" 
+                    required 
+                    maxlength="6" 
+                    pattern="[0-9]{6}"
+                    placeholder="000000"
+                    autocomplete="off"
+                >
+                <div class="helper-text">Enter the 6-digit code sent to your email</div>
+            </div>
+            
+            <input type="submit" value="Verify Email">
+        </form>
+        
+        <div class="resend-link">
+            Didn't receive the code? <a href="/register">Register again</a>
+        </div>
+    </div>
+</body>
+</html>

@@ -1,0 +1,11 @@
+INFO:     Started server process [28208]
+INFO:     Waiting for application startup.
+2026-02-27 20:26:51,938 INFO Loading XTTS v2 model onto GPU...
+C:\Users\MK\miniconda3\envs\assistify_xtts\lib\site-packages\librosa\core\intervals.py:8: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:5002 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [28208]

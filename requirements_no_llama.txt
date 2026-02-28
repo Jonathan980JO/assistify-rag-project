@@ -1,0 +1,18 @@
+fastapi
+uvicorn
+chromadb
+sentence-transformers
+PyPDF2
+pyotp
+passlib
+itsdangerous
+aiohttp
+pydantic
+transformers
+torch
+faster-whisper  # GPU-accelerated speech recognition (requires CUDA)
+nvidia-ml-py  # GPU monitoring (replaces deprecated pynvml)
+huggingface_hub[hf_xet]  # Faster model downloads with Xet Storage
+authlib
+httpx
+requests

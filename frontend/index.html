@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Assistify RAG Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      background: #232323;
+      color: #fafaff;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+    header {
+      background: #2b2b2b;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .menu-btn {
+      background: #10a37f;
+      border: none;
+      font-size: 24px;
+      color: #fff;
+      cursor: pointer;
+      padding: 8px 16px;
+      border-radius: 8px;
+      transition: background 0.3s;
+    }
+    .menu-btn:hover {
+      background: #0d8658;
+    }
+    .header-title {
+      flex: 1;
+      text-align: center;
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #10a37f;
+      margin: 0;
+    }
+    .header-spacer {
+      width: 72px;
+    }
+    .nav-menu {
+      position: fixed;
+      top: 0;
+      left: -280px;
+      width: 280px;
+      height: 100%;
+      background: #2b2b2b;
+      box-shadow: 2px 0 10px rgba(0,0,0,0.5);
+      transition: left 0.3s ease;
+      z-index: 1000;
+      overflow-y: auto;
+    }
+    .nav-menu.open {
+      left: 0;
+    }
+    .nav-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      z-index: 999;
+    }
+    .nav-overlay.show {
+      display: block;
+    }
+    .nav-header {
+      padding: 24px;
+      border-bottom: 1px solid #3a3a3a;
+    }
+    .nav-header h2 {
+      margin: 0;
+      color: #10a37f;
+      font-size: 1.5rem;
+    }
+    .nav-links {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .nav-link {
+      display: flex;
+      align-items: center;
+      padding: 1em 1.5em;
+      color: #fff;
+      text-decoration: none;
+      transition: background 0.2s;
+      border-left: 4px solid transparent;
+    }
+    .nav-link:hover {
+      background: #3a3a3a;
+      border-left-color: #10a37f;
+    }
+    .nav-link svg {
+      width: 20px;
+      height: 20px;
+      margin-right: 12px;
+    }
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 85vh;
+      padding: 2em 0;
+    }
+    .chat-container {
+      background: #2b2b2b;
+      border-radius: 14px;
+      box-shadow: 0 2px 18px #101015cc;
+      padding: 1.4em;
+      width: 95vw;
+      max-width: 440px;
+      min-height: 60vh;
+      display: flex;
+      flex-direction: column;
+      gap: 1em;
+    }
+    .chat-log {
+      flex: 1;
+      overflow-y: auto;
+      margin-bottom: 1em;
+      padding-right: 4px;
+      font-size: 1.1em;
+    }
+    .chat-msg { margin: .8em 0; }
+    .user { color: #10a37f; font-weight: 600; }
+    .assistant { color: #f6c33c; }
+    form {
+      display: flex;
+      gap: 0.7em;
+      align-items: center;
+      margin-bottom: 0;
+    }
+    input[type="text"] {
+      flex: 1;
+      background: #24272a;
+      border: 1px solid #333;
+      color: #fff;
+      border-radius: 8px;
+      padding: .7em 1em;
+      font-size: 1.1em;
+      outline: none;
+    }
+    button {
+      background: #10a37f;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: .7em 1.2em;
+      font-size: 1em;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover {
+      background: #129c7d;
+    }
+    .voice-btn {
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7em 1em;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .voice-btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .voice-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .voice-btn.recording {
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 6px #10a37f44; }
+      100% { box-shadow: 0 0 32px #10a37f88; }
+    }
+    /* Thinking indicator */
+    .thinking-indicator {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      color: #10a37f;
+      font-size: 0.95em;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .thinking-indicator.visible {
+      opacity: 1;
+    }
+    .thinking-dots {
+      display: flex;
+      gap: 4px;
+    }
+    .thinking-dots span {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10a37f;
+      animation: thinkingDot 1.4s infinite ease-in-out both;
+    }
+    .thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+    .thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+    .thinking-dots span:nth-child(3) { animation-delay: 0s; }
+    @keyframes thinkingDot {
+      0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+    /* Voice waveform animation */
+    .voice-waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      height: 24px;
+      margin-top: 6px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .voice-waveform.active {
+      opacity: 1;
+    }
+    .voice-waveform span {
+      display: inline-block;
+      width: 3px;
+      background: #10a37f;
+      border-radius: 2px;
+      animation: waveform 0.7s infinite ease-in-out;
+    }
+    .voice-waveform span:nth-child(1) { animation-delay: 0s; height: 8px; }
+    .voice-waveform span:nth-child(2) { animation-delay: 0.1s; height: 14px; }
+    .voice-waveform span:nth-child(3) { animation-delay: 0.2s; height: 20px; }
+    .voice-waveform span:nth-child(4) { animation-delay: 0.3s; height: 14px; }
+    .voice-waveform span:nth-child(5) { animation-delay: 0.4s; height: 8px; }
+    @keyframes waveform {
+      0%, 100% { transform: scaleY(0.4); }
+      50% { transform: scaleY(1); }
+    }
+    /* AI speaking breathing glow */
+    .ai-speaking-glow {
+      text-align: center;
+      font-size: 0.85em;
+      color: #f6c33c;
+      opacity: 0;
+      transition: opacity 0.3s;
+      animation: breathe 2s infinite ease-in-out;
+    }
+    .ai-speaking-glow.active {
+      opacity: 1;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Navigation Overlay -->
+  <div class="nav-overlay" id="navOverlay" onclick="closeNav()"></div>
+  
+  <!-- Side Navigation Menu -->
+  <nav class="nav-menu" id="navMenu">
+    <div class="nav-header">
+      <h2>Menu</h2>
+    </div>
+    <ul class="nav-links">
+      <li>
+        <a href="/main" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+          Home
+        </a>
+      </li>
+      <li>
+        <a href="/frontend/index.html" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+          Chat
+        </a>
+      </li>
+      <li>
+        <a href="/logout" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+          Logout
+        </a>
+      </li>
+    </ul>
+  </nav>
+
+  <header>
+    <button class="menu-btn" onclick="openNav()">☰</button>
+    <h1 class="header-title">Assistify RAG Chat</h1>
+    <div class="header-spacer"></div>
+  </header>
+  <main>
+    <div class="chat-container">
+      <div class="chat-log" id="chatLog"></div>
+      <form id="chatForm">
+        <input type="text" id="chatInput" autocomplete="off" placeholder="Type your question..." />
+        <button type="submit">Send</button>
+      </form>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button type="button" id="btnStart" class="voice-btn" style="flex: 1; background: #10a37f;">
+          🎤 Start
+        </button>
+        <button type="button" id="btnMute" class="voice-btn" style="flex: 1; background: #f59e0b;" disabled>
+          🔇 Stop
+        </button>
+        <button type="button" id="btnStop" class="voice-btn" style="flex: 1; background: #ef4444;" disabled>
+          ⏹️ Stop
+        </button>
+      </div>
+      <!-- Thinking indicator -->
+      <div id="thinkingIndicator" class="thinking-indicator">
+        <div class="thinking-dots"><span></span><span></span><span></span></div>
+        <span>Thinking...</span>
+      </div>
+      <!-- Voice waveform visualization -->
+      <div id="voiceWaveform" class="voice-waveform">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <!-- AI speaking indicator -->
+      <div id="aiSpeakingGlow" class="ai-speaking-glow">
+        🔊 AI is speaking...
+      </div>
+    </div>
+    <audio id="audioPlayer" style="display:none"></audio>
+  </main>
+  <script>
+    // Navigation menu functions
+    function openNav() {
+      document.querySelector('.nav-menu').classList.add('open');
+      document.querySelector('.nav-overlay').classList.add('show');
+    }
+    
+    function closeNav() {
+      document.querySelector('.nav-menu').classList.remove('open');
+      document.querySelector('.nav-overlay').classList.remove('show');
+    }
+
+    // Connect to same-origin WebSocket (login server proxies to RAG server)
+    const wsUrl = `ws://${window.location.host}/ws`;
+    let ws = null;  // initialised by connectWebSocket() below
+    const chatLog = document.getElementById('chatLog');
+    const chatForm = document.getElementById('chatForm');
+    const chatInput = document.getElementById('chatInput');
+    const btnStart = document.getElementById('btnStart');
+    const btnMute = document.getElementById('btnMute');
+    const btnStop = document.getElementById('btnStop');
+    let isRecording = false;
+    let isMuted = false;
+    let mediaRecorder = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let lastTranscript = '';
+    let lastAIResponse = '';
+    let reconnectAttempts = 0;
+
+    // ---- Streaming TTS queue & barge-in state ----
+    let pauseAudioSending = false;   // pause mic→WS during TTS but keep mic alive
+    let isTTSPlaying = false;        // true while any TTS audio is playing
+    let ttsQueue = [];               // queue of sentences to speak
+    let ttsPrefetchCache = {};       // prefetched TTS audio blobs { text: blobURL }
+    let isThinking = false;          // true while AI is generating
+    let _streamingMsgEl = null;      // current streaming assistant message element
+    let bargeInThreshold = 0.04;     // energy threshold for barge-in detection
+    let consecutiveVoiceFrames = 0;  // consecutive high-energy frames during TTS
+    let bargeInFramesNeeded = 3;     // ~200ms to confirm user is speaking
+
+    function connectWebSocket() {
+      ws = new WebSocket(wsUrl);
+      
+      ws.onopen = () => {
+        appendMsg('system', 'Connected to Assistify RAG system.');
+        reconnectAttempts = 0;
+      };
+
+      ws.onclose = () => {
+        appendMsg('system', '[Connection lost - attempting to reconnect...]');
+        if(isRecording) {
+          stopRecording();
+        }
+        // Auto-reconnect after delay
+        reconnectAttempts++;
+        const delay = Math.min(1000 * reconnectAttempts, 5000);
+        setTimeout(connectWebSocket, delay);
+      };
+
+      ws.onerror = () => {
+        appendMsg('system', '[Error] WebSocket connection failed.');
+      };
+
+      ws.onmessage = event => {
+      try {
+        const data = JSON.parse(event.data);
+
+        if(data.type === 'thinking') {
+          // AI is about to generate — show thinking animation
+          showThinking();
+
+        } else if(data.type === 'aiResponseChunk') {
+          // Streaming: one sentence at a time
+          hideThinking();
+          showAISpeaking();
+          handleResponseChunk(data.text, data.index);
+
+          // Pause mic sending in live mode for barge-in detection
+          if (_liveCallMode && isRecording) {
+            pauseAudioSending = true;
+          } else if (!_liveCallMode && isRecording) {
+            stopRecording(true);
+          }
+          addToTTSQueue(data.text);
+
+        } else if(data.type === 'aiResponseDone') {
+          // Streaming complete
+          hideThinking();
+          if(data.fullText && data.fullText.trim()) {
+            lastAIResponse = data.fullText;
+            finalizeStreamingDisplay(data.fullText);
+          }
+
+        } else if(data.type === 'aiResponse') {
+          // Fallback: non-streaming full response
+          if(data.text && data.text.trim() && data.text !== lastAIResponse) {
+            lastAIResponse = data.text;
+            appendMsg('assistant', data.text);
+            hideThinking();
+
+            if (_liveCallMode && isRecording) {
+              pauseAudioSending = true;
+            } else if(isRecording) {
+              stopRecording(true);
+            }
+            addToTTSQueue(data.text);
+          }
+
+        } else if(data.type === 'transcript') {
+          if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
+            lastTranscript = data.text;
+            appendMsg('user', data.text);
+          }
+        } else if(data.type === 'error') {
+          hideThinking();
+          appendMsg('system', '[Error] ' + (data.message || 'Connection error'));
+        } else if(data.type === 'info') {
+          appendMsg('system', data.message);
+        } else if(data.type === 'control') {
+          console.log('[Control]', data);
+        }
+      } catch(e) {
+        if(typeof event.data === 'string') {
+          appendMsg('system', '[Error] Invalid message format');
+        }
+      }
+      };
+    }
+
+    // Initialize connection
+    connectWebSocket();
+
+    chatForm.onsubmit = e => {
+      _unlockAudio();
+      e.preventDefault();
+      const text = chatInput.value.trim();
+      if (!text) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendMsg('system', '[Not connected — please wait a moment and try again]');
+        return;
+      }
+      // Interrupt any ongoing AI response or TTS
+      if (isTTSPlaying || isThinking) {
+        bargeIn(true); // silent barge-in for text input
+      }
+      ws.send(JSON.stringify({ text }));
+      appendMsg('user', text);
+      chatInput.value = '';
+      lastTranscript = text;
+    };
+
+    // For user messages
+    function appendMsg(role, text) {
+      const msg = document.createElement('div');
+      msg.className = `chat-msg ${role}`;
+      msg.textContent = `${role === 'assistant' ? 'Assistant:' : (role === 'user' ? 'You:' : '')} ${text}`;
+      chatLog.appendChild(msg);
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    // Voice control button handlers
+    let _liveCallMode = false; // true while user is in a live voice session
+
+    btnStart.onclick = async () => {
+      _unlockAudio();
+      _liveCallMode = true;
+      await startRecording();
+    };
+    
+    btnMute.onclick = () => {
+      if(isRecording) {
+        stopRecording(true); // silent stop
+      }
+    };
+    
+    btnStop.onclick = () => {
+      _liveCallMode = false; // end live-call mode — no auto-resume
+      if(isRecording) stopRecording();
+      // Stop any playing TTS and clear queue
+      if(_currentTTSAudio) { try { _currentTTSAudio.pause(); } catch(e){} _currentTTSAudio = null; }
+      try { audioPlayer.pause(); audioPlayer.src = ''; audioPlayer.onended = null; audioPlayer.onerror = null; } catch(e){}
+      if (window.speechSynthesis) speechSynthesis.cancel();
+      ttsQueue = [];
+      for (const key of Object.keys(ttsPrefetchCache)) {
+        URL.revokeObjectURL(ttsPrefetchCache[key]);
+      }
+      ttsPrefetchCache = {};
+      isTTSPlaying = false;
+      pauseAudioSending = false;
+      hideThinking();
+      hideAISpeaking();
+      hideWaveform();
+      // Send interrupt in case AI is still generating
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+      }
+      appendMsg('system', '[⏹️ Voice session ended]');
+    };
+
+    // -------- XTTS v2 Text-to-Speech (Queue-based for streaming) --------
+    const audioPlayer = document.getElementById('audioPlayer');
+    let _currentTTSAudio = null; // track active audio so we can stop it
+
+    // Unlock autoplay on first user gesture (button click or form submit)
+    // Without this, browsers silently block audio.play() from async/WS contexts.
+    let _audioUnlocked = false;
+    function _unlockAudio() {
+      if (_audioUnlocked) return;
+      _audioUnlocked = true;
+      // Unlock AudioContext (for voice recording / Web Audio API)
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        ctx.close();
+      } catch(e) { /* ignore */ }
+      // Unlock the <audio> element by calling play() right now inside the user gesture.
+      // Chrome / Edge require that play() is called at least once in a user-gesture stack
+      // before it can be called from an async/WS callback later.
+      // We use a 1-sample silent WAV as the source so it completes instantly.
+      // Use blob: URL instead of data: URI to satisfy strict CSP (media-src blob:).
+      try {
+        // Minimal valid WAV: RIFF header + 0 samples
+        const silentWavBytes = new Uint8Array([
+          0x52,0x49,0x46,0x46, 0x24,0x00,0x00,0x00, // "RIFF" + chunk size 36
+          0x57,0x41,0x56,0x45,                       // "WAVE"
+          0x66,0x6d,0x74,0x20, 0x10,0x00,0x00,0x00, // "fmt " + subchunk size 16
+          0x01,0x00,                                 // PCM format
+          0x01,0x00,                                 // 1 channel
+          0x44,0xac,0x00,0x00,                       // 44100 Hz
+          0x88,0x58,0x01,0x00,                       // byte rate
+          0x02,0x00,                                 // block align
+          0x10,0x00,                                 // bits per sample 16
+          0x64,0x61,0x74,0x61, 0x00,0x00,0x00,0x00  // "data" + 0 bytes
+        ]);
+        const silentBlob = new Blob([silentWavBytes], { type: 'audio/wav' });
+        const silentUrl = URL.createObjectURL(silentBlob);
+        audioPlayer.src = silentUrl;
+        audioPlayer.play()
+          .catch(() => {
+            // Expected to "fail" on some browsers but the act of calling play() here
+            // is what unlocks future play() calls from async contexts.
+          })
+          .finally(() => URL.revokeObjectURL(silentUrl));
+      } catch(e) { /* ignore */ }
+      console.log('[Audio] Unlocked autoplay via blob');
+    }
+
+    // ---- UI Feedback Functions ----
+    function showThinking() {
+      isThinking = true;
+      const el = document.getElementById('thinkingIndicator');
+      if (el) el.classList.add('visible');
+    }
+    function hideThinking() {
+      isThinking = false;
+      const el = document.getElementById('thinkingIndicator');
+      if (el) el.classList.remove('visible');
+    }
+    function showWaveform() {
+      const el = document.getElementById('voiceWaveform');
+      if (el) el.classList.add('active');
+    }
+    function hideWaveform() {
+      const el = document.getElementById('voiceWaveform');
+      if (el) el.classList.remove('active');
+    }
+    function showAISpeaking() {
+      const el = document.getElementById('aiSpeakingGlow');
+      if (el) el.classList.add('active');
+    }
+    function hideAISpeaking() {
+      const el = document.getElementById('aiSpeakingGlow');
+      if (el) el.classList.remove('active');
+    }
+
+    // ---- Streaming Response Display ----
+    function handleResponseChunk(text, index) {
+      if (index === 0) {
+        _streamingMsgEl = document.createElement('div');
+        _streamingMsgEl.className = 'chat-msg assistant';
+        _streamingMsgEl.textContent = 'Assistant: ' + text;
+        chatLog.appendChild(_streamingMsgEl);
+      } else if (_streamingMsgEl) {
+        _streamingMsgEl.textContent += ' ' + text;
+      }
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function finalizeStreamingDisplay(fullText) {
+      if (_streamingMsgEl) {
+        _streamingMsgEl.textContent = 'Assistant: ' + fullText;
+        _streamingMsgEl = null;
+      }
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    // ---- TTS Queue System (sentence-by-sentence playback with prefetch) ----
+    let _xttsAvailable = true;  // optimistic; auto-retries after cooldown
+    let _xttsRetryTimer = null; // handle for cooldown retry
+
+    // Mark XTTS unavailable temporarily — re-enable after cooldown so it is retried
+    function _disableXttsMomentarily() {
+      if (_xttsAvailable) {
+        _xttsAvailable = false;
+        appendMsg('system', '[TTS] XTTS unavailable — using browser voice. Will auto-retry in 20s.');
+        console.warn('[TTS] XTTS failed — retrying in 20s');
+        if (_xttsRetryTimer) clearTimeout(_xttsRetryTimer);
+        _xttsRetryTimer = setTimeout(() => {
+          _xttsAvailable = true;
+          console.log('[TTS] Re-enabling XTTS');
+        }, 20000);
+      }
+    }
+
+    // Browser-native TTS fallback (Web Speech API)
+    function _speakBrowser(text) {
+      return new Promise((resolve) => {
+        if (!window.speechSynthesis) { resolve(); return; }
+        // Cancel any queued browser utterances
+        window.speechSynthesis.cancel();
+        const utt = new SpeechSynthesisUtterance(text);
+        utt.lang = 'en-US';
+        utt.rate = 1.05;
+        utt.pitch = 1.0;
+        // Pick a natural-sounding voice if available
+        const voices = speechSynthesis.getVoices();
+        const preferred = voices.find(v => /zira|david|google us|samantha/i.test(v.name));
+        if (preferred) utt.voice = preferred;
+        utt.onend = resolve;
+        utt.onerror = resolve;
+        speechSynthesis.speak(utt);
+      });
+    }
+
+    function addToTTSQueue(text) {
+      if (!text || text.trim() === '') return;
+      const cleaned = text.replace(/[\u{1F000}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '').trim();
+      if (!cleaned) return;
+
+      ttsQueue.push(cleaned);
+
+      // Only prefetch if this sentence will wait in queue (isTTSPlaying=true).
+      // If isTTSPlaying is false, playNextInQueue() is about to fetch it directly —
+      // prefetching the same sentence simultaneously wastes an XTTS slot and can
+      // cause later sentences to time out, triggering the browser-voice fallback.
+      if (_xttsAvailable && isTTSPlaying) prefetchTTS(cleaned);
+
+      // Start playing if not already
+      if (!isTTSPlaying) {
+        playNextInQueue();
+      }
+    }
+
+    async function playNextInQueue() {
+      if (ttsQueue.length === 0) {
+        isTTSPlaying = false;
+        pauseAudioSending = false;
+        hideAISpeaking();
+
+        // Resume recording after all TTS finishes
+        if (_liveCallMode) {
+          // Clear backend audio buffer to discard stale audio captured during TTS
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+          }
+          if (!isRecording) {
+            startRecording(true);
+          }
+        }
+        return;
+      }
+
+      isTTSPlaying = true;
+      showAISpeaking();
+      const sentence = ttsQueue.shift();
+
+      // Prefetch next sentence while this one plays
+      if (ttsQueue.length > 0 && !ttsPrefetchCache[ttsQueue[0]]) {
+        prefetchTTS(ttsQueue[0]);
+      }
+
+      // ---- Try server TTS (XTTS) — fetch and play are separated so a play() hiccup
+      //      does NOT disable XTTS for future sentences.
+      let serverOK = false;
+      if (_xttsAvailable) {
+        let url = null;
+        // Step 1: get the audio URL (from prefetch cache or a fresh fetch)
+        try {
+          if (ttsPrefetchCache[sentence]) {
+            url = ttsPrefetchCache[sentence];
+            delete ttsPrefetchCache[sentence];
+          } else {
+            const controller = new AbortController();
+            const abortTimer = setTimeout(() => controller.abort(), 90000); // 90s — XTTS first-load can be slow
+            const resp = await fetch('/tts', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ text: sentence }),
+              credentials: 'include',
+              signal: controller.signal,
+            });
+            clearTimeout(abortTimer);
+            if (!resp.ok) {
+              throw new Error('XTTS HTTP ' + resp.status + ': ' + (await resp.text().catch(()=>'')));
+            }
+            const blob = await resp.blob();
+            url = URL.createObjectURL(blob);
+          }
+        } catch (fetchErr) {
+          console.warn('[TTS] XTTS fetch failed:', fetchErr.message || fetchErr);
+          _disableXttsMomentarily();
+          url = null;
+        }
+
+        // Step 2: play the fetched audio (failure here does NOT disable XTTS server)
+        if (url) {
+          try {
+            audioPlayer.src = url;
+            _currentTTSAudio = audioPlayer;
+            await new Promise((resolve, reject) => {
+              audioPlayer.onended = () => {
+                URL.revokeObjectURL(url);
+                _currentTTSAudio = null;
+                audioPlayer.onended = null;
+                audioPlayer.onerror = null;
+                resolve();
+              };
+              audioPlayer.onerror = (e) => {
+                URL.revokeObjectURL(url);
+                _currentTTSAudio = null;
+                audioPlayer.onended = null;
+                audioPlayer.onerror = null;
+                reject(e);
+              };
+              const p = audioPlayer.play();
+              if (p) p.catch(reject);
+            });
+            serverOK = true;
+          } catch (playErr) {
+            console.warn('[TTS] Audio play() failed (browser policy?):', playErr.message || playErr);
+            // XTTS fetch worked fine — do NOT disable it. Just use browser speech for this sentence.
+            URL.revokeObjectURL(url);
+            _currentTTSAudio = null;
+            audioPlayer.onended = null;
+            audioPlayer.onerror = null;
+          }
+        }
+      }
+
+      // ---- Browser Speech API fallback (only when XTTS fetch failed or play failed) ----
+      if (!serverOK) {
+        try {
+          await _speakBrowser(sentence);
+        } catch(e) { /* ignore */ }
+      }
+
+      // Continue with next sentence
+      playNextInQueue();
+    }
+
+    async function prefetchTTS(text) {
+      // Prefetch is best-effort — failure here must NEVER disable XTTS.
+      // The real fetch in playNextInQueue() is the authoritative one.
+      if (!_xttsAvailable || ttsPrefetchCache[text]) return;
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 90000); // generous — XTTS can take 20s+
+        const resp = await fetch('/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        clearTimeout(t);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          // Only cache if still relevant (XTTS not disabled while we were fetching)
+          if (_xttsAvailable) {
+            ttsPrefetchCache[text] = URL.createObjectURL(blob);
+          } else {
+            // We already have the blob but XTTS was disabled; discard it cleanly
+            console.log('[TTS prefetch] Discarding result — XTTS disabled during fetch');
+          }
+        } else {
+          // Non-OK from prefetch: log only. The direct fetch in playNextInQueue will
+          // re-try and handle the error properly.
+          console.warn('[TTS prefetch] Non-OK response:', resp.status, '— will retry in playNextInQueue');
+        }
+      } catch (e) {
+        // Timeout or network error on prefetch — silently ignore. playNextInQueue will
+        // do its own authoritative fetch with its own error handling.
+        if (e.name !== 'AbortError') {
+          console.warn('[TTS prefetch] Fetch error (ignored):', e.message || e);
+        }
+      }
+    }
+
+    // Legacy speakText — now routes through the queue
+    async function speakText(text) {
+      if (!text || text.trim() === '') return;
+      const cleaned = text.replace(/[\u{1F000}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '').trim();
+      if (!cleaned) return;
+      addToTTSQueue(cleaned);
+    }
+
+    // ---- Barge-in: Interrupt AI when user starts speaking ----
+    function bargeIn(silent) {
+      console.log('[Barge-in] User speaking — interrupting AI');
+      consecutiveVoiceFrames = 0;
+
+      // Stop current TTS audio
+      if (_currentTTSAudio) {
+        try { _currentTTSAudio.pause(); _currentTTSAudio.currentTime = 0; } catch(e){}
+        _currentTTSAudio = null;
+      }
+      audioPlayer.pause();
+      audioPlayer.src = '';
+      audioPlayer.onended = null;
+      audioPlayer.onerror = null;
+      // Also cancel browser speech synthesis
+      if (window.speechSynthesis) speechSynthesis.cancel();
+
+      // Clear TTS queue and prefetch cache
+      ttsQueue = [];
+      for (const key of Object.keys(ttsPrefetchCache)) {
+        URL.revokeObjectURL(ttsPrefetchCache[key]);
+      }
+      ttsPrefetchCache = {};
+
+      // Send interrupt to backend (cancel LLM streaming)
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+      }
+
+      // Resume audio sending
+      isTTSPlaying = false;
+      pauseAudioSending = false;
+      hideThinking();
+      hideAISpeaking();
+
+      if (!silent) {
+        appendMsg('system', '[🔊 Interrupted — listening...]');
+      }
+    }
+
+    // ---- Energy computation for barge-in detection ----
+    function computeEnergy(buffer) {
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        sum += buffer[i] * buffer[i];
+      }
+      return Math.sqrt(sum / buffer.length);
+    }
+
+    async function startRecording(silent = false) {
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        appendMsg('system', 'Voice not supported in this browser.');
+        return;
+      }
+      
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // Echo cancellation + noise suppression to prevent Whisper from capturing AI voice
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+        const source = audioContext.createMediaStreamSource(mediaStream);
+        
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (e) => {
+          if(!isRecording) return;
+          if(isMuted) return;
+          
+          const input = e.inputBuffer.getChannelData(0);
+
+          // ---- Barge-in detection during TTS playback ----
+          if (pauseAudioSending && isTTSPlaying) {
+            const energy = computeEnergy(input);
+            if (energy > bargeInThreshold) {
+              consecutiveVoiceFrames++;
+              if (consecutiveVoiceFrames >= bargeInFramesNeeded) {
+                bargeIn(); // Interrupt AI — resume listening
+              }
+            } else {
+              consecutiveVoiceFrames = 0;
+            }
+            return; // Don't send audio to server during TTS
+          }
+
+          // Don't send audio while paused (waiting for TTS queue to complete)
+          if (pauseAudioSending) return;
+          
+          const resampled = resample(input, audioContext.sampleRate, 16000);
+          
+          if(resampled && ws.readyState === WebSocket.OPEN) {
+            const pcm16 = convertToPCM16(resampled);
+            ws.send(pcm16.buffer);
+          }
+        };
+        
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        
+        isRecording = true;
+        isMuted = false;
+        pauseAudioSending = false;
+        consecutiveVoiceFrames = 0;
+        btnStart.disabled = true;
+        btnMute.disabled = false;
+        btnStop.disabled = false;
+        btnStart.classList.add('recording');
+        btnMute.textContent = '🔇 Stop Recording';
+        showWaveform();
+        if (!silent) appendMsg('system', '[🎤 Recording started - speak now]');
+      } catch(err) {
+        appendMsg('system', 'Could not start voice recording: ' + err.message);
+      }
+    }
+
+    function stopRecording(silent = false) {
+      isRecording = false;
+      pauseAudioSending = false;
+      consecutiveVoiceFrames = 0;
+      
+      // Send control message to backend to clear buffers
+      if(ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'stop_recording' }));
+      }
+      
+      // Fully release audio input device
+      if(processor) { processor.disconnect(); processor = null; }
+      if(audioContext) { audioContext.close(); audioContext = null; }
+      if(mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      
+      btnStart.disabled = false;
+      btnMute.disabled = true;
+      btnStop.disabled = true;
+      btnStart.classList.remove('recording');
+      btnMute.textContent = '🔇 Mute';
+      btnMute.style.background = '#f59e0b';
+      isMuted = false;
+      hideWaveform();
+      if (!silent) appendMsg('system', '[⏸️ Recording stopped]');
+    }
+
+    function convertToPCM16(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      
+      for(let i = 0; i < float32Array.length; i++) {
+        const sample = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      }
+      
+      return new Int16Array(buffer);
+    }
+
+    function resample(buffer, fromRate, toRate) {
+      if(fromRate === toRate) return buffer;
+      if(toRate > fromRate) return null;
+      
+      const ratio = fromRate / toRate;
+      const newLength = Math.round(buffer.length / ratio);
+      const result = new Float32Array(newLength);
+      
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+      
+      while(offsetResult < result.length) {
+        const nextOffset = Math.round((offsetResult + 1) * ratio);
+        let sum = 0, count = 0;
+        
+        for(let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) {
+          sum += buffer[i];
+          count++;
+        }
+        
+        result[offsetResult] = count > 0 ? sum / count : 0;
+        offsetResult++;
+        offsetBuffer = nextOffset;
+      }
+      
+      return result;
+    }
+  </script>
+</body>
+</html>

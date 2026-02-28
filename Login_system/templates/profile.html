@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Profile Settings - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+        h1 {
+            color: var(--accent);
+            margin-bottom: 30px;
+        }
+        .back-link {
+            display: inline-block;
+            color: var(--accent);
+            text-decoration: none;
+            margin-bottom: 20px;
+            transition: opacity 0.22s;
+        }
+        .back-link:hover {
+            opacity: 0.8;
+        }
+        .success {
+            background: rgba(16, 163, 127, 0.2);
+            border-left: 4px solid var(--accent);
+            color: var(--accent);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        .error {
+            background: rgba(255, 121, 121, 0.2);
+            border-left: 4px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-weight: 600;
+        }
+        .section {
+            background: var(--sidebar);
+            border-radius: 12px;
+            padding: 32px;
+            margin-bottom: 24px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+        }
+        .section h2 {
+            color: var(--accent);
+            font-size: 1.4rem;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #333;
+            padding-bottom: 10px;
+        }
+        .info-display {
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 16px;
+            margin-bottom: 24px;
+            padding: 16px;
+            background: #1a1a1a;
+            border-radius: 8px;
+        }
+        .info-label {
+            font-weight: 600;
+            color: var(--muted);
+        }
+        .info-value {
+            color: var(--light);
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--light);
+        }
+        input[type=email],
+        input[type=password],
+        input[type=text] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #171717;
+            color: var(--light);
+            font-size: 1em;
+            transition: border-color 0.22s;
+        }
+        input[type=email]:focus,
+        input[type=password]:focus,
+        input[type=text]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .btn {
+            background: var(--accent);
+            color: var(--light);
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1em;
+            transition: background 0.22s;
+        }
+        .btn:hover {
+            background: #0d8658;
+        }
+        .btn-danger {
+            background: var(--danger);
+        }
+        .btn-danger:hover {
+            background: #e66565;
+        }
+        .warning-box {
+            background: rgba(255, 121, 121, 0.1);
+            border-left: 4px solid var(--danger);
+            padding: 14px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 0.9em;
+        }
+        .info-text {
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-top: -15px;
+            margin-bottom: 20px;
+        }
+    </style>
+    <script src="/static/security.js"></script>
+</head>
+<body>
+    <div class="container">
+        <a href="{{ back_url }}" class="back-link">← Back to Dashboard</a>
+        
+        <h1>⚙️ Profile Settings</h1>
+        
+        {% if request.query_params.get("email_changed") == "success" %}
+        <div class="success">✅ Email changed successfully!</div>
+        {% elif request.query_params.get("password_changed") == "success" %}
+        <div class="success">✅ Password changed successfully!</div>
+        {% endif %}
+        
+        {% if error %}
+        <div class="error">
+            {% if error == "invalid_password" %}
+                ❌ Invalid current password.
+            {% elif error == "email_taken" %}
+                ❌ This email is already in use by another account.
+            {% elif error == "password_mismatch" %}
+                ❌ Passwords do not match.
+            {% elif error == "weak_password" %}
+                ❌ Password must be at least 8 characters long.
+            {% elif error == "invalid_old_password" %}
+                ❌ Invalid old password.
+            {% else %}
+                ❌ {{ error }}
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <!-- Current Profile Info -->
+        <div class="section">
+            <h2>📋 Profile Information</h2>
+            <div class="info-display">
+                <div class="info-label">Username:</div>
+                <div class="info-value" id="profile-username">{{ user.username }}</div>
+                
+                <div class="info-label">Email:</div>
+                <div class="info-value" id="profile-email">{{ user.email or 'Not set' }}</div>
+                
+                <div class="info-label">Role:</div>
+                <div class="info-value" id="profile-role">{{ user.role }}</div>
+                
+                <div class="info-label">Full Name:</div>
+                <div class="info-value" id="profile-fullname">{{ user.full_name or 'Not set' }}</div>
+                
+                <div class="info-label">Account Created:</div>
+                <div class="info-value" id="profile-created">Loading...</div>
+                
+                <div class="info-label">Status:</div>
+                <div class="info-value" id="profile-status">
+                    <span style="display: inline-block; padding: 4px 12px; border-radius: 12px; background: #10b981; color: white; font-size: 0.85em; font-weight: 600;">Active</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Change Email -->
+        <div class="section">
+            <h2>📧 Change Email</h2>
+            <div class="warning-box">
+                ⚠️ <strong>Security Notice:</strong> A verification code will be sent to your new email address.
+            </div>
+            <form method="post" action="/profile/change-email">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="new_email">New Email Address</label>
+                    <input type="email" id="new_email" name="new_email" required>
+                </div>
+                
+                <div class="form-group">
+                    <label for="current_password">Current Password</label>
+                    <input type="password" id="current_password" name="current_password" required minlength="8" autocomplete="current-password">
+                    <p class="info-text">Confirm your identity</p>
+                </div>
+                
+                <button type="submit" class="btn">Send Verification Code</button>
+            </form>
+        </div>
+        
+        <!-- Change Password -->
+        <div class="section">
+            <h2>🔒 Change Password</h2>
+            <div class="warning-box">
+                ⚠️ <strong>Security Notice:</strong> A verification code will be sent to your email.
+            </div>
+            <form method="post" action="/profile/change-password">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="old_password">Current Password</label>
+                    <input type="password" id="old_password" name="old_password" required minlength="8" autocomplete="current-password">
+                </div>
+                
+                <div class="form-group">
+                    <label for="new_password">New Password</label>
+                    <input type="password" id="new_password" name="new_password" minlength="8" required autocomplete="new-password">
+                    <p class="info-text">Minimum 8 characters</p>
+                </div>
+                
+                <div class="form-group">
+                    <label for="confirm_new_password">Confirm New Password</label>
+                    <input type="password" id="confirm_new_password" name="confirm_new_password" minlength="8" required autocomplete="new-password">
+                </div>
+                
+                <button type="submit" class="btn">Send Verification Code</button>
+            </form>
+        </div>
+        
+        {% if user.role == 'customer' %}
+        <!-- Delete Account -->
+        <div class="section">
+            <h2>⚠️ Delete Account</h2>
+            <div class="warning-box">
+                <strong>⚠️ DANGER ZONE:</strong> This action is permanent and cannot be undone. All your data will be deleted.
+            </div>
+            <p style="color: var(--muted); margin-bottom: 20px;">
+                If you delete your account, you will lose access to all your data including conversation history and settings.
+            </p>
+            <button type="button" class="btn btn-danger" onclick="showDeleteConfirmation()">Delete My Account</button>
+        </div>
+        {% endif %}
+    </div>
+    
+    <!-- Delete Account Confirmation Modal -->
+    <div id="deleteModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); z-index: 1000; align-items: center; justify-content: center;">
+        <div style="background: var(--sidebar); max-width: 500px; margin: 0 20px; padding: 32px; border-radius: 12px; box-shadow: 0 4px 16px rgba(0,0,0,0.5);">
+            <h2 style="color: var(--danger); margin-bottom: 20px;">⚠️ Confirm Account Deletion</h2>
+            <p style="margin-bottom: 20px; color: var(--muted);">
+                This action cannot be undone. To confirm, please enter your password:
+            </p>
+            <form id="deleteForm" onsubmit="return deleteAccount(event);">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <label for="delete_password">Your Password</label>
+                <input type="password" id="delete_password" name="password" required minlength="8" autocomplete="current-password" autofocus style="width: 100%; padding: 12px; margin-bottom: 20px; border-radius: 6px; border: 1px solid #444; background: #171717; color: var(--light);">
+                
+                <div style="display: flex; gap: 12px; justify-content: flex-end;">
+                    <button type="button" class="btn" onclick="closeDeleteModal()" style="background: #6b7280;">Cancel</button>
+                    <button type="submit" class="btn btn-danger">Delete Account</button>
+                </div>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        // Load profile data dynamically
+        async function loadProfileData() {
+            try {
+                const response = await fetch('/api/my-profile', {
+                    credentials: 'same-origin'
+                });
+                
+                if (response.ok) {
+                    const profile = await response.json();
+                    
+                    // Update profile display with fresh data
+                    document.getElementById('profile-username').textContent = profile.username;
+                    document.getElementById('profile-email').textContent = profile.email || 'Not set';
+                    document.getElementById('profile-role').textContent = profile.role;
+                    document.getElementById('profile-fullname').textContent = profile.full_name || 'Not set';
+                    document.getElementById('profile-created').textContent = new Date(profile.created_at).toLocaleDateString();
+                    
+                    // Update status badge
+                    const statusBadge = profile.active 
+                        ? '<span style="display: inline-block; padding: 4px 12px; border-radius: 12px; background: #10b981; color: white; font-size: 0.85em; font-weight: 600;">Active</span>'
+                        : '<span style="display: inline-block; padding: 4px 12px; border-radius: 12px; background: #ff7979; color: white; font-size: 0.85em; font-weight: 600;">Inactive</span>';
+                    Security.safeSetHTML('profile-status', statusBadge);
+                }
+            } catch (error) {
+                console.error('Error loading profile:', error);
+            }
+        }
+        
+        function showDeleteConfirmation() {
+            document.getElementById('deleteModal').style.display = 'flex';
+        }
+        
+        function closeDeleteModal() {
+            document.getElementById('deleteModal').style.display = 'none';
+            document.getElementById('delete_password').value = '';
+        }
+        
+        async function deleteAccount(event) {
+            event.preventDefault();
+            
+            const password = document.getElementById('delete_password').value;
+            
+            if (!confirm('FINAL WARNING: Are you absolutely sure you want to delete your account? This cannot be undone!')) {
+                return false;
+            }
+            
+            try {
+                const formData = new FormData();
+                formData.append('password', password);
+                
+                const response = await fetch('/api/my-account', {
+                    method: 'DELETE',
+                    body: formData,
+                    credentials: 'same-origin'
+                });
+                
+                if (response.ok) {
+                    alert('Your account has been deleted. You will now be logged out.');
+                    window.location.href = '/login';
+                } else {
+                    const result = await response.json();
+                    alert('Error: ' + (result.detail || 'Failed to delete account. Please check your password.'));
+                }
+            } catch (error) {
+                alert('Error: ' + error.message);
+            }
+            
+            return false;
+        }
+        
+        // Close modal when clicking outside
+        document.getElementById('deleteModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeDeleteModal();
+            }
+        });
+        
+        // Load profile data on page load
+        loadProfileData();
+    </script>
+</body>
+</html>

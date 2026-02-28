@@ -1,0 +1,2 @@
+ERROR: Cannot install numpy==1.26.4, scipy==1.13.1 and tts==0.22.0 because these package versions have conflicting dependencies.
+ERROR: ResolutionImpossible: for help visit https://pip.pypa.io/en/latest/topics/dependency-resolution/#dealing-with-dependency-conflicts
