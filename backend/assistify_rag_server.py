@@ -43,6 +43,7 @@ from itsdangerous import URLSafeSerializer
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
+from typing import Optional, TYPE_CHECKING
 
 import io
 import wave
@@ -63,6 +64,10 @@ try:
 except ImportError:
     WHISPER_AVAILABLE = False
     WhisperModel = None
+
+if TYPE_CHECKING:
+    # Provide WhisperModel to type-checkers only. At runtime the name may be None
+    from faster_whisper import WhisperModel as _WhisperModel
 
 # ========== TEXT-TO-SPEECH: XTTS v2 Microservice (assistify_xtts env) ==========
 # XTTS v2 runs as a separate process in its own conda environment to avoid
@@ -216,8 +221,8 @@ app = FastAPI(title="Assistify RAG Voice Engine")
 # Global aiohttp session for LLM requests (reuse connections)
 llm_session: aiohttp.ClientSession = None
 
-# Global faster-whisper model
-whisper_model: WhisperModel = None
+# Global faster-whisper model (typing-safe forward reference)
+whisper_model: Optional['WhisperModel'] = None
 
 # XTTS v2 is now a separate microservice — no local model held in this process
 xtts_model = None  # kept for status endpoint backward compat
