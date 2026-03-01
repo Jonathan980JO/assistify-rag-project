@@ -31,10 +31,12 @@ import wave
 from contextlib import asynccontextmanager
 from threading import Lock
 
+import struct
+
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -191,6 +193,17 @@ def _chunks_to_wav(samples_list: list[list]) -> bytes:
     return buf.getvalue()
 
 
+def _make_streaming_wav_header(sample_rate: int = 24000, bits_per_sample: int = 16, channels: int = 1) -> bytes:
+    """Create a 44-byte WAV header with max-size placeholders for streaming."""
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    header  = struct.pack('<4sI4s', b'RIFF', 0x7FFFFFFF, b'WAVE')
+    header += struct.pack('<4sIHHIIHH',
+        b'fmt ', 16, 1, channels, sample_rate, byte_rate, block_align, bits_per_sample)
+    header += struct.pack('<4sI', b'data', 0x7FFFFFFF)
+    return header
+
+
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
@@ -285,70 +298,75 @@ def synthesize(req: SynthesizeRequest):
         len(text), len(chunks), req.speaker,
     )
 
-    t0 = time.time()
-    samples_list: list[list] = []
+    def audio_generator():
+        global _cuda_poisoned
+        t_start = time.perf_counter()
+        vram_before = _vram_used_mb()
+        first_chunk_latency = None
+        header_sent = False
 
-    with _model_lock:
-        for i, chunk in enumerate(chunks):
-            logger.debug("  chunk %d/%d (%d chars): %s", i + 1, len(chunks), len(chunk), chunk[:60])
-            try:
-                samples = _tts.tts(
-                    text=chunk,
-                    speaker=req.speaker,
-                    language=req.language,
-                )
-                samples_list.append(samples)
-            except KeyError as exc:
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Unknown speaker: {exc}. Use GET /speakers for valid names.",
-                )
-            except (RuntimeError, Exception) as exc:
-                err_str = str(exc)
-                is_cuda_err = (
-                    "CUDA error" in err_str
-                    or "device-side assert" in err_str
-                    or "srcIndex < srcSelectDimSize" in err_str
-                )
-                if is_cuda_err:
-                    _cuda_poisoned = True
-                    logger.error(
-                        "CUDA assertion error on chunk %d — VRAM state poisoned. "
-                        "Model will auto-reload on next request. "
-                        "Chunk was (%d chars): %s",
-                        i + 1, len(chunk), chunk[:120],
+        with _model_lock:
+            for i, chunk in enumerate(chunks):
+                logger.debug("  chunk %d/%d (%d chars): %s", i + 1, len(chunks), len(chunk), chunk[:60])
+                try:
+                    samples = _tts.tts(
+                        text=chunk,
+                        speaker=req.speaker,
+                        language=req.language,
                     )
-                    # Flush CUDA to avoid further corruption
-                    try:
-                        torch.cuda.empty_cache()
-                    except Exception:
-                        pass
-                    raise HTTPException(
-                        status_code=500,
-                        detail=(
-                            f"XTTS CUDA error on chunk {i+1}/{len(chunks)}. "
-                            "Model will auto-recover on next request. "
-                            f"Problematic text ({len(chunk)} chars): '{chunk[:80]}...'"
-                        ),
+                    if first_chunk_latency is None:
+                        first_chunk_latency = (time.perf_counter() - t_start) * 1000
+                        logger.info("First chunk latency: %.0f ms", first_chunk_latency)
+
+                    audio_np = np.array(samples, dtype=np.float32)
+                    audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+                    pcm_bytes = audio_int16.tobytes()
+
+                    if not header_sent:
+                        yield _make_streaming_wav_header()
+                        header_sent = True
+
+                    yield pcm_bytes
+
+                except KeyError as exc:
+                    logger.error("Unknown speaker '%s': %s", req.speaker, exc)
+                    return
+                except (RuntimeError, Exception) as exc:
+                    err_str = str(exc)
+                    is_cuda_err = (
+                        "CUDA error" in err_str
+                        or "device-side assert" in err_str
+                        or "srcIndex < srcSelectDimSize" in err_str
                     )
-                logger.exception("Synthesis failed on chunk %d: %s", i + 1, exc)
-                raise HTTPException(status_code=500, detail=str(exc))
+                    if is_cuda_err:
+                        _cuda_poisoned = True
+                        logger.error(
+                            "CUDA assertion error on chunk %d — VRAM state poisoned. "
+                            "Model will auto-reload on next request. "
+                            "Chunk was (%d chars): %s",
+                            i + 1, len(chunk), chunk[:120],
+                        )
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    logger.exception("Synthesis failed on chunk %d: %s", i + 1, exc)
+                    return
 
-    latency_ms = (time.time() - t0) * 1000
-    logger.info(
-        "Done: %d chunk(s) | latency=%.0f ms | VRAM=%.0f MB",
-        len(chunks), latency_ms, _vram_used_mb(),
-    )
+        latency_ms = (time.perf_counter() - t_start) * 1000
+        vram_after = _vram_used_mb()
+        logger.info(
+            "Done: %d chunk(s) | latency=%.0f ms | VRAM=%.0f MB (first_chunk=%.0f ms)",
+            len(chunks), latency_ms, vram_after, first_chunk_latency or 0,
+        )
 
-    wav_bytes = _chunks_to_wav(samples_list)
-    return Response(
-        content=wav_bytes,
+    return StreamingResponse(
+        audio_generator(),
         media_type="audio/wav",
         headers={
-            "X-Latency-Ms": str(int(latency_ms)),
-            "X-VRAM-MB": str(int(_vram_used_mb())),
             "X-Chunks": str(len(chunks)),
             "Content-Disposition": 'attachment; filename="speech.wav"',
+            "Cache-Control": "no-cache",
         },
     )
 

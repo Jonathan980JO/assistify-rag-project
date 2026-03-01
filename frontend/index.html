@@ -380,11 +380,159 @@
     let bargeInThreshold = 0.04;     // energy threshold for barge-in detection
     let consecutiveVoiceFrames = 0;  // consecutive high-energy frames during TTS
     let bargeInFramesNeeded = 3;     // ~200ms to confirm user is speaking
+    let _active_timing = {};         // timing metadata for latency report
+
+    // Latency reporting — used globally by TTS and WebSocket handlers
+    function logLatencyReport(timing, fromXTTS = false) {
+      if (timing) {
+        Object.assign(_active_timing, timing);
+      }
+      if (!fromXTTS) return; // Wait until XTTS details arrive
+
+      const t = _active_timing;
+      if (!t.stt_end || !t.xtts_full_gen) return;
+
+      const speech_to_stt = (t.stt_start - t.speech_end) * 1000;
+      const stt_dur = (t.stt_end - t.stt_start) * 1000;
+      const llm_first = (t.llm_first_token - t.llm_send) * 1000;
+      const xtts_first = t.xtts_first_chunk; 
+      const stt_to_llm = (t.llm_send - t.stt_end) * 1000;
+      const total = speech_to_stt + stt_dur + stt_to_llm + llm_first + xtts_first;
+
+      console.log("=== VOICE PIPELINE LATENCY REPORT ===");
+      console.log(`Speech End → STT Start: ${speech_to_stt.toFixed(0)} ms`);
+      console.log(`STT Duration: ${stt_dur.toFixed(0)} ms`);
+      console.log(`LLM First Token: ${llm_first.toFixed(0)} ms`);
+      console.log(`XTTS First Audio: ${xtts_first.toFixed(0)} ms`);
+      console.log(`Total Latency: ${total.toFixed(0)} ms`);
+      console.log("=== END LATENCY REPORT ===");
+      
+      _active_timing = {}; // reset
+    }
+
+    // ---- WebSocket-streamed TTS audio (server-side pipeline) ----
+    let _wsAudioState = 'idle'; // 'idle' | 'buffering' | 'playing'
+    let _wsScheduledTime = 0;
+    let _wsPendingChunks = []; // Float32Array chunks before playback starts
+    let _wsPendingDuration = 0;
+    let _wsFirstChunkLogged = false;
+    const WS_PREBUFFER_SECS = 0.3; // minimum buffer before starting playback
+
+    function _handleTtsAudioStart(data) {
+      const ctx = _getTTSAudioContext();
+      if (_wsAudioState === 'idle') {
+        _wsAudioState = 'buffering';
+        _wsPendingChunks = [];
+        _wsPendingDuration = 0;
+        _wsScheduledTime = ctx.currentTime + 0.05;
+        _wsFirstChunkLogged = false;
+      }
+      isTTSPlaying = true;
+      if (_liveCallMode && isRecording) {
+        pauseAudioSending = true;
+      }
+      showAISpeaking();
+    }
+
+    function _handleWsAudioChunk(arrayBuffer) {
+      if (_wsAudioState === 'idle') return;
+
+      const int16 = new Int16Array(arrayBuffer);
+      if (int16.length === 0) return;
+
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+      if (!_wsFirstChunkLogged) {
+        _wsFirstChunkLogged = true;
+        _active_timing.audio_playback_start = performance.now() / 1000;
+        logLatencyReport(null, true);
+        console.log('[TTS-WS] First audio chunk received from server');
+      }
+
+      if (_wsAudioState === 'buffering') {
+        _wsPendingChunks.push(float32);
+        _wsPendingDuration += float32.length / 24000;
+        if (_wsPendingDuration >= WS_PREBUFFER_SECS) {
+          _wsAudioState = 'playing';
+          _scheduleAllPending();
+        }
+      } else if (_wsAudioState === 'playing') {
+        _scheduleAudioChunk(float32);
+      }
+    }
+
+    function _scheduleAllPending() {
+      while (_wsPendingChunks.length > 0) {
+        _scheduleAudioChunk(_wsPendingChunks.shift());
+      }
+      _wsPendingDuration = 0;
+    }
+
+    function _scheduleAudioChunk(float32) {
+      const ctx = _getTTSAudioContext();
+      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(_ttsGainNode);
+
+      // Jitter buffer: never let scheduledTime fall behind currentTime
+      if (_wsScheduledTime < ctx.currentTime) {
+        _wsScheduledTime = ctx.currentTime + 0.02;
+      }
+
+      source.start(_wsScheduledTime);
+      _ttsSources.push(source);
+      _wsScheduledTime += audioBuffer.duration;
+    }
+
+    function _handleTtsAudioEnd() {
+      // Flush any remaining buffered audio
+      if (_wsAudioState === 'buffering' && _wsPendingChunks.length > 0) {
+        _wsAudioState = 'playing';
+        _scheduleAllPending();
+      }
+      // More sentences may follow — don't reset to idle
+    }
+
+    function _handleTtsComplete() {
+      // Called from aiResponseDone — all sentences done
+      if (_wsPendingChunks.length > 0) {
+        _scheduleAllPending();
+      }
+
+      const ctx = _getTTSAudioContext();
+      const remaining = Math.max(0, _wsScheduledTime - ctx.currentTime);
+
+      setTimeout(() => {
+        _wsAudioState = 'idle';
+        isTTSPlaying = false;
+        pauseAudioSending = false;
+        hideAISpeaking();
+
+        // Clean up finished sources
+        for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+        _ttsSources = [];
+
+        // Resume mic in live call mode
+        if (_liveCallMode) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+          }
+          if (!isRecording) {
+            startRecording(true);
+          }
+        }
+      }, remaining * 1000 + 300);
+    }
 
     function connectWebSocket() {
       ws = new WebSocket(wsUrl);
-      
+      ws.binaryType = 'arraybuffer'; // receive binary TTS audio as ArrayBuffer
+
       ws.onopen = () => {
+        console.log("[DEBUG] WebSocket connected successfully");
         appendMsg('system', 'Connected to Assistify RAG system.');
         reconnectAttempts = 0;
       };
@@ -405,15 +553,37 @@
       };
 
       ws.onmessage = event => {
+      // Handle binary audio data from server-side TTS pipeline
+      if (event.data instanceof ArrayBuffer) {
+        _handleWsAudioChunk(event.data);
+        return;
+      }
+
       try {
         const data = JSON.parse(event.data);
+        if (data.timing) {
+          console.log(`[TIMING] Received timing data:`, data.timing);
+          Object.assign(_active_timing, data.timing);
+        }
 
         if(data.type === 'thinking') {
           // AI is about to generate — show thinking animation
           showThinking();
 
+        } else if(data.type === 'ttsAudioStart') {
+          // Server-side TTS audio stream starting for a sentence
+          _handleTtsAudioStart(data);
+
+        } else if(data.type === 'ttsAudioEnd') {
+          // Server-side TTS audio stream ended for a sentence
+          _handleTtsAudioEnd();
+
+        } else if(data.type === 'ttsFallback') {
+          // XTTS unavailable — use browser speech synthesis
+          _speakBrowser(data.text);
+
         } else if(data.type === 'aiResponseChunk') {
-          // Streaming: one sentence at a time
+          // Streaming: one sentence at a time (text display only — TTS handled server-side)
           hideThinking();
           showAISpeaking();
           handleResponseChunk(data.text, data.index);
@@ -424,7 +594,7 @@
           } else if (!_liveCallMode && isRecording) {
             stopRecording(true);
           }
-          addToTTSQueue(data.text);
+          // TTS is now streamed server-side via WebSocket binary — no addToTTSQueue
 
         } else if(data.type === 'aiResponseDone') {
           // Streaming complete
@@ -433,6 +603,17 @@
             lastAIResponse = data.fullText;
             finalizeStreamingDisplay(data.fullText);
           }
+          // Log server-side latency metrics (Phase 6)
+          if (data.latency) {
+            console.log('=== SERVER LATENCY REPORT ===');
+            console.log('LLM First Token:', data.latency.first_token_ms, 'ms');
+            console.log('First Sentence:', data.latency.first_sentence_ms, 'ms');
+            console.log('First TTS Chunk:', data.latency.first_tts_chunk_ms, 'ms');
+            console.log('Total Pipeline:', data.latency.total_ms, 'ms');
+            console.log('=== END SERVER LATENCY ===');
+          }
+          // Wait for all TTS audio to finish playing
+          _handleTtsComplete();
 
         } else if(data.type === 'aiResponse') {
           // Fallback: non-streaming full response
@@ -505,6 +686,7 @@
     let _liveCallMode = false; // true while user is in a live voice session
 
     btnStart.onclick = async () => {
+      console.log("[DEBUG] btnStart clicked");
       _unlockAudio();
       _liveCallMode = true;
       await startRecording();
@@ -519,7 +701,12 @@
     btnStop.onclick = () => {
       _liveCallMode = false; // end live-call mode — no auto-resume
       if(isRecording) stopRecording();
+      // Stop WebSocket-streamed audio pipeline
+      _wsAudioState = 'idle';
+      _wsPendingChunks = [];
+      _wsPendingDuration = 0;
       // Stop any playing TTS and clear queue
+      _stopStreamingAudio();
       if(_currentTTSAudio) { try { _currentTTSAudio.pause(); } catch(e){} _currentTTSAudio = null; }
       try { audioPlayer.pause(); audioPlayer.src = ''; audioPlayer.onended = null; audioPlayer.onerror = null; } catch(e){}
       if (window.speechSynthesis) speechSynthesis.cancel();
@@ -543,6 +730,139 @@
     // -------- XTTS v2 Text-to-Speech (Queue-based for streaming) --------
     const audioPlayer = document.getElementById('audioPlayer');
     let _currentTTSAudio = null; // track active audio so we can stop it
+
+    // ---- Streaming TTS via Web Audio API ----
+    let _ttsAudioCtx = null;
+    let _ttsGainNode = null;
+    let _ttsSources = [];
+    let _ttsStreamAbort = null;
+
+    function _getTTSAudioContext() {
+      if (!_ttsAudioCtx || _ttsAudioCtx.state === 'closed') {
+        _ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        _ttsGainNode = _ttsAudioCtx.createGain();
+        _ttsGainNode.connect(_ttsAudioCtx.destination);
+      }
+      if (_ttsAudioCtx.state === 'suspended') _ttsAudioCtx.resume();
+      return _ttsAudioCtx;
+    }
+
+    function _stopStreamingAudio() {
+      if (_ttsStreamAbort) { _ttsStreamAbort.abort(); _ttsStreamAbort = null; }
+      for (const src of _ttsSources) {
+        try { src.stop(); src.disconnect(); } catch(e) {}
+      }
+      _ttsSources = [];
+    }
+
+    function _concatUint8(a, b) {
+      const c = new Uint8Array(a.length + b.length);
+      c.set(a); c.set(b, a.length);
+      return c;
+    }
+
+    async function _playStreamingTTS(sentence) {
+      const audioCtx = _getTTSAudioContext();
+      _ttsStreamAbort = new AbortController();
+      _ttsSources = [];
+
+      const t_xtts_start = performance.now() / 1000;
+      const resp = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: sentence }),
+        credentials: 'include',
+        signal: _ttsStreamAbort.signal,
+      });
+
+      if (!resp.ok) throw new Error('XTTS HTTP ' + resp.status + ': ' + (await resp.text().catch(() => '')));
+
+      const reader = resp.body.getReader();
+      let headerBuf = new Uint8Array(0);
+      let headerSkipped = false;
+      let remainder = new Uint8Array(0);
+      let scheduledTime = audioCtx.currentTime + 0.05;
+      let firstChunkPlayed = false;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          let data = value;
+
+          // Skip 44-byte WAV header
+          if (!headerSkipped) {
+            headerBuf = _concatUint8(headerBuf, data);
+            if (headerBuf.length < 44) continue;
+            data = headerBuf.slice(44);
+            headerSkipped = true;
+            headerBuf = new Uint8Array(0);
+            if (data.length === 0) continue;
+          }
+
+          // Prepend leftover byte from previous chunk (PCM = 2 bytes/sample)
+          if (remainder.length > 0) {
+            data = _concatUint8(remainder, data);
+            remainder = new Uint8Array(0);
+          }
+          if (data.length % 2 !== 0) {
+            remainder = data.slice(data.length - 1);
+            data = data.slice(0, data.length - 1);
+          }
+          if (data.length < 2) continue;
+
+          // Copy to aligned buffer then convert int16 → float32
+          const aligned = new Uint8Array(data.length);
+          aligned.set(data);
+          const int16 = new Int16Array(aligned.buffer);
+          const float32 = new Float32Array(int16.length);
+          for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+          // Schedule audio buffer
+          const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
+          audioBuffer.getChannelData(0).set(float32);
+          const source = audioCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(_ttsGainNode);
+          if (scheduledTime < audioCtx.currentTime) scheduledTime = audioCtx.currentTime;
+          source.start(scheduledTime);
+          _ttsSources.push(source);
+          scheduledTime += audioBuffer.duration;
+
+          if (!firstChunkPlayed) {
+            firstChunkPlayed = true;
+            _active_timing.audio_playback_start = performance.now() / 1000;
+            _active_timing.xtts_start = t_xtts_start;
+            logLatencyReport(null, true);
+            console.log('[TTS] Streaming: first audio chunk scheduled');
+          }
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          console.log('[TTS] Stream aborted (barge-in)');
+          return true;
+        }
+        throw e;
+      }
+
+      if (!firstChunkPlayed) return false;
+
+      // Wait for all scheduled audio to finish
+      const remaining = Math.max(0, scheduledTime - audioCtx.currentTime);
+      if (remaining > 0 && _ttsSources.length > 0) {
+        await new Promise(resolve => {
+          const lastSrc = _ttsSources[_ttsSources.length - 1];
+          lastSrc.onended = resolve;
+          setTimeout(resolve, remaining * 1000 + 300);
+        });
+      }
+
+      // Clean up finished sources
+      for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+      _ttsSources = [];
+      return true;
+    }
 
     // Unlock autoplay on first user gesture (button click or form submit)
     // Without this, browsers silently block audio.play() from async/WS contexts.
@@ -726,41 +1046,14 @@
         prefetchTTS(ttsQueue[0]);
       }
 
-      // ---- Try server TTS (XTTS) — fetch and play are separated so a play() hiccup
-      //      does NOT disable XTTS for future sentences.
+      // ---- Try server TTS (XTTS) — cached sentences play via <audio>,
+      //      non-cached sentences stream via Web Audio API.
       let serverOK = false;
       if (_xttsAvailable) {
-        let url = null;
-        // Step 1: get the audio URL (from prefetch cache or a fresh fetch)
-        try {
-          if (ttsPrefetchCache[sentence]) {
-            url = ttsPrefetchCache[sentence];
-            delete ttsPrefetchCache[sentence];
-          } else {
-            const controller = new AbortController();
-            const abortTimer = setTimeout(() => controller.abort(), 90000); // 90s — XTTS first-load can be slow
-            const resp = await fetch('/tts', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ text: sentence }),
-              credentials: 'include',
-              signal: controller.signal,
-            });
-            clearTimeout(abortTimer);
-            if (!resp.ok) {
-              throw new Error('XTTS HTTP ' + resp.status + ': ' + (await resp.text().catch(()=>'')));
-            }
-            const blob = await resp.blob();
-            url = URL.createObjectURL(blob);
-          }
-        } catch (fetchErr) {
-          console.warn('[TTS] XTTS fetch failed:', fetchErr.message || fetchErr);
-          _disableXttsMomentarily();
-          url = null;
-        }
-
-        // Step 2: play the fetched audio (failure here does NOT disable XTTS server)
-        if (url) {
+        if (ttsPrefetchCache[sentence]) {
+          // Play from prefetch cache via <audio> element (already fully loaded)
+          const url = ttsPrefetchCache[sentence];
+          delete ttsPrefetchCache[sentence];
           try {
             audioPlayer.src = url;
             _currentTTSAudio = audioPlayer;
@@ -780,16 +1073,30 @@
                 reject(e);
               };
               const p = audioPlayer.play();
-              if (p) p.catch(reject);
+              if (p) {
+                p.then(() => {
+                  _active_timing.audio_playback_start = performance.now() / 1000;
+                  logLatencyReport(null, true);
+                }).catch(reject);
+              }
             });
             serverOK = true;
           } catch (playErr) {
-            console.warn('[TTS] Audio play() failed (browser policy?):', playErr.message || playErr);
-            // XTTS fetch worked fine — do NOT disable it. Just use browser speech for this sentence.
+            console.warn('[TTS] Cached audio play() failed:', playErr.message || playErr);
             URL.revokeObjectURL(url);
             _currentTTSAudio = null;
             audioPlayer.onended = null;
             audioPlayer.onerror = null;
+          }
+        } else {
+          // Stream via Web Audio API — no full buffering
+          try {
+            serverOK = await _playStreamingTTS(sentence);
+          } catch (err) {
+            if (err.name !== 'AbortError') {
+              console.warn('[TTS] Streaming playback error:', err.message || err);
+              _disableXttsMomentarily();
+            }
           }
         }
       }
@@ -856,6 +1163,14 @@
       console.log('[Barge-in] User speaking — interrupting AI');
       consecutiveVoiceFrames = 0;
 
+      // Stop WebSocket-streamed audio pipeline
+      _wsAudioState = 'idle';
+      _wsPendingChunks = [];
+      _wsPendingDuration = 0;
+
+      // Stop streaming Web Audio API playback
+      _stopStreamingAudio();
+
       // Stop current TTS audio
       if (_currentTTSAudio) {
         try { _currentTTSAudio.pause(); _currentTTSAudio.currentTime = 0; } catch(e){}
@@ -901,12 +1216,15 @@
     }
 
     async function startRecording(silent = false) {
+      console.log("[DEBUG] startRecording called");
       if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         appendMsg('system', 'Voice not supported in this browser.');
+        console.error("[ERROR] getUserMedia not available");
         return;
       }
       
       try {
+        console.log("[DEBUG] Requesting audio stream...");
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         // Echo cancellation + noise suppression to prevent Whisper from capturing AI voice
         mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -916,6 +1234,7 @@
             autoGainControl: true
           }
         });
+        console.log("[DEBUG] Audio stream acquired");
         const source = audioContext.createMediaStreamSource(mediaStream);
         
         processor = audioContext.createScriptProcessor(4096, 1, 1);
@@ -965,6 +1284,7 @@
         showWaveform();
         if (!silent) appendMsg('system', '[🎤 Recording started - speak now]');
       } catch(err) {
+        console.error("[ERROR] startRecording failed:", err);
         appendMsg('system', 'Could not start voice recording: ' + err.message);
       }
     }

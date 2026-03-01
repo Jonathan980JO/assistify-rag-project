@@ -135,11 +135,12 @@ OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", "11434"))
 OLLAMA_CLI = os.getenv("OLLAMA_CLI", "ollama")
 
 # Speech Recognition - faster-whisper (replaces Vosk)
-WHISPER_MODEL_PATH = Path(os.getenv("WHISPER_MODEL_PATH", str(ROOT / "backend" / "Models" / "faster-whisper-medium.en")))
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "medium.en")  # medium.en for best balance
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")  # cuda (GPU required for real-time)
-WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "float16")  # float16 for GPU
-WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+# STABILIZATION: tiny.en on CPU with int8 to free GPU entirely for LLM + XTTS
+WHISPER_MODEL_PATH = Path(os.getenv("WHISPER_MODEL_PATH", str(ROOT / "backend" / "Models" / "faster-whisper-tiny.en")))
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny.en")  # tiny.en — CPU-only, frees GPU
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")  # cpu — GPU reserved for LLM + XTTS
+WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")  # int8 for CPU efficiency
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "1"))  # beam=1 for speed
 WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() == "true"  # Voice Activity Detection
 
 # Legacy (deprecated - keeping for migration)
