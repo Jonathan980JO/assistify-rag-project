@@ -222,7 +222,7 @@ app = FastAPI(title="Assistify RAG Voice Engine")
 llm_session: aiohttp.ClientSession = None
 
 # Global faster-whisper model (typing-safe forward reference)
-whisper_model: Optional['WhisperModel'] = None
+whisper_model: Optional['_WhisperModel'] = None
 
 # XTTS v2 is now a separate microservice — no local model held in this process
 xtts_model = None  # kept for status endpoint backward compat
