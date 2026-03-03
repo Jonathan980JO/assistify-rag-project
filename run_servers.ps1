@@ -17,7 +17,7 @@ $ErrorActionPreference = "Continue"
 # 1. GPU environment — MUST be set before Ollama and before Python subprocesses
 # ---------------------------------------------------------------------------
 $env:CUDA_VISIBLE_DEVICES  = "0"
-$env:OLLAMA_KEEP_ALIVE     = "5m"
+$env:OLLAMA_KEEP_ALIVE     = "-1"   # never unload model from VRAM
 $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
 
 # ---------------------------------------------------------------------------

@@ -125,7 +125,9 @@ GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET", "YOUR_GOOGLE_CLIENT_SEC
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:7001/auth/google/callback")
 
 # Model & service endpoints
-LLM_URL = os.getenv("LLM_URL", "http://localhost:8000/v1/chat/completions")
+# Points directly to Ollama's built-in OpenAI-compatible endpoint.
+# main_llm_server.py is NOT used — it was just a redundant middleman.
+LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:11434/v1/chat/completions")
 
 # Ollama configuration — GPU inference via local Ollama service
 # Model name must match exactly what `ollama list` shows

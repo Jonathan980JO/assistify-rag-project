@@ -70,7 +70,21 @@ def init_analytics_db():
             session_duration_minutes INTEGER
         )
     """)
-    
+
+    # Knowledge Base document version/event log
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS kb_document_versions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            action TEXT,
+            filename TEXT,
+            chunks_added INTEGER DEFAULT 0,
+            chunks_deleted INTEGER DEFAULT 0,
+            kb_version INTEGER DEFAULT 1,
+            triggered_by TEXT DEFAULT 'system'
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -248,3 +262,130 @@ def get_recent_errors(limit=50):
     conn.close()
     return rows
 
+
+# ========== KNOWLEDGE BASE EVENT TRACKING ==========
+
+def log_kb_event(action: str, filename: str, chunks_added: int = 0, chunks_deleted: int = 0,
+                 kb_version: int = 0, triggered_by: str = "system"):
+    """Log a knowledge base document mutation event.
+
+    Args:
+        action: One of 'upload', 'update', 'delete', 'reindex', 'reindex_all', 'clear_cache'
+        filename: Affected filename (or '*' for bulk operations)
+        chunks_added: Number of new chunks indexed
+        chunks_deleted: Number of old chunks removed
+        kb_version: Global KB version counter at time of event
+        triggered_by: 'admin', 'watcher', or 'system'
+    """
+    try:
+        conn = sqlite3.connect(ANALYTICS_DB)
+        c = conn.cursor()
+        c.execute(
+            """INSERT INTO kb_document_versions
+               (action, filename, chunks_added, chunks_deleted, kb_version, triggered_by)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (action, filename, chunks_added, chunks_deleted, kb_version, triggered_by),
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass  # Analytics must never crash the caller
+
+
+def get_kb_events(limit: int = 100) -> list:
+    """Return recent KB mutation events, newest first."""
+    try:
+        conn = sqlite3.connect(ANALYTICS_DB)
+        c = conn.cursor()
+        c.execute(
+            """SELECT id, timestamp, action, filename, chunks_added, chunks_deleted,
+                      kb_version, triggered_by
+               FROM kb_document_versions
+               ORDER BY id DESC LIMIT ?""",
+            (limit,),
+        )
+        rows = c.fetchall()
+        conn.close()
+        return [
+            {
+                "id": r[0], "timestamp": r[1], "action": r[2], "filename": r[3],
+                "chunks_added": r[4], "chunks_deleted": r[5],
+                "kb_version": r[6], "triggered_by": r[7],
+            }
+            for r in rows
+        ]
+    except Exception:
+        return []
+
+
+def get_kb_stats(days: int = 30) -> dict:
+    """Return KB-specific performance metrics for the monitoring dashboard."""
+    try:
+        conn = sqlite3.connect(ANALYTICS_DB)
+        c = conn.cursor()
+        cutoff = (datetime.now() - timedelta(days=days)).isoformat()
+
+        # Total mutations in window
+        c.execute(
+            "SELECT COUNT(*), MAX(timestamp) FROM kb_document_versions WHERE timestamp > ?",
+            (cutoff,)
+        )
+        total_mutations, last_update = c.fetchone() or (0, None)
+
+        # Mutations by action type
+        c.execute(
+            """SELECT action, COUNT(*) as cnt FROM kb_document_versions
+               WHERE timestamp > ? GROUP BY action ORDER BY cnt DESC""",
+            (cutoff,)
+        )
+        mutations_by_action = [{"action": r[0], "count": r[1]} for r in c.fetchall()]
+
+        # Files changed most often
+        c.execute(
+            """SELECT filename, COUNT(*) as cnt FROM kb_document_versions
+               WHERE timestamp > ? AND filename != '*'
+               GROUP BY filename ORDER BY cnt DESC LIMIT 10""",
+            (cutoff,)
+        )
+        top_files = [{"filename": r[0], "mutations": r[1]} for r in c.fetchall()]
+
+        # RAG hit rate from usage_stats
+        c.execute(
+            """SELECT COUNT(*) as total,
+                      SUM(CASE WHEN rag_docs_found > 0 THEN 1 ELSE 0 END) as rag_hits,
+                      ROUND(AVG(response_time_ms), 1) as avg_ms
+               FROM usage_stats WHERE timestamp > ?""",
+            (cutoff,)
+        )
+        us = c.fetchone() or (0, 0, 0)
+        total_q, rag_hits, avg_ms = us
+        rag_hit_rate = round((rag_hits / total_q * 100) if total_q else 0, 1)
+
+        # Daily KB mutation trend (last 14 days)
+        c.execute(
+            """SELECT DATE(timestamp) as day, COUNT(*) as cnt
+               FROM kb_document_versions
+               WHERE timestamp > datetime('now', '-14 days')
+               GROUP BY day ORDER BY day""",
+        )
+        daily_mutations = [{"day": r[0], "count": r[1]} for r in c.fetchall()]
+
+        # Chunks: total added vs deleted (all time)
+        c.execute("SELECT SUM(chunks_added), SUM(chunks_deleted) FROM kb_document_versions")
+        ca, cd = c.fetchone() or (0, 0)
+
+        conn.close()
+        return {
+            "total_mutations": total_mutations,
+            "last_update": last_update,
+            "mutations_by_action": mutations_by_action,
+            "top_files": top_files,
+            "rag_hit_rate": rag_hit_rate,
+            "total_queries": total_q,
+            "avg_response_ms": avg_ms or 0,
+            "total_chunks_added": ca or 0,
+            "total_chunks_deleted": cd or 0,
+            "daily_mutations": daily_mutations,
+        }
+    except Exception as e:
+        return {"error": str(e)}

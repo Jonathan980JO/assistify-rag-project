@@ -99,7 +99,7 @@ except Exception:
     WHISPER_COMPUTE_TYPE = "float16"
     WHISPER_BEAM_SIZE = 5
     WHISPER_VAD_FILTER = True
-    LLM_URL = "http://localhost:8000/v1/chat/completions"
+    LLM_URL = "http://127.0.0.1:11434/v1/chat/completions"
     ASSETS_DIR = _P(__file__).resolve().parent / "assets"
     SESSION_SECRET = "X!3p7#9v@Yqe*rQ6CwZ8l&FbM%tUJdfPsoH1XEaN"
     SESSION_COOKIE = "session"
@@ -109,15 +109,15 @@ except Exception:
     OLLAMA_PORT = 11434
     OLLAMA_MODEL = "qwen2.5:3b"
 
-from backend.knowledge_base import search_documents, add_document
+from backend.knowledge_base import search_documents, add_document, chunk_and_add_document, delete_document, delete_documents_with_prefix, delete_documents_by_filename, update_document, find_base_doc_id_by_filename, list_uploaded_files
 from backend.database import init_database, save_conversation, start_session, end_session, get_stats
-from backend.analytics import init_analytics_db, log_usage
+from backend.analytics import init_analytics_db, log_usage, log_kb_event, get_kb_stats, get_kb_events
 from backend.response_validator import validate_response
 
 # ========== CONFIGURATION ==========
 SAMPLE_RATE = 16000
 
-# Ollama direct streaming URL (bypasses main_llm_server for streaming)
+# Ollama direct URL — all LLM calls go here, main_llm_server.py is NOT used
 OLLAMA_API_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
 # Track interrupt events per connection for barge-in support
@@ -198,19 +198,131 @@ def cleanup_old_conversations():
         if conn_id in conversation_history:
             del conversation_history[conn_id]
         del conversation_timestamps[conn_id]
-    
-    # If still too many conversations, remove oldest ones
-    if len(conversation_history) > MAX_CONVERSATIONS:
-        sorted_conversations = sorted(
-            conversation_timestamps.items(),
-            key=lambda x: x[1]
-        )
-        to_remove = len(conversation_history) - MAX_CONVERSATIONS
-        for conn_id, _ in sorted_conversations[:to_remove]:
-            if conn_id in conversation_history:
-                del conversation_history[conn_id]
-            if conn_id in conversation_timestamps:
-                del conversation_timestamps[conn_id]
+
+
+def clear_all_conversation_history():
+    """Wipe every in-memory conversation so stale KB answers are never reused.
+
+    Called automatically after a KB reindex to prevent the LLM from seeing
+    old Q&A pairs that contradict the updated knowledge base.
+    """
+    count = len(conversation_history)
+    conversation_history.clear()
+    conversation_timestamps.clear()
+    if count:
+        logger.info(f"Cleared {count} conversation(s) after KB reindex")
+
+
+async def flush_ollama_cache():
+    """Unload the Ollama model from GPU memory to flush its internal KV cache.
+
+    Ollama caches the model + KV state in VRAM.  After a KB change the old
+    cached context can cause the LLM to repeat stale answers even though the
+    RAG context is fresh.  Sending keep_alive=0 forces Ollama to unload the
+    model; it will be reloaded automatically on the next query with a clean
+    KV cache.
+    """
+    try:
+        import aiohttp as _aiohttp
+        ollama_url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "messages": [],
+            "keep_alive": "0"
+        }
+        async with _aiohttp.ClientSession() as _sess:
+            async with _sess.post(ollama_url, json=payload, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                logger.info(f"Ollama cache flush: status={resp.status} (model will reload on next query)")
+    except Exception as e:
+        logger.warning(f"Ollama cache flush failed (non-fatal): {e}")
+
+
+# ========== REAL-TIME KB EVENT BROADCAST ==========
+# All active user WebSocket connections (keyed by connection_id → WebSocket)
+_active_ws_connections: dict = {}
+# Admin KB-events subscribers (connected to /ws/kb-events)
+_kb_event_subscribers: set = set()
+# Global KB version counter — incremented on every mutation
+_kb_global_version: int = 0
+
+
+async def broadcast_kb_event(action: str, filename: str = "*",
+                              chunks_added: int = 0, chunks_deleted: int = 0,
+                              triggered_by: str = "admin"):
+    """Broadcast a KB mutation event to all connected sockets.
+
+    Sends:
+      - A ``kb_updated`` message to every active user chat session so the
+        frontend can show a "new information available" notice.
+      - The full event payload to every admin KB-events subscriber.
+    """
+    global _kb_global_version
+    _kb_global_version += 1
+    event = {
+        "type": "kb_updated",
+        "action": action,
+        "filename": filename,
+        "chunks_added": chunks_added,
+        "chunks_deleted": chunks_deleted,
+        "kb_version": _kb_global_version,
+        "triggered_by": triggered_by,
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+    # Persist the event to the analytics DB
+    log_kb_event(
+        action=action,
+        filename=filename,
+        chunks_added=chunks_added,
+        chunks_deleted=chunks_deleted,
+        kb_version=_kb_global_version,
+        triggered_by=triggered_by,
+    )
+
+    # Notify every active user session (chat WebSocket)
+    dead_conns = []
+    for conn_id, ws in list(_active_ws_connections.items()):
+        try:
+            await ws.send_json({
+                "type": "kb_updated",
+                "message": "Knowledge base was updated — your next reply will use the latest information.",
+                "kb_version": _kb_global_version,
+                "timestamp": event["timestamp"],
+            })
+        except Exception:
+            dead_conns.append(conn_id)
+    for conn_id in dead_conns:
+        _active_ws_connections.pop(conn_id, None)
+
+    # Broadcast full event to admin KB-events subscribers
+    dead_subs = []
+    for ws in list(_kb_event_subscribers):
+        try:
+            await ws.send_json(event)
+        except Exception:
+            dead_subs.append(ws)
+    for ws in dead_subs:
+        _kb_event_subscribers.discard(ws)
+
+    logger.info(f"KB broadcast: action={action} file={filename} v{_kb_global_version} "
+                f"→ {len(_active_ws_connections)} user sessions, "
+                f"{len(_kb_event_subscribers)} admin subscribers")
+
+
+async def invalidate_all_caches(action: str = "cache_clear", filename: str = "*",
+                                 chunks_added: int = 0, chunks_deleted: int = 0,
+                                 triggered_by: str = "admin"):
+    """Nuclear option: clear conversation history + flush Ollama KV cache + broadcast.
+
+    Call this after any KB mutation (upload, edit, delete, reindex) to
+    guarantee the next user query gets a fully fresh answer.
+    """
+    clear_all_conversation_history()
+    await flush_ollama_cache()
+    await broadcast_kb_event(action=action, filename=filename,
+                              chunks_added=chunks_added, chunks_deleted=chunks_deleted,
+                              triggered_by=triggered_by)
+    logger.info("All caches invalidated (conversations + Ollama KV cache)")
 
 # ========== ANALYTICS DB ==========
 ANALYTICS_DB = str(ANALYTICS_DB)
@@ -221,6 +333,10 @@ app = FastAPI(title="Assistify RAG Voice Engine")
 # Global aiohttp session for LLM requests (reuse connections)
 llm_session: aiohttp.ClientSession = None
 
+# Global aiohttp session for TTS requests (reuse connections, avoids TCP
+# handshake overhead on every query)
+tts_session: aiohttp.ClientSession = None
+
 # Global faster-whisper model (typing-safe forward reference)
 whisper_model: Optional['_WhisperModel'] = None
 
@@ -229,7 +345,7 @@ xtts_model = None  # kept for status endpoint backward compat
 
 @app.on_event("startup")
 async def startup_event():
-    global llm_session, whisper_model, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
+    global llm_session, tts_session, whisper_model, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     
     init_database()
     init_analytics_db()
@@ -248,8 +364,24 @@ async def startup_event():
         timeout=timeout,
         headers={'Connection': 'keep-alive'}
     )
+
+    # Create persistent session for TTS requests — avoids TCP handshake on
+    # every query (XTTS microservice on localhost:5002).
+    tts_connector = aiohttp.TCPConnector(
+        limit=4,
+        limit_per_host=2,
+        force_close=False,
+        enable_cleanup_closed=True,
+    )
+    tts_session = aiohttp.ClientSession(
+        connector=tts_connector,
+        timeout=aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None),
+        headers={'Connection': 'keep-alive'},
+    )
+
     logger.info("✓ Databases ready")
     logger.info("✓ Persistent LLM session created with connection pooling")
+    logger.info("✓ Persistent TTS session created")
     
     # Initialize faster-whisper (GPU required)
     if not WHISPER_AVAILABLE:
@@ -310,53 +442,250 @@ async def startup_event():
                        f"Start it with: start_xtts_service.bat  ({e})")
         xtts_model = None
 
-    # Fire-and-forget warmup — runs in the background, invisible to users
+    # Fire-and-forget warmups — run in the background, invisible to users
     asyncio.create_task(_warmup_llm())
+    asyncio.create_task(_warmup_xtts())
+
+    # Assets watcher: prefer watchdog (OS events) for instant reindexing,
+    # fallback to the polling watcher if watchdog isn't installed.
+    try:
+        from watchdog.observers import Observer
+        from watchdog.events import FileSystemEventHandler
+
+        class _AssetsHandler(FileSystemEventHandler):
+            def on_created(self, event):
+                if event.is_directory:
+                    return
+                try:
+                    fname = Path(event.src_path).name
+                    asyncio.get_event_loop().call_soon_threadsafe(
+                        lambda: asyncio.create_task(_reindex_file_auto(fname))
+                    )
+                except Exception:
+                    logger.exception("Assets handler on_created error")
+
+            def on_modified(self, event):
+                if event.is_directory:
+                    return
+                try:
+                    fname = Path(event.src_path).name
+                    asyncio.get_event_loop().call_soon_threadsafe(
+                        lambda: asyncio.create_task(_reindex_file_auto(fname))
+                    )
+                except Exception:
+                    logger.exception("Assets handler on_modified error")
+
+        observer = Observer()
+        observer.schedule(_AssetsHandler(), str(ASSETS_DIR), recursive=False)
+        observer.daemon = True
+        observer.start()
+        app.state.assets_observer = observer
+        logger.info("Assets watchdog started (watchdog installed)")
+    except Exception:
+        logger.info("watchdog not available — using polling assets watcher")
+        asyncio.create_task(_assets_watcher())
 
 async def _warmup_llm():
     """
-    Background task: silently sends a tiny prompt to Ollama right after startup
-    so the model weights are fully loaded into VRAM before the first real user
-    request arrives.  Nothing is stored; the response is discarded.
+    Background task: preload the Ollama model into VRAM on startup.
+
+    Uses the official Ollama preload method: POST /api/generate with no
+    prompt and keep_alive: -1.  This loads the model weights into GPU
+    memory and tells Ollama to NEVER evict them, so every user query
+    gets a fast first token instead of waiting 8+ seconds for a cold load.
     """
-    await asyncio.sleep(5)          # let the server finish binding / XTTS check
-    logger.info(f"[Warmup] Sending warmup prompt to {OLLAMA_MODEL} ...")
+    await asyncio.sleep(3)          # let server finish binding first
+    OLLAMA_BASE = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
+    preload_url = f"{OLLAMA_BASE}/api/generate"
+    logger.info(f"[Warmup] Preloading {OLLAMA_MODEL} into VRAM (keep_alive=-1)...")
     payload = {
         "model": OLLAMA_MODEL,
-        "messages": [{"role": "user", "content": "hi"}],
-        "stream": False,
+        "keep_alive": -1,   # never evict from VRAM
+        # No 'prompt' key — this is the official Ollama preload pattern.
+        # Ollama loads the model and returns immediately without generating tokens.
+        # IMPORTANT: num_ctx must match chat requests exactly, otherwise Ollama
+        # reloads the model on every chat call (causing 8-second cold-start delays).
         "options": {
-            "num_ctx": 512,
-            "temperature": 0.0,
-            "num_predict": 1,   # we only need 1 token — enough to load weights
+            "num_ctx": 2048,
+            "num_gpu": 99,
         },
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                OLLAMA_API_URL,
+                preload_url,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
                 if resp.status == 200:
-                    data = await resp.json()
-                    tok = data.get("message", {}).get("content", "").strip()
-                    logger.info(f"[Warmup] ✓ LLM warm — first token: {tok!r}")
+                    logger.info(f"[Warmup] ✓ {OLLAMA_MODEL} loaded into VRAM | keep_alive=forever")
                 else:
                     text = await resp.text()
-                    logger.warning(f"[Warmup] Ollama returned {resp.status}: {text[:120]}")
+                    logger.warning(f"[Warmup] Ollama preload returned {resp.status}: {text[:120]}")
     except Exception as e:
-        logger.warning(f"[Warmup] Warmup failed (model may not be running yet): {e}")
+        logger.warning(f"[Warmup] LLM preload failed (Ollama may not be running yet): {e}")
+
+
+async def _warmup_xtts():
+    """Background task: send a dummy TTS request to warm up the XTTS model.
+    
+    This loads the XTTS v2 model into GPU memory on startup, so the first
+    user TTS request doesn't trigger a cold-start load (which adds 2-3 seconds).
+    """
+    await asyncio.sleep(10)  # let the XTTS service finish initializing
+    logger.info(f"[Warmup] Sending TTS warmup request to {XTTS_SERVICE_URL}...")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{XTTS_SERVICE_URL}/synthesize",
+                json={
+                    "text": "test",
+                    "speaker": XTTS_SPEAKER,
+                    "language": XTTS_LANGUAGE,
+                },
+                timeout=aiohttp.ClientTimeout(total=60),
+            ) as resp:
+                if resp.status == 200:
+                    # Discard the audio — we only needed to trigger the load
+                    await resp.read()
+                    logger.info(f"[Warmup] ✓ XTTS model warmed up")
+                else:
+                    text = await resp.text()
+                    logger.warning(f"[Warmup] XTTS warmup returned {resp.status}: {text[:120]}")
+    except Exception as e:
+        logger.warning(f"[Warmup] XTTS warmup failed (service may not be running): {e}")
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    global llm_session
+    global llm_session, tts_session
     if llm_session and not llm_session.closed:
         await llm_session.close()
         logger.info("✓ LLM session closed")
+    if tts_session and not tts_session.closed:
+        await tts_session.close()
+        logger.info("✓ TTS session closed")
 
 logger.info("Initializing Assistify RAG System with faster-whisper...")
+
+
+async def _reindex_file_auto(filename: str):
+    """Background helper to reindex a file by filename.
+
+    Uses delete_documents_by_filename() to wipe ALL previous chunks for this
+    file (including any orphaned chunks with a different doc_id prefix created
+    during earlier buggy runs), then re-indexes with a stable doc_id.
+    Verifies the new content is searchable after write.
+    """
+    try:
+        save_path = ASSETS_DIR / filename
+        if not save_path.exists():
+            logger.warning(f"Assets watcher: file disappeared before reindex: {filename}")
+            return
+        content = save_path.read_bytes()
+        try:
+            text = content.decode("utf-8")
+        except Exception:
+            text = content.decode(errors="ignore")
+
+        if not text.strip():
+            logger.info(f"Assets watcher: skipping empty file: {filename}")
+            return
+
+        # ---- STEP 1: delete ALL existing chunks for this filename ----
+        deleted = delete_documents_by_filename(filename)
+        logger.info(f"Assets watcher [{filename}]: deleted {deleted} old chunk(s)")
+
+        # ---- STEP 2: build a stable doc_id from the filename itself ----
+        # We do NOT reuse a DB-derived doc_id because we just deleted everything.
+        # Using a deterministic prefix based on the filename makes future deletes
+        # reliable even across server restarts.
+        import re as _re
+        bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)  # strip UUID prefix if any
+        safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
+        doc_id = f"upload_{safe}"
+        metadata = {"source": "upload", "filename": filename}
+
+        added = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+                                        kb_version=_kb_global_version + 1)
+        logger.info(f"Assets watcher [{filename}]: indexed {added} new chunk(s) (doc_id={doc_id})")
+
+        # ---- STEP 3: invalidate all caches + broadcast KB event ----
+        await invalidate_all_caches(action="reindex", filename=filename,
+                                     chunks_added=added, chunks_deleted=deleted,
+                                     triggered_by="watcher")
+
+        # ---- STEP 4: verify the new content is searchable ----
+        first_line = text.strip().split('\n')[0][:80]
+        verify = search_documents(first_line, top_k=1, distance_threshold=1.5)
+        if verify:
+            logger.info(f"Assets watcher [{filename}]: ✓ verification OK — search returns: {verify[0][:60]}...")
+        else:
+            logger.warning(f"Assets watcher [{filename}]: ✗ verification FAILED — search returned nothing for: {first_line}")
+    except Exception as e:
+        logger.exception(f"Assets watcher reindex failed for {filename}: {e}")
+
+
+async def _assets_watcher(poll_interval: float = 5.0):
+    """Simple polling watcher for the ASSETS_DIR; reindexes changed/new files.
+
+    On the FIRST scan we only record mtimes — we do NOT reindex because the DB
+    already contains the data from the original upload.  We only reindex when a
+    file is genuinely modified AFTER the server started (mtime changed) or when
+    a brand-new file appears that was not present during the first scan.
+    """
+    logger.info("Assets watcher started (polling every %.1fs)", poll_interval)
+    seen: dict[str, float] = {}
+    first_scan_done = False
+    try:
+        while True:
+            try:
+                if not ASSETS_DIR.exists():
+                    await asyncio.sleep(poll_interval)
+                    continue
+                for p in ASSETS_DIR.iterdir():
+                    if not p.is_file():
+                        continue
+                    if p.suffix.lower() not in (".txt", ".pdf"):
+                        continue
+                    mtime = p.stat().st_mtime
+                    key = str(p.name)
+                    prev = seen.get(key)
+
+                    if not first_scan_done:
+                        # First scan: just record mtime, don't reindex
+                        seen[key] = mtime
+                    elif prev is None:
+                        # New file added after server started
+                        seen[key] = mtime
+                        logger.info("Assets watcher: new file detected: %s — reindexing", key)
+                        asyncio.create_task(_reindex_file_auto(key))
+                    elif mtime != prev:
+                        # Existing file was modified
+                        seen[key] = mtime
+                        logger.info("Assets watcher: file modified: %s — reindexing", key)
+                        asyncio.create_task(_reindex_file_auto(key))
+
+                if not first_scan_done:
+                    first_scan_done = True
+                    logger.info("Assets watcher: initial scan done — tracking %d file(s)", len(seen))
+
+                # Remove deleted files from seen
+                for key in list(seen.keys()):
+                    if not (ASSETS_DIR / key).exists():
+                        logger.info("Assets watcher: file removed: %s", key)
+                        del seen[key]
+
+            except Exception as e:
+                logger.exception(f"Assets watcher loop error: {e}")
+            await asyncio.sleep(poll_interval)
+    except asyncio.CancelledError:
+        logger.info("Assets watcher cancelled; shutting down")
+
+
+# The assets watcher will be started on application startup. We prefer
+# using an OS-level watcher (watchdog) when available for instant events;
+# otherwise the polling watcher `_assets_watcher` will be used as a fallback.
 
 app.add_middleware(
     CORSMiddleware,
@@ -425,37 +754,59 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         relevant_docs = []
     else:
         logger.info(f"RAG: Searching knowledge base for: {text}")
-        relevant_docs = search_documents(text, top_k=1)  # Only 1 doc for speed
+        relevant_docs = search_documents(text, top_k=3)
     
     # Build context using TOON format (40-60% token savings)
-    context = ""
+    context_block = ""
     if relevant_docs:
-        # Convert docs to TOON format for token efficiency
-        doc_dicts = []
-        for i, doc_text in enumerate(relevant_docs):
-            doc_dicts.append({
-                "page_content": doc_text,
-                "metadata": {"doc_id": i, "type": "support_info"}
-            })
-        
-        # Use TOON format instead of plain text
+        doc_dicts = [
+            {"page_content": doc_text, "metadata": {"doc_id": i, "type": "support_info"}}
+            for i, doc_text in enumerate(relevant_docs)
+        ]
         toon_context = format_rag_context_toon(doc_dicts)
-        context = f"\n{toon_context}\n"
-        
-        logger.info(f"RAG: Found {len(relevant_docs)} docs, formatted as TOON (token optimized)")
+        context_block = f"""
+
+===== KNOWLEDGE BASE — OVERRIDE YOUR TRAINING DATA =====
+{toon_context}
+========================================================
+
+CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
+1. Your answer MUST come ONLY from the KNOWLEDGE BASE above.
+2. IGNORE everything you learned during training about this topic.
+3. Even if the Knowledge Base contradicts popular knowledge, you MUST follow the Knowledge Base.
+4. State the Knowledge Base facts directly and confidently as the correct answer.
+5. Do NOT say "according to my knowledge" or "actually" — just state the KB facts.
+6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct."""
+        logger.info(f"RAG: Found {len(relevant_docs)} docs, injected as authoritative context")
     else:
         logger.info("RAG: No RAG context - using general knowledge")
-    
-    system_prompt = f"""You are Assistify, a helpful voice assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence. Avoid long lists or unnecessary explanations.{context}"""
+
+    # Lower temperature when KB context is present to stop the LLM drifting
+    # away from retrieved facts toward its own parametric knowledge.
+    effective_temperature = 0.2 if relevant_docs else 0.6
+
+    system_prompt = f"""You are Assistify, a helpful assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence.{context_block}"""
     messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history[-10:])  # Last 5 exchanges (sliding window)
+    # When KB context is present, skip conversation history to prevent stale
+    # old answers from overriding fresh KB data.  Without KB context, keep
+    # history for natural multi-turn conversation.
+    if not relevant_docs:
+        messages.extend(history[-10:])
     messages.append({"role": "user", "content": text.strip()})
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
         "max_tokens": 180,
-        "temperature": 0.6,
-        "stop": None
+        "temperature": effective_temperature,
+        "stream": False,
+        "keep_alive": -1,       # keep model in VRAM — no cold-reload penalty
+        "options": {
+            "num_ctx": 2048,    # must match warmup and streaming path
+            "num_gpu": 99,
+            "num_predict": 180,
+            "temperature": effective_temperature,
+            "top_p": 0.9,
+        },
     }
     username = user.get("username", "unknown")
     user_role = user.get("role", "unknown")
@@ -577,6 +928,40 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 import re as _re
 _sentence_end_pattern = _re.compile(r'(?<=[.!?])\s+')
 
+# ---------------------------------------------------------------------------
+# TTS text-quality helper: digit normalization only
+# ---------------------------------------------------------------------------
+
+def _normalize_digits_for_tts(text: str) -> str:
+    """Merge space-separated single-digit tokens into whole numbers,
+    reassemble spaced decimal points, and attach currency symbols.
+
+    Examples::
+
+        "4 6 7 goals"     → "467 goals"
+        "$ 3 9 . 9 9"     → "$39.99"
+        "$ 0 . 9 9"       → "$0.99"
+        "3 9 . 9 9 /month" → "39.99 /month"
+        "2 1 3"           → "213"
+
+    Applied only to text sent to XTTS — NOT to the displayed chat response.
+    """
+    # 1) Merge isolated single-digit sequences: "3 9" → "39"
+    text = _re.sub(
+        r'\b(\d)\b(?: \b(\d)\b)+',
+        lambda m: m.group(0).replace(' ', ''),
+        text,
+    )
+    # 2) Merge spaced decimal points: "39 . 99" → "39.99"
+    text = _re.sub(r'(\d) ?\. ?(\d)', r'\1.\2', text)
+    # 3) Attach currency symbol to following number: "$ 39.99" → "$39.99"
+    text = _re.sub(r'\$\s+(\d)', r'$\1', text)
+    return text
+
+
+# Adaptive TTS chunk sizing — adjusts words-per-chunk based on real-time perf
+from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
+
 async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: asyncio.Event = None, t_meta=None):
     """Stream LLM response with overlapping TTS via producer-consumer pipeline.
 
@@ -621,19 +1006,36 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     if is_greeting:
         relevant_docs = []
     else:
-        relevant_docs = search_documents(text, top_k=1)
+        relevant_docs = search_documents(text, top_k=3)
     
-    context = ""
+    context_block = ""
     if relevant_docs:
-        doc_dicts = []
-        for i, doc_text in enumerate(relevant_docs):
-            doc_dicts.append({"page_content": doc_text, "metadata": {"doc_id": i, "type": "support_info"}})
+        doc_dicts = [
+            {"page_content": doc_text, "metadata": {"doc_id": i, "type": "support_info"}}
+            for i, doc_text in enumerate(relevant_docs)
+        ]
         toon_context = format_rag_context_toon(doc_dicts)
-        context = f"\n{toon_context}\n"
+        context_block = f"""
+
+===== KNOWLEDGE BASE — OVERRIDE YOUR TRAINING DATA =====
+{toon_context}
+========================================================
+
+CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
+1. Your answer MUST come ONLY from the KNOWLEDGE BASE above.
+2. IGNORE everything you learned during training about this topic.
+3. Even if the Knowledge Base contradicts popular knowledge, you MUST follow the Knowledge Base.
+4. State the Knowledge Base facts directly and confidently as the correct answer.
+5. Do NOT say "according to my knowledge" or "actually" — just state the KB facts.
+6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct."""
+        logger.info(f"{connection_id} RAG: {len(relevant_docs)} docs injected as authoritative context")
     
-    system_prompt = f"""You are Assistify, a helpful voice assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence. Avoid long lists or unnecessary explanations.{context}"""
+    system_prompt = f"""You are Assistify, a helpful assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence.{context_block}"""
     messages = [{"role": "system", "content": system_prompt}]
-    messages.extend(history[-10:])  # Last 5 exchanges (sliding window)
+    # When KB context is present, skip conversation history to prevent stale
+    # old answers from overriding fresh KB data.
+    if not relevant_docs:
+        messages.extend(history[-10:])
     messages.append({"role": "user", "content": text.strip()})
     
     username = user.get("username", "unknown")
@@ -647,13 +1049,18 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         return
     
     # Ollama streaming payload — optimized for speed on 8GB VRAM
+    # Lower temperature when KB context is present to prevent the LLM drifting
+    # away from retrieved facts toward its own parametric knowledge.
+    effective_temperature = 0.2 if relevant_docs else 0.6
+
     payload = {
         "model": OLLAMA_MODEL,
         "messages": messages,
         "stream": True,
+        "keep_alive": -1,        # keep model in VRAM between requests
         "options": {
             "num_ctx": 2048,
-            "temperature": 0.6,
+            "temperature": effective_temperature,
             "top_p": 0.9,
             "num_predict": 180,
             "num_gpu": 99,
@@ -670,6 +1077,12 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     first_tts_chunk_time = None
     vram_llm_active = 0
 
+    # ---- Adaptive chunk sizing ----
+    adaptive_words, adaptive_buffer = adaptive_manager.begin_query()
+    logger.info(f"{connection_id} Adaptive TTS: words_per_chunk={adaptive_words} buffer={adaptive_buffer:.2f}s")
+    tts_chunk_count = 0
+    tts_total_time = 0.0
+
     # ---- Producer-Consumer Pipeline: LLM → Queue → TTS ----
     sentence_queue = asyncio.Queue()
     _ws_send_lock = asyncio.Lock()
@@ -683,11 +1096,63 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             await websocket.send_bytes(data)
 
     async def llm_producer():
-        """Stream tokens from Ollama, detect sentences, dispatch to TTS queue."""
+        """Stream tokens from Ollama and dispatch to TTS queue using a
+        timer + word-count state machine.
+
+        FIRST CHUNK — fire as fast as possible:
+          • 6-8 words accumulated  OR  700 ms since first LLM token
+          • Punctuation is *ignored* for the first chunk.
+
+        SUBSEQUENT CHUNKS — balance quality vs latency:
+          • target words (tier-dependent)  OR  500 ms buffer timeout
+          •   OR sentence end (preference, never a hard gate)
+          • Hard-max to prevent runaway accumulation.
+        """
         nonlocal full_response, sentence_index, first_token_time, first_sentence_time, vram_llm_active
-        sentence_buffer = ""
+        nonlocal adaptive_words
+        word_buffer: list[str] = []
+        first_chunk_sent = False
+        first_token_wall: float | None = None    # wall-clock of first LLM token
+        chunk_start_wall: float | None = None    # wall-clock when current chunk accumulation began
+
+        # Pre-fetch policy values from adaptive manager
+        fc_min   = adaptive_manager.first_chunk_min_words()
+        fc_max   = adaptive_manager.first_chunk_max_words()
+        fc_tmo   = adaptive_manager.first_chunk_timeout_s()
+        sub_tmo  = adaptive_manager.subsequent_timeout_s()
+
+        async def _flush_buffer():
+            """Send accumulated words to WebSocket + TTS queue, reset state."""
+            nonlocal word_buffer, sentence_index, first_sentence_time, chunk_start_wall, first_chunk_sent
+            chunk_text = " ".join(word_buffer).strip()
+            word_buffer = []
+            chunk_start_wall = None  # reset timer for next chunk
+
+            if not chunk_text or len(chunk_text) <= 3:
+                return
+
+            if first_sentence_time is None:
+                first_sentence_time = time.perf_counter()
+                t_meta["first_sentence_ready"] = first_sentence_time
+                logger.info(f"LATENCY [First Sentence Ready]: {(first_sentence_time - perf_start)*1000:.0f}ms")
+
+            try:
+                await _safe_ws_json({
+                    "type": "aiResponseChunk",
+                    "text": chunk_text,
+                    "index": sentence_index,
+                    "done": False,
+                    "timing": t_meta if sentence_index == 0 else None
+                })
+                sentence_index += 1
+            except Exception:
+                return
+
+            # Normalize spaced digits for TTS only (display text unchanged)
+            await sentence_queue.put(_normalize_digits_for_tts(chunk_text))
+            first_chunk_sent = True
+
         try:
-            # Increased timeout: 120s total, 60s sock_read for large responses
             timeout = aiohttp.ClientTimeout(total=120, connect=5, sock_read=60)
             async with aiohttp.ClientSession(timeout=timeout) as stream_session:
                 async with stream_session.post(OLLAMA_API_URL, json=payload) as resp:
@@ -727,56 +1192,86 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                         if not token:
                             continue
 
+                        now = time.perf_counter()
+
                         if first_token_time is None:
-                            first_token_time = time.perf_counter()
+                            first_token_time = now
+                            first_token_wall = now
                             t_meta["llm_first_token"] = first_token_time
                             logger.info(f"LATENCY [LLM First Token]: {(first_token_time - perf_start)*1000:.0f}ms")
                             if torch.cuda.is_available():
                                 vram_llm_active = torch.cuda.memory_reserved(0) / 1024**2
 
                         full_response += token
-                        sentence_buffer += token
 
-                        # Detect sentence boundaries (split on .!? followed by space)
-                        parts = _sentence_end_pattern.split(sentence_buffer)
+                        # Tokenise new token(s) into words and accumulate.
+                        # Sub-word joining: LLM tokenizers often split a word
+                        # across tokens (e.g. "Sc" + "anning").  Tokens that
+                        # continue the previous word arrive WITHOUT a leading
+                        # space.  Detect that and concatenate instead of
+                        # creating a new word in the buffer.
+                        new_words = token.split()
+                        if not new_words:
+                            continue
 
-                        if len(parts) > 1:
-                            for p_idx in range(len(parts) - 1):
-                                sentence = parts[p_idx].strip()
-                                if sentence and len(sentence) > 3:
-                                    if first_sentence_time is None:
-                                        first_sentence_time = time.perf_counter()
-                                        t_meta["first_sentence_ready"] = first_sentence_time
-                                        logger.info(f"LATENCY [First Sentence Ready]: {(first_sentence_time - perf_start)*1000:.0f}ms")
-                                    try:
-                                        await _safe_ws_json({
-                                            "type": "aiResponseChunk",
-                                            "text": sentence,
-                                            "index": sentence_index,
-                                            "done": False,
-                                            "timing": t_meta if sentence_index == 0 else None
-                                        })
-                                        sentence_index += 1
-                                    except Exception:
-                                        return
-                                    # Push sentence to TTS queue for overlapping synthesis
-                                    await sentence_queue.put(sentence)
-                            sentence_buffer = parts[-1]
+                        if word_buffer and token and not token[0].isspace():
+                            # Continuation token — join first part with last
+                            # buffered word, then extend with any remaining.
+                            word_buffer[-1] += new_words[0]
+                            word_buffer.extend(new_words[1:])
+                        else:
+                            word_buffer.extend(new_words)
 
-            # Send any remaining buffered text
-            remaining = sentence_buffer.strip()
-            if remaining and len(remaining) > 2:
-                try:
-                    await _safe_ws_json({
-                        "type": "aiResponseChunk",
-                        "text": remaining,
-                        "index": sentence_index,
-                        "done": False
-                    })
-                    sentence_index += 1
-                except Exception:
-                    pass
-                await sentence_queue.put(remaining)
+                        # Start the chunk timer when first word of this chunk arrives
+                        if chunk_start_wall is None:
+                            chunk_start_wall = now
+
+                        elapsed = now - chunk_start_wall
+                        n_words = len(word_buffer)
+
+                        # ========== FIRST CHUNK — hard override ==========
+                        # Completely isolated from adaptive tier logic.
+                        # No tier switching, no sentence detection, no tier
+                        # buffer timing.  Uses ONLY fixed word count + timer.
+                        if not first_chunk_sent:
+                            should_flush = (
+                                n_words >= fc_max                               # hard cap 8 words
+                                or n_words >= fc_min                             # min 6 words reached
+                                or (first_token_wall is not None
+                                    and (now - first_token_wall) >= fc_tmo)      # 700ms timeout
+                            )
+                            if should_flush and word_buffer:
+                                time_since_first_ms = (
+                                    (now - first_token_wall) * 1000
+                                    if first_token_wall is not None else 0.0
+                                )
+                                logger.info(
+                                    "FIRST CHUNK FLUSHED (override mode) "
+                                    "words=%d time_since_first_token=%.0fms",
+                                    len(word_buffer), time_since_first_ms,
+                                )
+                                await _flush_buffer()
+                            # CRITICAL: skip subsequent-chunk / tier logic
+                            # on every cycle until first chunk is sent.
+                            continue
+
+                        # ========== SUBSEQUENT CHUNKS — adaptive tier ==========
+                        has_sentence_end = bool(_re.search(r'[.!?]$', word_buffer[-1]))
+                        sub_target = adaptive_manager.subsequent_words()
+                        sub_hard   = adaptive_manager.subsequent_hard_max()
+
+                        should_flush = (
+                            n_words >= sub_hard                              # hard cap
+                            or (has_sentence_end and n_words >= sub_target)  # sentence end at target
+                            or elapsed >= sub_tmo                            # 500ms timeout
+                        )
+
+                        if should_flush and word_buffer:
+                            await _flush_buffer()
+
+            # Flush any remaining buffered words
+            if word_buffer:
+                await _flush_buffer()
 
         except asyncio.TimeoutError:
             mem = _get_memory_snapshot()
@@ -797,96 +1292,132 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             await sentence_queue.put(None)
 
     async def tts_consumer():
-        """Read sentences from queue, synthesize via XTTS, stream PCM audio over WebSocket."""
-        nonlocal first_tts_chunk_time
-        tts_timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None)
+        """Read chunks from queue, synthesize via XTTS, stream PCM audio over WebSocket.
+
+        Measures first-chunk latency and feeds it back to the
+        AdaptiveChunkManager so subsequent chunks (and future queries)
+        use an optimised word count.  Applies an inter-chunk buffer delay
+        when the system is classified as slow or medium.
+        """
+        nonlocal first_tts_chunk_time, adaptive_words, adaptive_buffer
+        nonlocal tts_chunk_count, tts_total_time
+        # Use the persistent global TTS session (avoids TCP setup cost per query).
+        # Fall back to a local session if the global is unavailable (e.g. during
+        # startup before startup_event has run).
+        _local_tts_session = None
+        _tts_sess = tts_session
+        if _tts_sess is None or _tts_sess.closed:
+            _local_tts_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None)
+            )
+            _tts_sess = _local_tts_session
         try:
-            async with aiohttp.ClientSession(timeout=tts_timeout) as tts_session:
-                while True:
-                    if cancel_event and cancel_event.is_set():
-                        break
+            while True:
+                if cancel_event and cancel_event.is_set():
+                    break
 
-                    sentence = await sentence_queue.get()
-                    if sentence is None:
-                        break
+                sentence = await sentence_queue.get()
+                if sentence is None:
+                    break
 
-                    if cancel_event and cancel_event.is_set():
-                        break
+                if cancel_event and cancel_event.is_set():
+                    break
 
-                    # Clean text for TTS
-                    clean = _re.sub(r'[\U00010000-\U0010ffff]', '', sentence, flags=_re.UNICODE).strip()
-                    if not clean:
-                        continue
+                # Clean text for TTS
+                clean = _re.sub(r'[\U00010000-\U0010ffff]', '', sentence, flags=_re.UNICODE).strip()
+                if not clean:
+                    continue
 
-                    try:
-                        await _safe_ws_json({"type": "ttsAudioStart", "sampleRate": 24000})
+                chunk_start = time.perf_counter()
 
-                        resp = await tts_session.post(
-                            f"{XTTS_SERVICE_URL}/synthesize",
-                            json={"text": clean, "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
-                        )
+                try:
+                    await _safe_ws_json({"type": "ttsAudioStart", "sampleRate": 24000})
 
-                        if resp.status == 200:
-                            header_skipped = False
-                            header_buf = b''
-                            pcm_remainder = b''
+                    resp = await _tts_sess.post(
+                        f"{XTTS_SERVICE_URL}/synthesize",
+                        json={"text": clean, "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
+                    )
 
-                            async for chunk in resp.content.iter_chunked(4096):
-                                if cancel_event and cancel_event.is_set():
-                                    break
+                    if resp.status == 200:
+                        header_skipped = False
+                        header_buf = b''
+                        pcm_remainder = b''
 
-                                if not header_skipped:
-                                    header_buf += chunk
-                                    if len(header_buf) >= 44:
-                                        data = header_buf[44:]
-                                        header_skipped = True
-                                        header_buf = b''
-                                        if not data:
-                                            continue
-                                    else:
+                        async for chunk in resp.content.iter_chunked(4096):
+                            if cancel_event and cancel_event.is_set():
+                                break
+
+                            if not header_skipped:
+                                header_buf += chunk
+                                if len(header_buf) >= 44:
+                                    data = header_buf[44:]
+                                    header_skipped = True
+                                    header_buf = b''
+                                    if not data:
                                         continue
                                 else:
-                                    data = chunk
+                                    continue
+                            else:
+                                data = chunk
 
-                                # Handle PCM16 alignment (2 bytes per sample)
-                                if pcm_remainder:
-                                    data = pcm_remainder + data
-                                    pcm_remainder = b''
-                                if len(data) % 2 != 0:
-                                    pcm_remainder = data[-1:]
-                                    data = data[:-1]
+                            # Handle PCM16 alignment (2 bytes per sample)
+                            if pcm_remainder:
+                                data = pcm_remainder + data
+                                pcm_remainder = b''
+                            if len(data) % 2 != 0:
+                                pcm_remainder = data[-1:]
+                                data = data[:-1]
 
-                                if data:
-                                    await _safe_ws_bytes(data)
-                                    if first_tts_chunk_time is None:
-                                        first_tts_chunk_time = time.perf_counter()
-                                        t_meta["first_tts_chunk"] = first_tts_chunk_time
-                                        logger.info(f"LATENCY [First TTS Chunk]: {(first_tts_chunk_time - perf_start)*1000:.0f}ms")
+                            if data:
+                                await _safe_ws_bytes(data)
+                                if first_tts_chunk_time is None:
+                                    first_tts_chunk_time = time.perf_counter()
+                                    t_meta["first_tts_chunk"] = first_tts_chunk_time
+                                    first_chunk_latency_s = first_tts_chunk_time - perf_start
+                                    logger.info(f"LATENCY [First TTS Chunk]: {first_chunk_latency_s*1000:.0f}ms")
 
-                            resp.close()
-                        else:
-                            detail = await resp.text()
-                            resp.close()
-                            logger.warning(f"XTTS returned {resp.status}: {detail[:100]}")
-                            await _safe_ws_json({"type": "ttsFallback", "text": clean})
+                                    # Feed latency into adaptive manager — may adjust mid-query
+                                    adaptive_words, adaptive_buffer = (
+                                        adaptive_manager.record_first_chunk_latency(first_chunk_latency_s)
+                                    )
 
+                        resp.close()
+
+                        # Track per-chunk timing
+                        chunk_elapsed = time.perf_counter() - chunk_start
+                        tts_chunk_count += 1
+                        tts_total_time += chunk_elapsed
+
+                    else:
+                        detail = await resp.text()
+                        resp.close()
+                        logger.warning(f"XTTS returned {resp.status}: {detail[:100]}")
+                        await _safe_ws_json({"type": "ttsFallback", "text": clean})
+
+                    await _safe_ws_json({"type": "ttsAudioEnd"})
+
+                    # ---- Buffer strategy: inter-chunk delay for slower systems ----
+                    if adaptive_buffer > 0:
+                        await asyncio.sleep(adaptive_buffer)
+
+                except aiohttp.ClientConnectorError:
+                    logger.warning("XTTS microservice unavailable for TTS consumer")
+                    try:
+                        await _safe_ws_json({"type": "ttsFallback", "text": clean})
                         await _safe_ws_json({"type": "ttsAudioEnd"})
-
-                    except aiohttp.ClientConnectorError:
-                        logger.warning("XTTS microservice unavailable for TTS consumer")
-                        try:
-                            await _safe_ws_json({"type": "ttsFallback", "text": clean})
-                            await _safe_ws_json({"type": "ttsAudioEnd"})
-                        except Exception:
-                            pass
-                    except Exception as e:
-                        logger.warning(f"TTS consumer error for sentence: {e}")
-                        try:
-                            await _safe_ws_json({"type": "ttsAudioEnd"})
-                        except Exception:
-                            pass
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f"TTS consumer error for sentence: {e}")
+                    try:
+                        await _safe_ws_json({"type": "ttsAudioEnd"})
+                    except Exception:
+                        pass
         except Exception as e:
             logger.warning(f"TTS consumer session error: {e}")
+        finally:
+            if _local_tts_session is not None and not _local_tts_session.closed:
+                await _local_tts_session.close()
 
     try:
         # Run LLM producer and TTS consumer concurrently — overlapping generation
@@ -916,11 +1447,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         first_tts_ms = ((first_tts_chunk_time - perf_start) * 1000) if first_tts_chunk_time else None
         total_ms = (t_llm_done - perf_start) * 1000
 
+        # Finalise adaptive chunk stats for this query
+        adaptive_manager.finish_query(tts_chunk_count, tts_total_time)
+        adaptive_stats = adaptive_manager.get_stats()
+
         logger.info(f"=== LATENCY REPORT [{connection_id}] ===")
         logger.info(f"  LLM First Token:    {first_token_ms:.0f}ms" if first_token_ms else f"  LLM First Token:    N/A")
         logger.info(f"  First Sentence:     {first_sentence_ms:.0f}ms" if first_sentence_ms else f"  First Sentence:     N/A")
         logger.info(f"  First TTS Chunk:    {first_tts_ms:.0f}ms" if first_tts_ms else f"  First TTS Chunk:    N/A")
         logger.info(f"  Total Pipeline:     {total_ms:.0f}ms")
+        logger.info(f"  Adaptive Tier:      {adaptive_stats['current_tier']} | words={adaptive_stats['words_per_chunk']} buf={adaptive_stats['buffer_delay_s']:.2f}s")
+        logger.info(f"  TTS Chunks:         {tts_chunk_count} (total TTS time: {tts_total_time:.2f}s)")
         logger.info(f"=== END LATENCY REPORT ===")
 
         try:
@@ -934,6 +1471,12 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     "first_sentence_ms": round(first_sentence_ms) if first_sentence_ms else None,
                     "first_tts_chunk_ms": round(first_tts_ms) if first_tts_ms else None,
                     "total_ms": round(total_ms),
+                },
+                "adaptive_chunk": {
+                    "tier": adaptive_stats['current_tier'],
+                    "words_per_chunk": adaptive_stats['words_per_chunk'],
+                    "buffer_delay_s": adaptive_stats['buffer_delay_s'],
+                    "tts_chunks_processed": tts_chunk_count,
                 }
             })
         except Exception:
@@ -983,6 +1526,52 @@ def admin_errors_page(request: Request, user=Depends(require_login("admin"))):
     content = html_path.read_text(encoding="utf-8")
     return HTMLResponse(content=content)
 
+
+@app.get("/admin/knowledge", response_class=HTMLResponse)
+def admin_knowledge_page(request: Request, user=Depends(require_login("admin"))):
+    html_path = Path(__file__).parent / "templates" / "admin_knowledge.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="Admin knowledge template not found.")
+    content = html_path.read_text(encoding="utf-8")
+    return HTMLResponse(content=content)
+
+
+@app.get("/rag/files")
+def get_rag_files(user=Depends(require_login("admin"))):
+    """Return uploaded files indexed in the RAG collection."""
+    try:
+        from backend.knowledge_base import list_uploaded_files
+        files = list_uploaded_files()
+        return {"files": files}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/rag/debug")
+def rag_debug(user=Depends(require_login("admin"))):
+    """Return ALL entries in ChromaDB for debugging — shows ids, filenames, and text previews."""
+    try:
+        from backend.knowledge_base import get_or_create_collection
+        collection = get_or_create_collection()
+        if not collection:
+            return {"count": 0, "entries": []}
+        result = collection.get(include=["metadatas", "documents"]) or {}
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        documents = result.get("documents", [])
+        entries = []
+        for i, (doc_id, meta, doc) in enumerate(zip(ids, metadatas, documents)):
+            entries.append({
+                "id": doc_id,
+                "filename": meta.get("filename", "") if isinstance(meta, dict) else "",
+                "source": meta.get("source", "") if isinstance(meta, dict) else "",
+                "chunk_index": meta.get("chunk_index", "") if isinstance(meta, dict) else "",
+                "text_preview": (doc or "")[:120],
+            })
+        return {"count": len(entries), "entries": entries}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/analytics/summary")
 def get_analytics_summary(user=Depends(require_login("admin"))):
     """Legacy endpoint - returns basic summary"""
@@ -1000,6 +1589,15 @@ def get_comprehensive_analytics_endpoint(days: int = 30, user=Depends(require_lo
     """New comprehensive analytics endpoint"""
     from backend.analytics import get_comprehensive_analytics
     return get_comprehensive_analytics(days)
+
+@app.get("/analytics/tts-performance")
+def tts_performance_stats(user=Depends(require_login("admin"))):
+    """Real-time adaptive TTS chunk-size performance dashboard.
+
+    Returns current tier, rolling-average first-chunk latency, recent
+    per-query snapshots, and the recommended words-per-chunk / buffer.
+    """
+    return adaptive_manager.get_stats()
 
 @app.get("/analytics/errors")
 def get_recent_errors(user=Depends(require_login("admin"))):
@@ -1162,12 +1760,188 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
 
     doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
     metadata = {"source": "upload", "filename": filename}
-    success = add_document(doc_id=doc_id, text=text, metadata=metadata)
 
-    if success:
-        return {"message": f"File {filename} uploaded and indexed as {doc_id}."}
+    # Use chunk-based indexing so each line/paragraph gets its own embedding.
+    # Storing the whole file as one doc would average all facts into one vector
+    # and make individual fact lookups unreliable.
+    chunks_indexed = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+                                             kb_version=_kb_global_version + 1)
+
+    if chunks_indexed > 0:
+        await invalidate_all_caches(action="upload", filename=filename,
+                                     chunks_added=chunks_indexed, triggered_by="admin")
+        return {"message": f"File '{filename}' uploaded and indexed as {chunks_indexed} chunk(s)."}
     else:
         raise HTTPException(status_code=500, detail="Failed to index uploaded document.")
+
+
+@app.post("/rag/delete")
+async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
+    """Delete documents by prefix and also by filename match, then remove the
+    physical file from ASSETS_DIR so it can never be re-indexed on restart.
+
+    Example: pass `upload_Best_player.txt` or just `Best_player.txt`
+    to remove all chunks associated with that file.
+    """
+    if not doc_prefix:
+        raise HTTPException(status_code=400, detail="doc_prefix is required")
+
+    # ---- 1. Remove all ChromaDB chunks ----
+    deleted = delete_documents_with_prefix(doc_prefix)
+    deleted += delete_documents_by_filename(doc_prefix)
+
+    # ---- 2. Delete the physical asset file so it cannot be re-indexed ----
+    import re as _re
+    # Candidate filenames: the prefix itself, and the bare name after stripping
+    # the "upload_XXXXXXXX_" UUID prefix that the server prepends to doc_ids.
+    _bare = _re.sub(r'^upload_(?:[0-9a-fA-F]{8}_)?', '', doc_prefix)
+    asset_candidates = {doc_prefix, _bare}
+    # Also strip a leading "upload_" with no UUID (legacy naming)
+    if doc_prefix.startswith("upload_"):
+        asset_candidates.add(doc_prefix[len("upload_"):])
+
+    deleted_files = []
+    for candidate in asset_candidates:
+        candidate = candidate.strip()
+        if not candidate:
+            continue
+        asset_path = ASSETS_DIR / candidate
+        if asset_path.exists() and asset_path.is_file():
+            try:
+                asset_path.unlink()
+                deleted_files.append(candidate)
+                logger.info(f"rag_delete: removed asset file '{candidate}'")
+            except Exception as e:
+                logger.warning(f"rag_delete: could not remove asset file '{candidate}': {e}")
+
+    await invalidate_all_caches(action="delete", filename=doc_prefix,
+                                 chunks_deleted=deleted, triggered_by="admin")
+    return {"deleted": deleted, "files_removed": deleted_files}
+
+
+@app.post("/rag/update")
+async def rag_update(req: dict, user=Depends(require_login("admin"))):
+    """Update an existing uploaded document (replace and re-chunk).
+
+    JSON body: {"doc_id": "upload_xxx_filename", "text": "...", "metadata": {...}}
+    """
+    doc_id = req.get("doc_id")
+    text = req.get("text")
+    metadata = req.get("metadata")
+    if not doc_id or text is None:
+        raise HTTPException(status_code=400, detail="doc_id and text are required")
+    chunks = update_document(doc_id=doc_id, text=text, metadata=metadata)
+    if chunks:
+        await invalidate_all_caches(action="update", filename=doc_id,
+                                     chunks_added=chunks, triggered_by="admin")
+        return {"updated_chunks": chunks}
+    else:
+        raise HTTPException(status_code=500, detail="Update failed")
+
+
+@app.post("/rag/reindex-file")
+async def rag_reindex_file(filename: str, user=Depends(require_login("admin"))):
+    """Reindex an uploaded file by filename (uploads are saved to assets dir).
+
+    Clears all existing chunks associated with this filename (including any
+    orphans from a previous broken run), then re-indexes fresh from disk.
+    """
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+    save_path = ASSETS_DIR / filename
+    if not save_path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+
+    try:
+        content = save_path.read_bytes()
+        try:
+            text = content.decode("utf-8")
+        except Exception:
+            text = content.decode(errors="ignore")
+
+        # Wipe ALL old chunks for this filename regardless of doc_id prefix
+        deleted = delete_documents_by_filename(filename)
+
+        # Deterministic doc_id based on filename (stable across restarts)
+        import re as _re
+        bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
+        safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
+        doc_id = f"upload_{safe}"
+        metadata = {"source": "upload", "filename": filename}
+        chunks = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+                                        kb_version=_kb_global_version + 1)
+        if chunks:
+            await invalidate_all_caches(action="reindex", filename=filename,
+                                         chunks_added=chunks, chunks_deleted=deleted,
+                                         triggered_by="admin")
+            return {"reindexed_chunks": chunks, "deleted_old": deleted}
+        else:
+            raise HTTPException(status_code=500, detail="Reindex produced no chunks")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/rag/reindex-all")
+async def rag_reindex_all(user=Depends(require_login("admin"))):
+    """Reindex every .txt and .pdf file currently in the ASSETS_DIR.
+
+    This is the recovery operation — it clears ALL existing chunks for each
+    file and rebuilds them fresh, fixing any duplicate/orphan chunks that
+    accumulated during a previous buggy run.
+    """
+    if not ASSETS_DIR.exists():
+        return {"message": "Assets directory not found", "files": []}
+    results = []
+    for p in ASSETS_DIR.iterdir():
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in (".txt", ".pdf"):
+            continue
+        filename = p.name
+        try:
+            content = p.read_bytes()
+            try:
+                text = content.decode("utf-8")
+            except Exception:
+                text = content.decode(errors="ignore")
+            deleted = delete_documents_by_filename(filename)
+            # Deterministic doc_id based on filename
+            import re as _re
+            bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
+            safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
+            doc_id = f"upload_{safe}"
+            metadata = {"source": "upload", "filename": filename}
+            chunks = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+                                            kb_version=_kb_global_version + 1)
+            results.append({"filename": filename, "chunks": chunks, "deleted_old": deleted, "status": "ok"})
+        except Exception as e:
+            results.append({"filename": filename, "status": "error", "error": str(e)})
+    total_added = sum(r.get("chunks", 0) for r in results if r.get("status") == "ok")
+    total_deleted = sum(r.get("deleted_old", 0) for r in results if r.get("status") == "ok")
+    await invalidate_all_caches(action="reindex_all", filename="*",
+                                 chunks_added=total_added, chunks_deleted=total_deleted,
+                                 triggered_by="admin")
+    return {"reindexed": len([r for r in results if r.get("status") == "ok"]), "files": results}
+
+
+@app.post("/rag/clear-cache")
+async def rag_clear_cache(user=Depends(require_login("admin"))):
+    """Manually flush all caches so the next query uses fully fresh KB data.
+
+    Clears:
+      - All in-memory conversation histories (prevents stale Q&A reuse)
+      - Ollama model KV cache (forces model reload so no cached completions)
+
+    Use this when the LLM keeps returning old/wrong answers after a KB edit.
+    """
+    await invalidate_all_caches(action="clear_cache", filename="*", triggered_by="admin")
+    return {
+        "status": "ok",
+        "message": "All caches cleared — conversations wiped and LLM model cache flushed. Next query will use fresh KB data."
+    }
+
 
 # ========== TEXT-TO-SPEECH ENDPOINT (proxies to XTTS v2 microservice) ==========
 class TTSRequest(BaseModel):
@@ -1262,6 +2036,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
     await websocket.accept()
     connection_id = f"conn_{uuid.uuid4().hex[:8]}"
     logger.info(f"New websocket connection {connection_id}")
+    # Register for KB broadcast notifications
+    _active_ws_connections[connection_id] = websocket
 
     # Create cancel event for barge-in support
     cancel_event = asyncio.Event()
@@ -1283,9 +2059,12 @@ async def rag_ws_endpoint(websocket: WebSocket):
     first_audio_arrival = None  # Timestamp of when the first chunk of a speech segment arrived
     speech_start_time = None    # When VAD (energy) first detected speech
     silence_counter = 0  # Count consecutive silent chunks
-    # STABILIZATION Part 6: Hard-cap silence at ~400ms (6-7 chunks at ~16 chunks/sec)
-    silence_chunks_needed = 6   # ~375ms — fast cutoff, never above 500ms
-    silence_threshold_energy = 0.015  # Increased threshold to reduce false positives
+    # STABILIZATION Part 6: Silence detection tuned via benchmark.
+    # STT is ultra-fast (32ms on CPU) so we can afford to wait a bit longer
+    # for true silence to avoid splitting multi-word phrases.
+    # 10 chunks × ~50ms each = ~500ms — bridges natural inter-word pauses.
+    silence_chunks_needed = 10           # ~500ms true silence before transcription fires
+    silence_threshold_energy = 0.008    # Strict: only truly quiet audio counts as silence
 
     try:
         while True:
@@ -1313,16 +2092,21 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         # Speech detected - reset silence counter
                         if not speech_start_time and len(audio_buffer) > 0:
                             speech_start_time = current_time
+                            logger.debug(f"{connection_id} Speech start detected (buffer={len(audio_buffer)} bytes, energy={energy:.6f})")
                         silence_counter = 0
                     
                     # Always accumulate audio
                     audio_buffer.extend(audio)
                     
                     # If we've had enough consecutive silent chunks AND we have audio buffered
-                    if silence_counter >= silence_chunks_needed and len(audio_buffer) > 16000:
+                    # AND we actually detected speech at some point (prevents noise-only transcriptions)
+                    if silence_counter >= silence_chunks_needed and len(audio_buffer) > 48000 and speech_start_time is not None:
                         # Transcribe everything we've accumulated
+                        # 48000 bytes = 1.5s minimum audio — prevents firing on short single words
                         speech_end_time = current_time
                         chunk = bytes(audio_buffer)
+                        audio_duration_sec = len(chunk) / (SAMPLE_RATE * 2)
+                        triggered_after = silence_counter  # capture before reset
                         audio_buffer.clear()
                         silence_counter = 0
                         
@@ -1331,13 +2115,13 @@ async def rag_ws_endpoint(websocket: WebSocket):
                             "first_audio": first_audio_arrival,
                             "speech_start": speech_start_time,
                             "speech_end": speech_end_time,
-                            "audio_len_sec": len(chunk) / (SAMPLE_RATE * 2)
+                            "audio_len_sec": audio_duration_sec
                         }
                         # Reset for next segment
                         first_audio_arrival = None
                         speech_start_time = None
 
-                        logger.info(f"{connection_id} Auto-transcribing after silence ({len(chunk)} bytes)")
+                        logger.info(f"{connection_id} ✓ TRANSCRIBE TRIGGERED: {len(chunk)} bytes ({audio_duration_sec:.2f}s audio) after {triggered_after} silent chunks")
                         
                         # ========== STABILIZED auto_transcribe ==========
                         # Parts 2/3/4/7/9: semaphore, timeouts, cleanup, memory, logging
@@ -1399,7 +2183,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                             beam_size=WHISPER_BEAM_SIZE,
                                             temperature=0.0,
                                             vad_filter=WHISPER_VAD_FILTER,
-                                            vad_parameters=dict(min_silence_duration_ms=500, threshold=0.5),
+                                            vad_parameters=dict(min_silence_duration_ms=300, threshold=0.3),
                                             condition_on_previous_text=False,
                                             compression_ratio_threshold=2.4,
                                             log_prob_threshold=-1.0,
@@ -1420,6 +2204,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
 
                                     full_text = " ".join([seg.text.strip() for seg in segments_list]).strip()
                                     t_stt_end = _time.perf_counter()
+                                    stt_duration = t_stt_end - t_stt_start
 
                                     vram_stt_after = 0
                                     if torch.cuda.is_available():
@@ -1429,7 +2214,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                         logger.debug(f"{conn_id} whisper returned empty text, skipping")
                                         return
 
-                                    logger.info(f"{conn_id} whisper AUTO: {full_text}")
+                                    audio_len = len(data_bytes) / (SAMPLE_RATE * 2)  # seconds
+                                    logger.info(f"{conn_id} WHISPER RESULT: '{full_text}' ({len(segments_list)} segments, {audio_len:.2f}s audio, STT took {stt_duration*1000:.0f}ms)")
 
                                     t_meta = t_meta or {}
                                     t_meta.update({
@@ -1502,6 +2288,21 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         
                         task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, timing_meta))
                         _active_voice_task = task
+                    elif silence_counter >= silence_chunks_needed and len(audio_buffer) <= 48000 and speech_start_time is not None:
+                        # Buffer too small to be a real utterance — drain it
+                        logger.debug(f"{connection_id} Buffer too small ({len(audio_buffer)} bytes < 48000 min), discarding")
+                        audio_buffer.clear()
+                        silence_counter = 0
+                        speech_start_time = None
+                        first_audio_arrival = None
+                    elif silence_counter >= silence_chunks_needed and speech_start_time is None:
+                        # Silence accumulated but no speech was ever detected — just background
+                        # noise. Drain the buffer so we don't carry stale noise into next segment.
+                        if len(audio_buffer) > 0:
+                            logger.debug(f"{connection_id} Draining {len(audio_buffer)} bytes (no speech detected in this segment)")
+                        audio_buffer.clear()
+                        silence_counter = 0
+                        first_audio_arrival = None
                 elif "text" in msg and msg["text"] is not None:
                     try:
                         payload = json.loads(msg["text"])
@@ -1519,9 +2320,10 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 # User stopped recording - NOW transcribe the full audio buffer
                                 if len(audio_buffer) > 0:
                                     chunk = bytes(audio_buffer)
+                                    audio_duration_sec = len(chunk) / (SAMPLE_RATE * 2)
                                     audio_buffer.clear()
                                     silence_counter = 0
-                                    logger.info(f"{connection_id} Manual stop - transcribing {len(chunk)} bytes")
+                                    logger.info(f"{connection_id} ⏹ MANUAL STOP: transcribing {len(chunk)} bytes ({audio_duration_sec:.2f}s audio)")
                                     task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id))
                                     _active_voice_task = task
                             elif action == "clear_audio_buffer":
@@ -1587,8 +2389,77 @@ async def rag_ws_endpoint(websocket: WebSocket):
             del conversation_history[connection_id]
         if connection_id in conversation_timestamps:
             del conversation_timestamps[connection_id]
+        # Deregister from KB broadcast pool
+        _active_ws_connections.pop(connection_id, None)
         mem_final = _get_memory_snapshot()
         logger.info(f"Websocket {connection_id} fully cleaned up | GPU={mem_final['gpu_reserved_mb']:.0f}MB CPU={mem_final['cpu_rss_mb']:.0f}MB")
+
+
+# ========== WEBSOCKET: Admin KB-events real-time feed ==========
+@app.websocket("/ws/kb-events")
+async def kb_events_ws(websocket: WebSocket):
+    """Admin-only WebSocket that streams real-time KB mutation events.
+
+    The admin monitoring page subscribes here to receive a live event feed.
+    """
+    await websocket.accept()
+    try:
+        token = websocket.cookies.get(SESSION_COOKIE)
+        user = serializer.loads(token) if token else None
+    except Exception:
+        user = None
+    if not user or user.get("role") not in ("admin", "superadmin"):
+        await websocket.send_json({"type": "error", "message": "Unauthorized"})
+        await websocket.close(code=4003)
+        return
+
+    _kb_event_subscribers.add(websocket)
+    logger.info(f"KB-events subscriber connected ({len(_kb_event_subscribers)} total)")
+    await websocket.send_json({
+        "type": "connected",
+        "kb_version": _kb_global_version,
+        "active_sessions": len(_active_ws_connections),
+        "message": "Subscribed to live KB events",
+    })
+    try:
+        while True:
+            msg = await websocket.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
+        _kb_event_subscribers.discard(websocket)
+        logger.info(f"KB-events subscriber disconnected ({len(_kb_event_subscribers)} remaining)")
+
+
+# ========== KB MONITORING DASHBOARD ==========
+@app.get("/admin/kb-monitor", response_class=HTMLResponse)
+def admin_kb_monitor_page(request: Request, user=Depends(require_login("admin"))):
+    """Serve the KB monitoring dashboard HTML page."""
+    html_path = Path(__file__).parent / "templates" / "admin_kb_monitor.html"
+    if not html_path.exists():
+        raise HTTPException(status_code=404, detail="KB monitor template not found.")
+    return HTMLResponse(content=html_path.read_text(encoding="utf-8"))
+
+
+@app.get("/api/kb-stats")
+def api_kb_stats(days: int = 30, user=Depends(require_login("admin"))):
+    """Return KB performance and mutation metrics for the monitoring dashboard."""
+    stats = get_kb_stats(days=days)
+    stats["kb_version"] = _kb_global_version
+    stats["active_sessions"] = len(_active_ws_connections)
+    stats["kb_event_subscribers"] = len(_kb_event_subscribers)
+    return stats
+
+
+@app.get("/api/kb-events")
+def api_kb_events(limit: int = 100, user=Depends(require_login("admin"))):
+    """Return recent KB mutation events for the monitoring dashboard."""
+    return {"events": get_kb_events(limit=limit), "kb_version": _kb_global_version}
+
 
 @app.get("/internal/asr-status")
 def asr_status():

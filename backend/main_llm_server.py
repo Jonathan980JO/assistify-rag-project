@@ -176,6 +176,7 @@ async def chat_completions(request: ChatRequest):
             "max_tokens": min(request.max_tokens, 180),
             "temperature": 0.6,
             "stream": False,
+            "keep_alive": -1,
             "options": {
                 "num_ctx": 2048,
                 "temperature": 0.6,
@@ -197,6 +198,7 @@ async def chat_completions(request: ChatRequest):
         resp2 = await http_client.post("/api/chat", json={
             "model": model,
             "messages": request.messages,
+            "keep_alive": -1,
             "options": {
                 "num_ctx": 2048,
                 "temperature": 0.6,

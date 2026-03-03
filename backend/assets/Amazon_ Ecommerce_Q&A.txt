@@ -1,0 +1,103 @@
+What is selling on Amazon? → Individuals and businesses can sell products in Amazon stores like Amazon.com. To get started, see our beginners guide.
+
+Why should I sell on Amazon? → When you sell with Amazon, you get to list products in a store that more customers trust—and you get to do it with higher-impact tools and programs that cost less than alternatives. That means more opportunities for growth and more chances to transform how you sell.
+
+How do I sell my product in the Amazon store? → You can start selling with Amazon in a few basic steps: 1) Choose a selling plan—Individual or Professional. 2) Create a selling account. 3) If you have a brand, enroll it in Amazon Brand Registry. 4) Use tools in Seller Central to list and price your products. 5) Select a fulfillment method: Fulfilled by Merchant or Fulfillment by Amazon (FBA). 6) Consider promoting through Amazon Ads. 7) Grow your business with additional tools.
+
+What can I sell in the Amazon store? → You can sell many different types of products. Start by reviewing taxes, regulations, and Amazon requirements for compliance and safety. Popular categories include electronics, clothing, beauty, computers, healthcare, home improvement, toys, and small household appliances. Some categories require approval or a Professional plan.
+
+What products should you start with? → Check out our list of 38 online business ideas. You'll hear from sellers who started in the Amazon store and grew to reach global audiences.
+
+Can I list my products in all Amazon categories? → While some categories are open to all sellers, some require a Professional selling plan, some require approval from Amazon, and some can't be sold by third-party sellers.
+
+What products can't be sold in the Amazon store? → Some products may not be listed due to legal restrictions or Amazon policy. If using FBA, review FBA product restrictions.
+
+How do I register to sell in the Amazon store? → After choosing a plan, create your account. You'll need: government ID, phone number, email, credit card, bank account, business license, proof of address, tax info. Steps: 1) Provide business info 2) Provide seller info 3) Provide billing info 4) Provide store/product info 5) Verify identity
+
+How much does it cost to sell with Amazon? → Professional plan: $39.99/month + referral fees. Individual plan: $0.99 per unit sold + referral fees. Other costs may apply for optional tools.
+
+Is being an Amazon seller profitable? → Yes. Independent US sellers averaged more than $290,000 in annual sales in the Amazon store in 2024.
+
+How do I get paid? → When your account has a positive balance, Amazon sends funds via ACH to your bank account. It can take up to 5 business days. You must provide a valid bank account.
+
+How will I know when I have a sale? → Use Notification Preferences to get email or text alerts for customer orders.
+
+What sells the most in the Amazon store? → In 2023, top categories from US sellers were Health & Personal Care, Beauty, Home, Grocery, and Apparel. Check Amazon Best Sellers for hourly updates.
+
+How do I manage my selling account? → Use Seller Central to manage all parts of your Amazon business.
+
+How do I add inventory? → Match offers to existing product pages or create new pages. You can list one at a time or in bulk.
+
+How do I sell books in the Amazon store? → 1) Decide what books to sell and sourcing method 2) Choose a plan and create account 3) List and price books 4) Choose fulfillment method 5) Consider advertising. Benefits: no sales constraints, convenience, wide variety.
+
+How do I publish a book with Amazon? → Use Kindle Direct Publishing (KDP) to self-publish eBooks and paperbacks for free. Get them on Kindle stores worldwide in 24-48 hours.
+
+How can I increase Amazon sales? → Offer promotions/coupons/deals, create CPC ads, use FBA for Prime shipping, enroll in Brand Registry, create a storefront, use A+ content.
+
+What is the Featured Offer? → The offer that appears at the top of a product detail page with Buy Now and Add to Cart buttons.
+
+What are the differences between Professional and Individual plans? → Two plans with different tools and pricing. Choose based on your selling volume and needs.
+
+Can I switch from Professional to Individual plan? → Yes, anytime from Manage Your Services page in Seller Central.
+
+What's the A-to-z Guarantee? → Ensures customers have a consistent experience when making purchases across the Amazon store.
+
+What is Amazon Prime? → Subscription service offering benefits like free two-day delivery. Prime badge can make listings more attractive.
+
+How do I get the Prime badge? → Available to sellers enrolled in FBA or Seller Fulfilled Prime.
+
+How much does it cost to get the Prime badge? → Costs vary by program, plan, and product categories.
+
+How much does it cost to ship items to customers? → Costs vary by weight/dimensions and fulfillment method. FBA costs 70% less per unit than comparable premium options from other carriers.
+
+What does "FBA" stand for? → Fulfillment by Amazon. You send products to Amazon, they handle picking, packing, shipping, returns, and customer service.
+
+What is an Amazon FBA business? → A seller that uses FBA to manage orders. Store products in Amazon's network; they handle fulfillment and customer service.
+
+How does Fulfillment by Amazon work? → Store products in Amazon fulfillment centers; they pick, pack, ship, and provide customer service.
+
+How much does FBA cost? → Pay-as-you-go: pay for storage and fulfillment per unit. Shipping included, no extra for Prime two-day shipping.
+
+How do I advertise with Amazon? → Create Professional account, then Amazon Ads account. Build campaigns in minutes. Options include CPC ads, audio/video ads, custom ads.
+
+How much does it cost to advertise with Amazon? → Various solutions including CPC options like Sponsored Products. Brands can create free storefronts.
+
+What does "sponsored" mean in the Amazon store? → Paid ads helping customers discover products. Sponsored Products promote individual items. Sponsored Brands feature logo, headline, and multiple products.
+
+How do I get a sponsored ad? → Create Professional account, then Amazon Ads account. Start with Sponsored Products. If brand is enrolled in Brand Registry, create Store and Sponsored Brands.
+
+What is an Amazon storefront? → A dedicated destination for enrolled brands to showcase products at no cost. Customizable with own Amazon.com web address.
+
+How do I create an Amazon store? → 1) Create Professional account 2) Enroll in Brand Registry 3) Create Amazon Ads account 4) In Seller Central, go to Stores > Manage Stores 5) Use step-by-step guides.
+
+What is Seller Central? → The hub for your selling account. Manage products, prices, orders, settings, monitor sales, explore growth opportunities.
+
+What is Amazon Brand Registry? → Free program helping eligible brands protect IP, manage listings, and grow. Unlocks brand-building tools and protection benefits.
+
+What are the standards for brands selling in the Amazon store? → Amazon may source certain high-recognition products directly to ensure stock, good prices, fast shipping. Applies to less than 0.01% of brands. Resellers stepping in for these brands may also be subject to standards.
+
+What is Supply Chain by Amazon? → Fully automated supply chain services from manufacturers to customers. Includes AGL, PCP, AWD, FBA, MCF, Buy with Prime.
+
+Can I sell in other countries with Amazon? → Yes, through Amazon Global Selling. Sell globally from US or from other countries to US customers.
+
+What can I do with the Amazon Seller app? → Manage your business remotely: create listings, track sales, fulfill orders, respond to customers, scan barcodes, all from mobile.
+
+How do I sell with Amazon Handmade? → Create Professional account, submit application. If approved, list products. 15% referral fee per sale.
+
+What is Fulfilled by Merchant? → Solutions for fulfilling orders yourself. Tools to sync inventory, streamline orders, get shipping rates, offer fast delivery.
+
+What is the New Seller Guide? → Set of brand, logistics, pricing, and promotional services for new sellers. Users generate ~6x more first-year sales on average.
+
+What's the difference between AWD and FBA? → AWD is low-cost bulk storage. FBA outsources fulfillment. Use both with Supply Chain by Amazon.
+
+Can I use FBA for other sales channels? → Yes, use Multi-Channel Fulfillment (MCF) for any sales channel including your own website.
+
+What is Amazon Business? → B2B program with tools for business customers who buy in larger quantities and return less. Available to all Professional sellers.
+
+Can I get paid in US dollars if I sell in other countries? → Use Amazon Currency Converter for deposits to US bank accounts. Or use local bank accounts in other countries.
+
+What is Automate Pricing? → Free tool for Professional sellers to keep prices competitive. Creates dynamic pricing rules that update 24/7.
+
+Can I offer gift wrap and messaging? → Yes, customers can select gift-wrapping and write notes for individual items or entire orders.
+
+How do I close my Amazon selling account? → Permanently close from Account Management in Seller Central. Cancel listings and resolve transactions first. For vacations, temporarily deactivate listings.

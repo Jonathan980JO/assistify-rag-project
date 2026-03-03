@@ -2668,13 +2668,14 @@ async def update_knowledge_file(request: Request, filename: str, user=Depends(re
 
 
 @app.delete("/api/knowledge/files/{filename}")
-def delete_knowledge_file(request: Request, filename: str, user=Depends(require_login("admin"))):
-    """Delete a knowledge base file."""
+async def delete_knowledge_file(request: Request, filename: str, user=Depends(require_login("admin"))):
+    """Delete a knowledge base file: remove the physical file AND purge all
+    ChromaDB chunks so the content is gone from the entire system immediately."""
     verify_csrf(request)
-    
+
     assets_dir = Path(__file__).resolve().parent.parent / 'backend' / 'assets'
     file_path = assets_dir / filename
-    
+
     # Security check
     try:
         file_path = file_path.resolve()
@@ -2682,15 +2683,68 @@ def delete_knowledge_file(request: Request, filename: str, user=Depends(require_
             raise HTTPException(status_code=403, detail="Access denied")
     except Exception:
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="File not found")
-    
+
+    # ---- 1. Delete the physical file ----
     try:
         file_path.unlink()
-        return {"status": "deleted", "filename": filename}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+
+    # ---- 2. Purge all ChromaDB chunks directly (no auth issues) ----
+    chunks_deleted = 0
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from backend.knowledge_base import delete_documents_with_prefix, delete_documents_by_filename
+        chunks_deleted += delete_documents_with_prefix(filename)
+        chunks_deleted += delete_documents_by_filename(filename)
+        # Also try with upload_ prefix variants
+        chunks_deleted += delete_documents_with_prefix(f"upload_{filename}")
+        chunks_deleted += delete_documents_by_filename(f"upload_{filename}")
+    except Exception as e:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            f"delete_knowledge_file: ChromaDB purge failed for '{filename}': {e}"
+        )
+
+    # ---- 3. Flush Ollama KV cache so stale answers are evicted ----
+    try:
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as _sess:
+            async with _sess.post(
+                "http://127.0.0.1:11434/api/generate",
+                json={"model": "qwen2.5:3b", "keep_alive": 0},
+                timeout=_aiohttp.ClientTimeout(total=10)
+            ) as _r:
+                pass
+    except Exception:
+        pass  # Ollama may not be running; non-fatal
+
+    return {"status": "deleted", "filename": filename, "chunks_deleted": chunks_deleted}
+
+
+@app.post("/api/knowledge/clear-cache")
+async def proxy_clear_cache(request: Request, user=Depends(require_login("admin"))):
+    """Proxy clear-cache request to the RAG server to flush all stale data.
+
+    Clears conversation history + Ollama KV cache so the next query
+    uses fully fresh KB data.
+    """
+    verify_csrf(request)
+    try:
+        import aiohttp as _aiohttp
+        async with _aiohttp.ClientSession() as sess:
+            async with sess.post(
+                f"{RAG_HTTP_BASE}/rag/clear-cache",
+                timeout=_aiohttp.ClientTimeout(total=15)
+            ) as resp:
+                data = await resp.json()
+                return data
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Cache clear failed: {str(e)}")
 
 
 @app.get('/frontend/{path:path}')

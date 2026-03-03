@@ -186,6 +186,35 @@
             background: #6b7280;
             box-shadow: 0 2px 8px rgba(156, 163, 175, 0.3);
         }
+        .cache-btn {
+            background: #e74c3c;
+            color: #fff;
+            font-weight: 700;
+            padding: 10px 18px;
+            border-radius: 8px;
+            font-size: 0.95em;
+        }
+        .cache-btn:hover {
+            background: #c0392b;
+            box-shadow: 0 2px 8px rgba(231, 76, 60, 0.3);
+        }
+        .cache-notice {
+            background: #2d1f00;
+            border: 1px solid #e08a00;
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-top: 12px;
+            font-size: 0.9em;
+            color: #fbbf24;
+            display: none;
+        }
+        .cache-notice b { color: #fff; }
+        .cache-status {
+            color: var(--muted);
+            font-size: 0.9em;
+            min-height: 1.2em;
+            margin-top: 8px;
+        }
         .action-btns {
             white-space: nowrap;
         }
@@ -359,6 +388,15 @@
 
     <div class="container">
         <h1>📚 Knowledge Base Management</h1>
+
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:16px">
+            <button id="clear-cache" class="cache-btn">🧹 Clear All Caches</button>
+            <span id="cache-status" class="cache-status"></span>
+        </div>
+        <div id="cache-notice" class="cache-notice">
+            <b>⚠ Stale cache detected:</b> The knowledge base was recently changed. If the AI is still giving old answers,
+            click <b>Clear All Caches</b> above to force a full reset (conversations + LLM model memory).
+        </div>
         
         <h2>Upload New Document</h2>
         <div class="upload-section">
@@ -664,6 +702,56 @@
 
         // Load documents on page load
         loadDocuments();
+
+        // ---- CLEAR ALL CACHES ----
+        document.getElementById('clear-cache').addEventListener('click', async () => {
+            const btn = document.getElementById('clear-cache');
+            const statusEl = document.getElementById('cache-status');
+            const origText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = 'Clearing…';
+            statusEl.textContent = 'Flushing all caches…';
+            try {
+                const response = await fetch('/api/knowledge/clear-cache', {
+                    method: 'POST',
+                    headers: { 'x-csrf-token': csrf },
+                    credentials: 'same-origin'
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    statusEl.textContent = '✓ ' + (data.message || 'All caches cleared');
+                    statusEl.style.color = '#10a37f';
+                    document.getElementById('cache-notice').style.display = 'none';
+                } else {
+                    statusEl.textContent = '✗ Error: ' + (data.detail || response.statusText);
+                    statusEl.style.color = '#ff7979';
+                }
+            } catch (e) {
+                statusEl.textContent = '✗ ' + e.message;
+                statusEl.style.color = '#ff7979';
+            } finally {
+                btn.disabled = false;
+                btn.textContent = origText;
+            }
+        });
+
+        // Show stale-cache notice after any KB mutation
+        function markDirty() {
+            document.getElementById('cache-notice').style.display = 'block';
+            document.getElementById('cache-status').textContent = '';
+        }
+
+        // Hook into save and delete to show stale notice
+        const _origSave = saveDocument;
+        saveDocument = async function() {
+            await _origSave();
+            markDirty();
+        };
+        const _origUploadSubmit = document.getElementById('uploadForm').onsubmit;
+        document.getElementById('uploadForm').onsubmit = async function(e) {
+            await _origUploadSubmit(e);
+            markDirty();
+        };
     </script>
 </body>
 </html>

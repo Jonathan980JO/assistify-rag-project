@@ -6,6 +6,7 @@ REM  Run from: G:\Grad_Project\assistify-rag-project-main\
 REM ============================================================
 set COQUI_TOS_AGREED=1
 set HF_HUB_DISABLE_SYMLINKS_WARNING=1
+set CUDA_VISIBLE_DEVICES=0
 echo Starting XTTS v2 Microservice on port 5002...
 echo Using: %USERPROFILE%\miniconda3\envs\assistify_xtts
 echo.

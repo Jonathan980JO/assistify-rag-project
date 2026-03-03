@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Assistify — KB Monitor</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Segoe+UI:400,600,700&display=swap">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root{--accent:#10a37f;--danger:#ff6b6b;--warn:#e08a00;--bg:#111;--card:#1a1a1a;--border:#2a2a2a}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:var(--bg);color:#fff;font-family:'Segoe UI',Arial,sans-serif;min-height:100vh}
+    header{background:#1e1e1e;padding:16px 28px;display:flex;align-items:center;gap:16px;
+           border-bottom:1px solid var(--border);position:sticky;top:0;z-index:10}
+    header h1{color:var(--accent);font-size:1.4rem;font-weight:700}
+    header a{color:var(--accent);font-size:.85rem;text-decoration:none;margin-left:auto}
+    header a:hover{text-decoration:underline}
+    .live-dot{width:10px;height:10px;border-radius:50%;background:#555;
+              flex-shrink:0;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .container{max-width:1140px;margin:0 auto;padding:24px 16px}
+    .kpi-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;margin-bottom:24px}
+    .kpi{background:var(--card);border-radius:10px;padding:18px 20px;border:1px solid var(--border)}
+    .kpi .label{font-size:.78rem;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em}
+    .kpi .value{font-size:2rem;font-weight:700;color:var(--accent);margin-top:4px;line-height:1}
+    .kpi .sub{font-size:.78rem;color:#666;margin-top:4px}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px}
+    @media(max-width:700px){.grid2{grid-template-columns:1fr}}
+    .card{background:var(--card);border-radius:10px;padding:20px;border:1px solid var(--border)}
+    .card h2{font-size:1rem;color:var(--accent);margin-bottom:14px;display:flex;align-items:center;gap:8px}
+    table{width:100%;border-collapse:collapse;font-size:.85em}
+    th,td{padding:8px 10px;border-bottom:1px solid var(--border);text-align:left}
+    th{color:var(--accent);background:#141414;font-weight:600}
+    td.num{text-align:right;font-variant-numeric:tabular-nums}
+    .badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:.75em;font-weight:600}
+    .badge-upload{background:#064e3b;color:#6ee7b7}
+    .badge-reindex{background:#422006;color:#fcd34d}
+    .badge-delete{background:#450a0a;color:#fca5a5}
+    .badge-update{background:#1e3a5f;color:#93c5fd}
+    .badge-reindex_all{background:#2e1065;color:#c4b5fd}
+    .badge-clear_cache{background:#451a03;color:#fdba74}
+    .badge-watcher{background:#1c1c1c;color:#9ca3af}
+    .feed-list{list-style:none;max-height:340px;overflow-y:auto}
+    .feed-list li{display:flex;gap:8px;align-items:baseline;padding:6px 4px;
+                  border-bottom:1px solid var(--border);font-size:.82em;animation:fadein .3s}
+    @keyframes fadein{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+    .ev-time{color:#555;white-space:nowrap;min-width:130px}
+    .ev-file{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
+    .ev-chunks-add{color:#10a37f;font-size:.75em}
+    .ev-chunks-del{color:#ff6b6b;font-size:.75em}
+    .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+    button{background:var(--accent);color:#000;border:none;padding:8px 14px;border-radius:6px;
+           cursor:pointer;font-weight:600;font-size:.88em}
+    button:hover:not(:disabled){background:#0d9068}
+    button:disabled{opacity:.5;cursor:default}
+    select{background:#222;color:#fff;border:1px solid #444;border-radius:6px;padding:6px 10px;font-size:.88em}
+    .status-bar{font-size:.82em;color:#9ca3af;min-height:1.2em}
+    .empty{color:#555;font-style:italic;padding:12px 0}
+    canvas{max-height:220px}
+  </style>
+</head>
+<body>
+
+<header>
+  <span class="live-dot" id="ws-dot"></span>
+  <h1>KB Monitor Dashboard</h1>
+  <span id="connection-status" style="font-size:.8rem;color:#9ca3af">Connecting…</span>
+  <a href="/admin/knowledge">← Knowledge Base Manager</a>
+</header>
+
+<div class="container">
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <button id="btn-refresh">↻ Refresh Stats</button>
+    <label style="color:#9ca3af;font-size:.88em">Window:
+      <select id="days-select">
+        <option value="7">7 days</option>
+        <option value="30" selected>30 days</option>
+        <option value="90">90 days</option>
+      </select>
+    </label>
+    <span id="status-msg" class="status-bar"></span>
+  </div>
+
+  <!-- KPI strip -->
+  <div class="kpi-grid" id="kpi-grid">
+    <div class="kpi"><div class="label">KB Version</div><div class="value" id="kpi-version">–</div><div class="sub">global counter</div></div>
+    <div class="kpi"><div class="label">Total Mutations</div><div class="value" id="kpi-mutations">–</div><div class="sub" id="kpi-last">–</div></div>
+    <div class="kpi"><div class="label">RAG Hit Rate</div><div class="value" id="kpi-rag">–%</div><div class="sub" id="kpi-queries">–</div></div>
+    <div class="kpi"><div class="label">Avg Response</div><div class="value" id="kpi-ms">–ms</div><div class="sub">LLM latency</div></div>
+    <div class="kpi"><div class="label">Active Sessions</div><div class="value" id="kpi-sessions">–</div><div class="sub">open WebSockets</div></div>
+    <div class="kpi"><div class="label">Chunks Indexed</div><div class="value" id="kpi-chunks-add">–</div><div class="sub" id="kpi-chunks-del">–</div></div>
+  </div>
+
+  <!-- Charts + tables row -->
+  <div class="grid2">
+    <!-- Daily mutation trend chart -->
+    <div class="card">
+      <h2>📅 Daily Mutations (14 days)</h2>
+      <canvas id="chartMutations"></canvas>
+    </div>
+    <!-- Mutations by action -->
+    <div class="card">
+      <h2>⚡ Mutations by Action</h2>
+      <canvas id="chartActions"></canvas>
+    </div>
+  </div>
+
+  <div class="grid2">
+    <!-- Top files -->
+    <div class="card">
+      <h2>📄 Most Changed Files</h2>
+      <table id="tbl-top-files">
+        <thead><tr><th>Filename</th><th class="num">Changes</th></tr></thead>
+        <tbody><tr><td colspan="2" class="empty">Loading…</td></tr></tbody>
+      </table>
+    </div>
+    <!-- Live event feed -->
+    <div class="card">
+      <h2><span class="live-dot" id="feed-dot" style="background:#555"></span>Live Event Feed</h2>
+      <ul class="feed-list" id="feed-list">
+        <li><span class="ev-time" style="color:#555">Waiting for events…</span></li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- Full recent event log -->
+  <div class="card" style="margin-top:16px">
+    <h2>🕓 Recent KB Events</h2>
+    <table id="tbl-events">
+      <thead>
+        <tr><th>Time</th><th>Action</th><th>Filename</th>
+            <th class="num">+Chunks</th><th class="num">–Chunks</th>
+            <th>Triggered by</th><th class="num">KB ver</th></tr>
+      </thead>
+      <tbody><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+</div><!-- /container -->
+
+<script>
+// ========== UTILITIES ==========
+function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtTime(ts){ return ts ? ts.replace('T',' ').replace('Z','') : ''; }
+const BADGE_MAP = {
+  upload:'badge-upload', reindex:'badge-reindex', delete:'badge-delete',
+  update:'badge-update', reindex_all:'badge-reindex_all', clear_cache:'badge-clear_cache',
+};
+function badge(action){
+  const cls = BADGE_MAP[action] || '';
+  return `<span class="badge ${cls}">${esc(action)}</span>`;
+}
+
+// ========== CHARTS ==========
+const CHART_DEFAULTS = {
+  responsive:true, maintainAspectRatio:false,
+  plugins:{legend:{labels:{color:'#9ca3af',font:{size:11}}}},
+  scales:{x:{ticks:{color:'#9ca3af',font:{size:10}},grid:{color:'#222'}},
+          y:{ticks:{color:'#9ca3af',font:{size:10}},grid:{color:'#222'},beginAtZero:true}},
+};
+
+let chartMutations = null;
+let chartActions = null;
+
+function initCharts(){
+  const ctxM = document.getElementById('chartMutations').getContext('2d');
+  chartMutations = new Chart(ctxM, {
+    type:'bar',
+    data:{labels:[],datasets:[{label:'Mutations',data:[],backgroundColor:'rgba(16,163,127,.7)',borderRadius:4}]},
+    options:{...CHART_DEFAULTS, plugins:{...CHART_DEFAULTS.plugins, title:{display:false}}},
+  });
+  const ctxA = document.getElementById('chartActions').getContext('2d');
+  chartActions = new Chart(ctxA, {
+    type:'doughnut',
+    data:{labels:[],datasets:[{data:[],backgroundColor:['#10a37f','#e08a00','#ff6b6b','#60a5fa','#a78bfa','#f59e0b']}]},
+    options:{responsive:true, maintainAspectRatio:false,
+             plugins:{legend:{position:'right',labels:{color:'#9ca3af',font:{size:11}}}}},
+  });
+}
+
+// ========== DATA FETCH ==========
+async function fetchStats(){
+  const days = document.getElementById('days-select').value;
+  const [statsRes, eventsRes] = await Promise.all([
+    fetch(`/api/kb-stats?days=${days}`, {credentials:'same-origin'}),
+    fetch('/api/kb-events?limit=50', {credentials:'same-origin'}),
+  ]);
+  const stats = await statsRes.json();
+  const evData = await eventsRes.json();
+  renderStats(stats);
+  renderEventsTable(evData.events || []);
+}
+
+function renderStats(s){
+  document.getElementById('kpi-version').textContent = s.kb_version ?? '–';
+  document.getElementById('kpi-mutations').textContent = s.total_mutations ?? '–';
+  document.getElementById('kpi-last').textContent = s.last_update ? 'last: ' + fmtTime(s.last_update) : 'no changes yet';
+  document.getElementById('kpi-rag').textContent = (s.rag_hit_rate ?? '–') + '%';
+  document.getElementById('kpi-queries').textContent = (s.total_queries ?? 0) + ' total queries';
+  document.getElementById('kpi-ms').textContent = Math.round(s.avg_response_ms ?? 0) + 'ms';
+  document.getElementById('kpi-sessions').textContent = s.active_sessions ?? '–';
+  document.getElementById('kpi-chunks-add').textContent = s.total_chunks_added ?? '–';
+  document.getElementById('kpi-chunks-del').textContent = '–' + (s.total_chunks_deleted ?? 0) + ' deleted';
+
+  // Daily mutations chart
+  const dm = s.daily_mutations || [];
+  chartMutations.data.labels = dm.map(d => d.day);
+  chartMutations.data.datasets[0].data = dm.map(d => d.count);
+  chartMutations.update();
+
+  // Actions doughnut
+  const ma = s.mutations_by_action || [];
+  chartActions.data.labels = ma.map(d => d.action);
+  chartActions.data.datasets[0].data = ma.map(d => d.count);
+  chartActions.update();
+
+  // Top files table
+  const tbody = document.querySelector('#tbl-top-files tbody');
+  const tf = s.top_files || [];
+  tbody.innerHTML = tf.length === 0
+    ? '<tr><td colspan="2" class="empty">No file changes logged yet</td></tr>'
+    : tf.map(f => `<tr><td>${esc(f.filename)}</td><td class="num">${f.mutations}</td></tr>`).join('');
+}
+
+function renderEventsTable(events){
+  const tbody = document.querySelector('#tbl-events tbody');
+  if (!events.length){
+    tbody.innerHTML = '<tr><td colspan="7" class="empty">No events logged yet</td></tr>';
+    return;
+  }
+  tbody.innerHTML = events.map(e => `
+    <tr>
+      <td style="white-space:nowrap;color:#9ca3af">${esc(fmtTime(e.timestamp))}</td>
+      <td>${badge(e.action)}</td>
+      <td style="color:#ccc;overflow:hidden;text-overflow:ellipsis;max-width:200px">${esc(e.filename)}</td>
+      <td class="num ev-chunks-add">${e.chunks_added > 0 ? '+'+e.chunks_added : ''}</td>
+      <td class="num ev-chunks-del">${e.chunks_deleted > 0 ? '−'+e.chunks_deleted : ''}</td>
+      <td><span class="badge badge-watcher">${esc(e.triggered_by)}</span></td>
+      <td class="num" style="color:#555">v${e.kb_version}</td>
+    </tr>`).join('');
+}
+
+// ========== LIVE FEED ==========
+const feedList = document.getElementById('feed-list');
+const feedDot = document.getElementById('feed-dot');
+const wsDot = document.getElementById('ws-dot');
+const connStatus = document.getElementById('connection-status');
+let kbWs = null;
+let reconnTimer = null;
+
+function addLiveFeedItem(evt){
+  if (feedList.children.length === 1 && feedList.children[0].childElementCount === 1){
+    // Remove "waiting" placeholder
+    feedList.innerHTML = '';
+  }
+  const cls = BADGE_MAP[evt.action] || '';
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="ev-time">${esc(fmtTime(evt.timestamp))}</span>`
+    + `<span class="badge ${cls}" style="flex-shrink:0">${esc(evt.action)}</span>`
+    + `<span class="ev-file">${esc(evt.filename)}</span>`
+    + (evt.chunks_added ? `<span class="ev-chunks-add">+${evt.chunks_added}</span>` : '')
+    + (evt.chunks_deleted ? `<span class="ev-chunks-del">−${evt.chunks_deleted}</span>` : '')
+    + `<span style="color:#444;font-size:.72em;margin-left:auto">v${evt.kb_version}</span>`;
+  feedList.prepend(li);
+  while(feedList.children.length > 60) feedList.removeChild(feedList.lastChild);
+}
+
+function connectWs(){
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  kbWs = new WebSocket(`${protocol}://${location.host}/ws/kb-events`);
+
+  kbWs.onopen = () => {
+    wsDot.style.background = '#10a37f';
+    feedDot.style.background = '#10a37f';
+    connStatus.textContent = 'Connected — live';
+  };
+
+  kbWs.onmessage = (e) => {
+    try {
+      const evt = JSON.parse(e.data);
+      if (evt.type === 'connected'){
+        connStatus.textContent = `KB v${evt.kb_version} · ${evt.active_sessions} session(s)`;
+        document.getElementById('kpi-version').textContent = evt.kb_version;
+        document.getElementById('kpi-sessions').textContent = evt.active_sessions;
+      } else if (evt.type === 'kb_updated'){
+        addLiveFeedItem(evt);
+        // Refresh KPIs without full page reload
+        fetchStats();
+        document.getElementById('status-msg').textContent =
+          `↑ KB updated (${evt.action} on ${evt.filename}) — stats refreshed`;
+      }
+    } catch(_){}
+  };
+
+  kbWs.onclose = () => {
+    wsDot.style.background = '#666';
+    feedDot.style.background = '#666';
+    connStatus.textContent = 'Disconnected — reconnecting in 5 s…';
+    reconnTimer = setTimeout(connectWs, 5000);
+  };
+  kbWs.onerror = () => {
+    wsDot.style.background = '#ff6b6b';
+    connStatus.textContent = 'Connection error';
+  };
+}
+
+// ========== INIT ==========
+document.addEventListener('DOMContentLoaded', () => {
+  initCharts();
+  fetchStats();
+  connectWs();
+
+  document.getElementById('btn-refresh').onclick = async () => {
+    const btn = document.getElementById('btn-refresh');
+    btn.disabled = true;
+    btn.textContent = 'Refreshing…';
+    document.getElementById('status-msg').textContent = '';
+    try { await fetchStats(); document.getElementById('status-msg').textContent = '✓ Refreshed'; }
+    catch(e){ document.getElementById('status-msg').textContent = '✗ ' + e.message; }
+    finally { btn.disabled = false; btn.textContent = '↻ Refresh Stats'; }
+  };
+
+  document.getElementById('days-select').onchange = () => fetchStats();
+});
+
+window.addEventListener('beforeunload', () => {
+  clearTimeout(reconnTimer);
+  if(kbWs) kbWs.close();
+});
+</script>
+</body>
+</html>

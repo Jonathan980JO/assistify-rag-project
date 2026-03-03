@@ -267,6 +267,43 @@
       0%, 100% { opacity: 0.4; }
       50% { opacity: 1; }
     }
+    /* KB update notification banner */
+    #kb-update-banner {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 500;
+      background: #7c5c00;
+      color: #ffe9a0;
+      border-bottom: 2px solid #f0b429;
+      padding: 10px 18px;
+      font-size: 0.93rem;
+      font-weight: 600;
+      align-items: center;
+      gap: 10px;
+      animation: bannerSlideIn 0.3s ease;
+    }
+    #kb-update-banner.visible {
+      display: flex;
+    }
+    #kb-update-banner .kb-banner-icon { font-size: 1.2rem; }
+    #kb-update-banner .kb-banner-msg { flex: 1; }
+    #kb-update-banner .kb-banner-close {
+      background: none;
+      border: 2px solid #f0b429;
+      color: #ffe9a0;
+      border-radius: 5px;
+      padding: 2px 9px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 700;
+      transition: background 0.2s;
+    }
+    #kb-update-banner .kb-banner-close:hover { background: rgba(240,180,41,0.25); }
+    @keyframes bannerSlideIn {
+      from { opacity: 0; transform: translateY(-12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
   </style>
 </head>
 <body>
@@ -305,6 +342,12 @@
     <h1 class="header-title">Assistify RAG Chat</h1>
     <div class="header-spacer"></div>
   </header>
+  <!-- KB update notification banner (shown when backend broadcasts kb_updated) -->
+  <div id="kb-update-banner">
+    <span class="kb-banner-icon">🔔</span>
+    <span class="kb-banner-msg">Knowledge base updated &mdash; your next reply will use the latest information.</span>
+    <button class="kb-banner-close" onclick="dismissKbBanner()">✕ Dismiss</button>
+  </div>
   <main>
     <div class="chat-container">
       <div class="chat-log" id="chatLog"></div>
@@ -635,6 +678,10 @@
             lastTranscript = data.text;
             appendMsg('user', data.text);
           }
+        } else if(data.type === 'kb_updated') {
+          // Knowledge base changed while user is in chat — show sticky banner
+          showKbUpdateBanner(data.message);
+
         } else if(data.type === 'error') {
           hideThinking();
           appendMsg('system', '[Error] ' + (data.message || 'Connection error'));
@@ -680,6 +727,24 @@
       msg.textContent = `${role === 'assistant' ? 'Assistant:' : (role === 'user' ? 'You:' : '')} ${text}`;
       chatLog.appendChild(msg);
       chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    // ---- KB update banner ----
+    let _kbBannerTimer = null;
+    function showKbUpdateBanner(msg) {
+      const banner = document.getElementById('kb-update-banner');
+      if (!banner) return;
+      const msgEl = banner.querySelector('.kb-banner-msg');
+      if (msgEl && msg) msgEl.textContent = msg;
+      banner.classList.add('visible');
+      // Auto-dismiss after 8 seconds
+      clearTimeout(_kbBannerTimer);
+      _kbBannerTimer = setTimeout(dismissKbBanner, 8000);
+    }
+    function dismissKbBanner() {
+      clearTimeout(_kbBannerTimer);
+      const banner = document.getElementById('kb-update-banner');
+      if (banner) banner.classList.remove('visible');
     }
 
     // Voice control button handlers

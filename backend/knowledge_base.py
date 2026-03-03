@@ -80,31 +80,151 @@ def add_document(doc_id: str, text: str, metadata: dict = None):
         logger.error(f"Error adding document {doc_id}: {e}")
         return False
 
-def search_documents(query: str, top_k: int = 3):
+
+def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_version: int = 0) -> int:
     """
-    Search for relevant documents using semantic similarity
-    
+    Split *text* into fine-grained chunks and store each one with its own
+    embedding.  This is the correct way to index a file that contains many
+    independent facts (e.g. one fact per line or per paragraph), because a
+    single embedding for the whole file averages all facts together and makes
+    individual lookups imprecise.
+
+    Chunking strategy:
+      1. Split on blank lines (paragraphs).  
+      2. If a paragraph is still > 400 chars, split further on single newlines.
+      3. Skip chunks shorter than 10 chars (headers, blank lines, etc.).
+
+    Args:
+        doc_id: Base document identifier (chunk suffix appended automatically).
+        text: Full document text to chunk and embed.
+        metadata: Optional extra metadata merged into every chunk's metadata.
+        kb_version: Global KB version counter at the time of indexing (for audit).
+
+    Returns the number of chunks successfully indexed.
+    """
+    import re as _re
+    from datetime import datetime as _dt
+
+    # Normalise Windows line-endings
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # Step 1: split on blank lines
+    paragraphs = _re.split(r'\n{2,}', text)
+
+    chunks: list[str] = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) > 400:
+            # Step 2: split long paragraph on single newlines
+            for line in para.split('\n'):
+                line = line.strip()
+                if line:
+                    chunks.append(line)
+        else:
+            chunks.append(para)
+
+    # Step 3: drop trivially short chunks
+    chunks = [c for c in chunks if len(c) >= 10]
+
+    if not chunks:
+        logger.warning(f"chunk_and_add_document: no usable chunks from doc_id={doc_id}")
+        return 0
+
+    collection = get_or_create_collection()
+    if not collection:
+        return 0
+
+    success = 0
+    now_iso = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    for idx, chunk in enumerate(chunks):
+        chunk_id = f"{doc_id}_chunk_{idx}"
+        chunk_meta = dict(metadata or {})
+        chunk_meta["chunk_index"] = idx
+        chunk_meta["chunk_total"] = len(chunks)
+        chunk_meta["updated_at"] = now_iso
+        chunk_meta["kb_version"] = kb_version
+        try:
+            embedding = embedder.encode(chunk).tolist()
+            # upsert instead of add so re-indexing an existing file never
+            # raises a duplicate-ID error — it simply overwrites the old entry.
+            collection.upsert(
+                ids=[chunk_id],
+                embeddings=[embedding],
+                documents=[chunk],
+                metadatas=[chunk_meta],
+            )
+            success += 1
+        except Exception as e:
+            logger.error(f"Error upserting chunk {chunk_id}: {e}")
+
+    logger.info(f"✓ Indexed {success}/{len(chunks)} chunks for doc_id={doc_id}")
+    return success
+
+def search_documents(query: str, top_k: int = 3, distance_threshold: float = 1.2):
+    """
+    Search for relevant documents using semantic similarity.
+
+    Only returns documents whose L2 distance is below *distance_threshold*.
+    ChromaDB always returns the nearest neighbours regardless of how unrelated
+    they are, so without this gate the LLM would receive irrelevant context for
+    every query (e.g. a Breaking Bad quote returning a football document).
+
     Args:
         query: User's question
-        top_k: Number of results to return
-        
+        top_k: Maximum number of results to consider
+        distance_threshold: Maximum L2 distance to accept (lower = stricter).
+                            Typical values for all-MiniLM-L6-v2:
+                              < 0.5  → very high relevance
+                              0.5–1.0 → good relevance
+                              > 1.0  → likely unrelated (filtered out)
+
     Returns:
-        List of relevant document texts
+        List of relevant document texts (may be empty if nothing is close enough)
     """
     try:
         collection = get_or_create_collection()
         if not collection:
             return []
-            
-        query_embedding = embedder.encode(query).tolist()
+
+        # Guard: ChromaDB raises if n_results > number of stored documents
+        count = collection.count()
+        if count == 0:
+            logger.info("Knowledge base is empty — no documents to search")
+            return []
+        n_results = min(top_k, count)
+
+        # Normalise query: strip whitespace and lowercase so "Say My Name" and
+        # "say my name" produce identical embeddings and rank equally.
+        normalised_query = query.strip().lower()
+        query_embedding = embedder.encode(normalised_query).tolist()
         results = collection.query(
             query_embeddings=[query_embedding],
-            n_results=top_k
+            n_results=n_results,
+            include=["documents", "distances"],
         )
+
+        # Safely unpack results (ChromaDB may return None for empty results)
+        if not results or not results.get('documents') or not results.get('distances'):
+            return []
         
-        documents = results['documents'][0] if results['documents'] else []
-        logger.info(f"Found {len(documents)} relevant documents for: {query[:50]}...")
-        return documents
+        raw_docs      = results['documents'][0] if results['documents'][0] else []
+        raw_distances = results['distances'][0]  if results['distances'][0] else []
+
+        # Filter by relevance threshold
+        relevant = []
+        for doc, dist in zip(raw_docs, raw_distances):
+            if dist <= distance_threshold:
+                relevant.append(doc)
+                logger.info(f"  ✓ Accepted doc (dist={dist:.3f}): {doc[:60]}...")
+            else:
+                logger.info(f"  ✗ Rejected doc (dist={dist:.3f} > threshold={distance_threshold}): {doc[:60]}...")
+
+        logger.info(
+            f"RAG search: query='{query[:50]}...' | candidates={len(raw_docs)} | accepted={len(relevant)}"
+        )
+        return relevant
     except Exception as e:
         logger.error(f"Error searching documents: {e}")
         return []
@@ -135,6 +255,196 @@ def delete_document(doc_id: str):
     except Exception as e:
         logger.error(f"Error deleting document {doc_id}: {e}")
         return False
+
+
+def delete_documents_with_prefix(prefix: str) -> int:
+    """
+    Delete all documents whose id starts with the given prefix.
+
+    Returns the number of documents deleted.
+    """
+    try:
+        collection = get_or_create_collection()
+        if not collection:
+            return 0
+
+        # Get all ids and filter by prefix
+        # NOTE: "ids" must NOT be in include — ChromaDB always returns ids automatically
+        # and raises ValueError if you explicitly request them.
+        result = collection.get(include=["metadatas"]) or {}
+        ids = result.get("ids", [])
+        to_delete = [i for i in ids if str(i).startswith(prefix)]
+        if not to_delete:
+            return 0
+
+        collection.delete(ids=to_delete)
+        logger.info(f"✓ Deleted {len(to_delete)} documents with prefix: {prefix}")
+        return len(to_delete)
+    except Exception as e:
+        logger.error(f"Error deleting documents with prefix {prefix}: {e}")
+        return 0
+
+
+def delete_documents_by_filename(filename: str) -> int:
+    """
+    Delete ALL chunks associated with a particular filename, regardless of the
+    doc_id prefix used when indexing them.
+
+    Uses multiple matching strategies so it catches:
+      - Exact metadata.filename match  (e.g. "Best_player.txt")
+      - UUID-prefixed variants         (e.g. "ab12cd34_Best_player.txt")
+      - doc_id containing the filename (e.g. "upload_ab12cd34_Best_player.txt_chunk_0")
+
+    Returns the number of documents deleted.
+    """
+    try:
+        collection = get_or_create_collection()
+        if not collection:
+            return 0
+        result = collection.get(include=["metadatas"]) or {}
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+
+        # Strip any leading UUID prefix (8 hex chars + underscore) from the
+        # target filename so we can match both prefixed and unprefixed variants.
+        import re as _re
+        bare_name = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
+
+        to_delete = set()
+        for doc_id, meta in zip(ids, metadatas):
+            sid = str(doc_id)
+            fn = meta.get("filename", "") if isinstance(meta, dict) else ""
+
+            # Strategy 1: exact metadata.filename match
+            if fn == filename:
+                to_delete.add(sid)
+                continue
+
+            # Strategy 2: metadata.filename ends with the bare name
+            #   e.g. fn="ab12cd34_Best_player.txt", bare_name="Best_player.txt"
+            if bare_name and fn.endswith(bare_name):
+                to_delete.add(sid)
+                continue
+
+            # Strategy 3: doc_id contains the filename
+            if filename in sid or bare_name in sid:
+                to_delete.add(sid)
+                continue
+
+        if not to_delete:
+            logger.info(f"delete_documents_by_filename: nothing found for '{filename}'")
+            return 0
+
+        collection.delete(ids=list(to_delete))
+        logger.info(f"✓ Deleted {len(to_delete)} chunks matching filename '{filename}'")
+        return len(to_delete)
+    except Exception as e:
+        logger.error(f"Error deleting documents by filename {filename}: {e}")
+        return 0
+
+
+def update_document(doc_id: str, text: str, metadata: dict = None) -> int:
+    """
+    Replace an existing uploaded document (and its chunked children) with
+    new text.  This deletes any existing chunks with the same prefix and
+    reindexes the new content using `chunk_and_add_document`.
+
+    Returns the number of chunks indexed for the updated document.
+    """
+    try:
+        # Remove existing chunks that were created from this doc_id
+        delete_documents_with_prefix(str(doc_id))
+        # Add new chunks
+        return chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata)
+    except Exception as e:
+        logger.error(f"Error updating document {doc_id}: {e}")
+        return 0
+
+
+def find_base_doc_id_by_filename(filename: str) -> str | None:
+    """
+    Find the base doc_id (before the "_chunk_" suffix) for any indexed chunks
+    that have metadata.filename == filename. Returns the base doc_id or None.
+    """
+    try:
+        collection = get_or_create_collection()
+        if not collection:
+            return None
+        # NOTE: "ids" must NOT be in include — ChromaDB always returns ids automatically
+        result = collection.get(include=["metadatas"]) or {}
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        if not ids or not metadatas:
+            return None
+
+        for doc_id, meta in zip(ids, metadatas):
+            if isinstance(meta, dict) and meta.get("filename") == filename:
+                # If the id ends with _chunk_\d+, strip that suffix
+                sid = str(doc_id)
+                if "_chunk_" in sid:
+                    return sid.split("_chunk_")[0]
+                return sid
+        return None
+    except Exception as e:
+        logger.error(f"Error finding base doc id by filename {filename}: {e}")
+        return None
+
+
+def delete_documents_by_ids(ids: list) -> int:
+    """
+    Delete specific document ids from the collection. Returns number deleted.
+    """
+    try:
+        collection = get_or_create_collection()
+        if not collection:
+            return 0
+        if not ids:
+            return 0
+        collection.delete(ids=ids)
+        logger.info(f"✓ Deleted {len(ids)} specified documents")
+        return len(ids)
+    except Exception as e:
+        logger.error(f"Error deleting documents by ids: {e}")
+        return 0
+
+
+def list_uploaded_files() -> list:
+    """
+    Return a list of uploaded files discovered in the collection, along with
+    the number of chunked entries indexed for each filename and the base
+    doc_id used when originally indexed.
+
+    Returns: [{"filename": str, "chunks": int, "doc_id": str}, ...]
+    """
+    out = {}
+    try:
+        collection = get_or_create_collection()
+        if not collection:
+            return []
+        # NOTE: "ids" must NOT be in include — ChromaDB always returns ids automatically
+        result = collection.get(include=["metadatas"]) or {}
+        ids = result.get("ids", [])
+        metadatas = result.get("metadatas", [])
+        for doc_id, meta in zip(ids, metadatas):
+            if not isinstance(meta, dict):
+                continue
+            filename = meta.get("filename")
+            if not filename:
+                continue
+            base = str(doc_id)
+            if "_chunk_" in base:
+                base = base.split("_chunk_")[0]
+            k = (filename, base)
+            out.setdefault(k, 0)
+            out[k] += 1
+        # Build result list
+        res = []
+        for (filename, doc_id), cnt in out.items():
+            res.append({"filename": filename, "chunks": cnt, "doc_id": doc_id})
+        return res
+    except Exception as e:
+        logger.error(f"Error listing uploaded files: {e}")
+        return []
 
 def clear_knowledge_base():
     """Clear all documents from knowledge base"""

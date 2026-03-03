@@ -3,7 +3,8 @@ REM Quick restart script for Assistify servers
 
 REM Force Ollama to use GPU (RTX 3070)
 set "CUDA_VISIBLE_DEVICES=0"
-set "OLLAMA_KEEP_ALIVE=5m"
+REM -1 = never evict model from VRAM between requests
+set "OLLAMA_KEEP_ALIVE=-1"
 
 set "PYTHON_EXE=%~dp0graduation\Scripts\python.exe"
 if not exist "%PYTHON_EXE%" (

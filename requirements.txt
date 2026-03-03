@@ -20,3 +20,5 @@ huggingface_hub[hf_xet]  # Faster model downloads with Xet Storage
 authlib
 httpx
 requests
+
+watchdog
