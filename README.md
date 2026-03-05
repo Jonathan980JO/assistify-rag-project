@@ -47,6 +47,55 @@ Assistify/
 │   └── PROJECT_BRIEFING.md
 │
 ├── config.py             # Configuration settings
+ # Assistify - AI-Powered Support System
+
+[![Security](https://img.shields.io/badge/OWASP-Compliant-green)]()
+[![Token Optimization](https://img.shields.io/badge/TOON-40--60%25%20Savings-blue)]()
+[![Tests](https://img.shields.io/badge/Tests-Passing-success)]()
+
+Assistify is a comprehensive AI-powered customer support system with RAG (Retrieval-Augmented Generation), advanced security features, and token-optimized LLM communication.
+
+## 📁 Project Structure
+
+```
+Assistify/
+├── backend/              # Backend servers and AI/ML components
+│   ├── main_llm_server.py          # Qwen2.5-7B LLM inference server
+│   ├── assistify_rag_server.py     # RAG server with TOON optimization
+│   ├── toon.py                      # TOON encoder/decoder (40-60% token savings)
+│   ├── knowledge_base.py            # Knowledge base management
+│   ├── database.py                  # Database models and ORM
+│   ├── analytics.py                 # User analytics
+│   ├── Models/                      # AI models (Qwen2.5-7B, Vosk)
+│   └── chroma_db/                   # Vector database for RAG
+│
+├── Login_system/         # Authentication and user management
+│   ├── login_server.py              # FastAPI auth server
+│   ├── templates/                   # HTML templates (OWASP-secured)
+│   └── static/security.js           # Client-side security module
+│
+├── frontend/             # Frontend web interface
+│   ├── index.html
+│   └── Website_ChatGpt/
+│
+├── tests/                # All test files
+│   ├── test_toon.py                 # TOON unit tests (9/9 passing)
+│   ├── test_toon_integration.py     # TOON integration tests (6/6 passing)
+│   ├── test_owasp_security.py       # OWASP security audit
+│   └── test_system_integrity.py     # System integrity tests
+│
+├── scripts/              # Utility scripts and tools
+│   ├── apply_owasp_fixes.py         # OWASP security automation
+│   ├── migrate_analytics.py         # Database migration
+│   └── project_start_server.py      # Server startup script
+│
+├── docs/                 # Documentation and reports
+│   ├── OWASP_IMPLEMENTATION_REPORT.md
+│   ├── TOON_IMPLEMENTATION.md
+│   ├── SECURITY_IMPLEMENTATION.md
+│   └── PROJECT_BRIEFING.md
+│
+├── config.py             # Configuration settings
 ├── requirements.txt      # Python dependencies
 └── sample_kb.txt         # Sample knowledge base
 ```
