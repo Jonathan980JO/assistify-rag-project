@@ -1,0 +1,9 @@
+INFO:     Started server process [32428]
+INFO:     Waiting for application startup.
+2026-02-28 01:11:30,906 INFO Loading XTTS v2 model onto GPU...
+C:\Users\MK\miniconda3\envs\assistify_xtts\lib\site-packages\librosa\core\intervals.py:8: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import resource_filename
+INFO:     Application startup complete.
+ERROR:    [Errno 10048] error while attempting to bind on address ('127.0.0.1', 5002): only one usage of each socket address (protocol/network address/port) is normally permitted
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.

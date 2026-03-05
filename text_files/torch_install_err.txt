@@ -1,0 +1,2 @@
+  WARNING: Attempting to resume incomplete download (2381.9 MB/2449.4 MB, attempt 1)
+ERROR: Operation cancelled by user

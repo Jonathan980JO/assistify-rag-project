@@ -1,0 +1,65 @@
+# ============================================================
+# Assistify Voice System — Locked Requirements
+# Tested: RTX 3070 Laptop (8 GB VRAM), Python 3.11.6
+# Stress test: 20/20 rounds PASS | OOM: 0 | Errors: 0
+# XTTS VRAM: ~1802 MB | Qwen 2.5 7B (Ollama): ~4696 MB
+# Combined peak: ~6.5 GB (safe under 7.5 GB limit)
+# ============================================================
+# Generated: 2025-07
+# Usage: pip install -r requirements_voice_locked.txt \
+#        --extra-index-url https://download.pytorch.org/whl/cu124
+
+# ── PyTorch (CUDA 12.4) ──────────────────────────────────
+torch==2.6.0+cu124
+torchaudio==2.6.0+cu124
+torchvision==0.21.0+cu124
+
+# ── HuggingFace stack ────────────────────────────────────
+# IMPORTANT: transformers must stay at 5.x.
+# Downgrading to 4.x requires huggingface-hub<1.0,
+# which breaks sentence-transformers 5.x and faster-whisper 1.x.
+transformers==5.2.0
+tokenizers==0.22.2
+huggingface_hub==1.4.1
+sentence-transformers==5.2.3
+
+# ── TTS (Coqui XTTS v2) ─────────────────────────────────
+# Three site-package patches are required (see docs/XTTS_PATCHES.md):
+#   1. TTS/tts/layers/xtts/stream_generator.py  — BeamSearchScorer shim
+#   2. TTS/tts/layers/xtts/gpt_inference.py     — GenerationMixin added
+#   3. TTS/utils/io.py                          — weights_only=False default
+#   4. TTS/__init__.py                          — global torch.load monkey-patch
+TTS==0.22.0
+coqpit==0.0.17
+
+# ── Speech-to-text ───────────────────────────────────────
+faster-whisper==1.2.1
+ctranslate2==4.7.1
+
+# ── Scientific / audio ───────────────────────────────────
+numpy==1.26.4
+scipy==1.17.1
+soundfile==0.13.1
+onnxruntime==1.24.2
+
+# ── FastAPI / WebSocket server ───────────────────────────
+fastapi==0.131.0
+uvicorn==0.41.0
+websockets==16.0
+starlette==0.52.1
+anyio==4.12.1
+python-multipart==0.0.22
+aiohttp==3.13.3
+aiofiles
+
+# ── Vector DB ────────────────────────────────────────────
+chromadb==1.5.1
+
+# ── HTTP / auth ──────────────────────────────────────────
+httpx==0.28.1
+requests==2.32.5
+requests-oauthlib==2.0.0
+pydantic==2.12.5
+pydantic_core==2.41.5
+passlib==1.7.4
+bcrypt==4.0.1

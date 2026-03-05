@@ -1,0 +1,24 @@
+fastapi
+psutil
+uvicorn
+chromadb
+sentence-transformers
+PyPDF2
+pyotp
+# vosk  # DEPRECATED: Replaced by faster-whisper for GPU-accelerated ASR
+llama-cpp-python
+passlib
+itsdangerous
+aiohttp
+pydantic
+transformers
+torch
+faster-whisper  # GPU-accelerated speech recognition (requires CUDA)
+TTS             # Coqui TTS — XTTS v2 text-to-speech
+nvidia-ml-py  # GPU monitoring (replaces deprecated pynvml)
+huggingface_hub[hf_xet]  # Faster model downloads with Xet Storage
+authlib
+httpx
+requests
+
+watchdog

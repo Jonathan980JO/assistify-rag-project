@@ -1,0 +1,30 @@
+﻿  File "G:\Grad_Project\assistify-rag-project-main\graduation\Lib\site-packages\grpc\__init__.py", line 22, in <module>
+    from grpc import _compression
+  File "G:\Grad_Project\assistify-rag-project-main\graduation\Lib\site-packages\grpc\_compression.py", line 20, in <module>
+    from grpc._cython import cygrpc
+ImportError: DLL load failed while importing cygrpc: An Application Control policy has blocked this file.
+[WARNING] Using default SESSION_SECRET for development only!
+[WARNING] GOOGLE_CLIENT_ID not set - OAuth will not work
+[WARNING] GOOGLE_CLIENT_SECRET not set - OAuth will not work
+INFO:chromadb.telemetry.product.posthog:Anonymized telemetry enabled. See                     https://docs.trychroma.com/telemetry for more information.
+INFO:sentence_transformers.SentenceTransformer:Use pytorch device_name: cuda
+INFO:sentence_transformers.SentenceTransformer:Load pretrained SentenceTransformer: all-MiniLM-L6-v2
+INFO:Assistify:Initializing Assistify RAG System with faster-whisper...
+INFO:     Started server process [6684]
+INFO:     Waiting for application startup.
+INFO:Database:\u2713 Database initialized
+INFO:Assistify:\u2713 Databases ready
+INFO:Assistify:\u2713 Persistent LLM session created with connection pooling
+INFO:Assistify:Loading faster-whisper model 'medium.en' on cuda...
+INFO:Assistify:Model path: G:\Grad_Project\assistify-rag-project-main\backend\Models\faster-whisper-medium.en
+INFO:Assistify:Downloading model 'medium.en' to: G:\Grad_Project\assistify-rag-project-main\backend\Models\faster-whisper-medium.en
+INFO:Assistify:\u2713 faster-whisper loaded successfully
+INFO:Assistify:  Device: cuda
+INFO:Assistify:  Compute type: float16
+INFO:Assistify:  Beam size: 5
+INFO:Assistify:  VAD filter: True
+WARNING:Assistify:XTTS microservice not reachable at http://127.0.0.1:5002  TTS unavailable. Start it with: start_xtts_service.bat  (<urlopen error [WinError 10061] No connection could be made because the target machine actively refused it>)
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:7000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62113 - "GET /health HTTP/1.1" 200 OK
+INFO:     Shutting down
