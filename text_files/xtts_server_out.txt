@@ -1,0 +1,130 @@
+ > tts_models/multilingual/multi-dataset/xtts_v2 is already downloaded.
+ > Using model: xtts
+INFO:     127.0.0.1:58594 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54873 - "GET /health HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['Hello, I am Assistify, your AI voice assistant.']
+ > Processing time: 7.509315013885498
+ > Real-time factor: 1.1998579424360525
+INFO:     127.0.0.1:54874 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['The quick brown fox jumps over the lazy dog.']
+ > Processing time: 2.2006142139434814
+ > Real-time factor: 0.6602920669694885
+INFO:     127.0.0.1:54877 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['VRAM usage is within safe limits for the RTX 3070.']
+ > Processing time: 3.930467367172241
+ > Real-time factor: 0.7342653301320652
+INFO:     127.0.0.1:54878 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['Voice synthesis is working correctly end to end.']
+ > Processing time: 3.081899642944336
+ > Real-time factor: 0.7271431168349021
+INFO:     127.0.0.1:54879 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['System is production-ready for the graduation demo.']
+ > Processing time: 2.5021615028381348
+ > Real-time factor: 0.6884191098220812
+INFO:     127.0.0.1:54880 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 1 of 20.']
+ > Processing time: 2.561781644821167
+ > Real-time factor: 0.6959304808336627
+INFO:     127.0.0.1:54882 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 2 of 20.']
+ > Processing time: 3.8091206550598145
+ > Real-time factor: 0.7628897547964405
+INFO:     127.0.0.1:54883 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 3 of 20.']
+ > Processing time: 3.3380608558654785
+ > Real-time factor: 0.6685460132233124
+INFO:     127.0.0.1:54884 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 4 of 20.']
+ > Processing time: 3.6557064056396484
+ > Real-time factor: 0.7697510145564768
+INFO:     127.0.0.1:54885 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 5 of 20.']
+ > Processing time: 2.8651106357574463
+ > Real-time factor: 0.7568488776889459
+INFO:     127.0.0.1:54886 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 6 of 20.']
+ > Processing time: 2.640050172805786
+ > Real-time factor: 0.7082575714226151
+INFO:     127.0.0.1:54887 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 7 of 20.']
+ > Processing time: 2.727191686630249
+ > Real-time factor: 0.7010652943736825
+INFO:     127.0.0.1:54888 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 8 of 20.']
+ > Processing time: 3.845494270324707
+ > Real-time factor: 0.7543874436001761
+INFO:     127.0.0.1:54889 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 9 of 20.']
+ > Processing time: 3.029676914215088
+ > Real-time factor: 0.7070742586626025
+INFO:     127.0.0.1:54890 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 10 of 20.']
+ > Processing time: 3.4322683811187744
+ > Real-time factor: 0.6795136995732382
+INFO:     127.0.0.1:54891 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 11 of 20.']
+ > Processing time: 3.159038543701172
+ > Real-time factor: 0.737265028456931
+INFO:     127.0.0.1:54892 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 12 of 20.']
+ > Processing time: 4.065645694732666
+ > Real-time factor: 0.7189744608050116
+INFO:     127.0.0.1:61573 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 13 of 20.']
+ > Processing time: 3.1805334091186523
+ > Real-time factor: 0.7170248003339837
+INFO:     127.0.0.1:61574 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 14 of 20.']
+ > Processing time: 4.006249189376831
+ > Real-time factor: 0.7484224161732338
+INFO:     127.0.0.1:61578 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 15 of 20.']
+ > Processing time: 4.60421085357666
+ > Real-time factor: 0.7235919811364278
+INFO:     127.0.0.1:61579 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 16 of 20.']
+ > Processing time: 3.717282295227051
+ > Real-time factor: 0.7292355392327088
+INFO:     127.0.0.1:61580 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 17 of 20.']
+ > Processing time: 3.058706045150757
+ > Real-time factor: 0.7399121061038068
+INFO:     127.0.0.1:61581 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 18 of 20.']
+ > Processing time: 2.3108737468719482
+ > Real-time factor: 0.6745759123931167
+INFO:     127.0.0.1:61582 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 19 of 20.']
+ > Processing time: 4.64585018157959
+ > Real-time factor: 0.7478755147166654
+INFO:     127.0.0.1:61584 - "POST /synthesize HTTP/1.1" 200 OK
+ > Text splitted to sentences.
+['This is stress test iteration number 20 of 20.']
+ > Processing time: 4.585390567779541
+ > Real-time factor: 0.7206342087149252
+INFO:     127.0.0.1:61585 - "POST /synthesize HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61586 - "GET /health HTTP/1.1" 200 OK
