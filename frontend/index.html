@@ -304,6 +304,155 @@
       from { opacity: 0; transform: translateY(-12px); }
       to   { opacity: 1; transform: translateY(0); }
     }
+
+    /* ===== LANGUAGE SELECTOR BAR ===== */
+    .lang-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      background: #1e1e2e;
+      border-radius: 10px;
+      padding: 6px 10px;
+      border: 1px solid #333;
+    }
+    .lang-bar-label {
+      font-size: 0.78rem;
+      color: #aaa;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .lang-btn {
+      flex: 1;
+      padding: 5px 10px;
+      border-radius: 7px;
+      border: 1.5px solid #444;
+      background: #2b2b2b;
+      color: #ccc;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: center;
+    }
+    .lang-btn:hover { border-color: #10a37f; color: #fff; }
+    .lang-btn.active {
+      background: #10a37f;
+      border-color: #10a37f;
+      color: #fff;
+      box-shadow: 0 2px 8px #10a37f55;
+    }
+    .lang-btn.ar-btn.active {
+      background: #2563eb;
+      border-color: #2563eb;
+      box-shadow: 0 2px 8px #2563eb55;
+    }
+
+    /* ===== ARABIC DOWNLOAD MODAL ===== */
+    .ar-modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.72);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+    }
+    .ar-modal-overlay.show { display: flex; }
+    .ar-modal {
+      background: #2b2b2b;
+      border-radius: 16px;
+      padding: 28px 28px 22px;
+      max-width: 420px;
+      width: 92vw;
+      box-shadow: 0 8px 36px rgba(0,0,0,0.5);
+      border: 1px solid #444;
+      animation: modalPop 0.25s ease;
+    }
+    @keyframes modalPop {
+      from { transform: scale(0.88); opacity: 0; }
+      to   { transform: scale(1);    opacity: 1; }
+    }
+    .ar-modal h2 {
+      color: #2563eb;
+      margin: 0 0 6px;
+      font-size: 1.2rem;
+    }
+    .ar-modal h2 .ar-flag { margin-right: 6px; }
+    .ar-modal p { color: #ccc; font-size: 0.88rem; line-height: 1.5; margin: 8px 0; }
+    .ar-modal .req-list {
+      background: #1e1e2e;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin: 10px 0;
+      list-style: none;
+    }
+    .ar-modal .req-list li {
+      color: #adf;
+      font-size: 0.82rem;
+      padding: 3px 0;
+      border-bottom: 1px solid #333;
+    }
+    .ar-modal .req-list li:last-child { border-bottom: none; }
+    .ar-modal-actions { display: flex; gap: 10px; margin-top: 16px; }
+    .ar-modal-actions .btn-dl {
+      flex: 2;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .ar-modal-actions .btn-dl:hover { background: #1d4ed8; }
+    .ar-modal-actions .btn-dl:disabled { background: #555; cursor: not-allowed; }
+    .ar-modal-actions .btn-skip {
+      flex: 1;
+      background: #3a3a3a;
+      color: #ccc;
+      border: 1px solid #555;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .ar-modal-actions .btn-skip:hover { background: #444; }
+    .ar-dl-progress {
+      display: none;
+      margin-top: 12px;
+      background: #1e1e2e;
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+    .ar-dl-progress.show { display: block; }
+    .ar-dl-progress-bar-bg {
+      background: #333;
+      border-radius: 100px;
+      height: 8px;
+      margin: 6px 0;
+      overflow: hidden;
+    }
+    .ar-dl-progress-bar {
+      height: 8px;
+      border-radius: 100px;
+      background: #2563eb;
+      width: 0%;
+      transition: width 0.4s;
+    }
+    .ar-dl-status { font-size: 0.8rem; color: #adf; }
+
+    /* Arabic RTL chat messages */
+    .chat-msg.arabic-msg {
+      direction: rtl;
+      text-align: right;
+      font-family: 'Tahoma', 'Arial Unicode MS', 'Segoe UI', sans-serif;
+    }
+    .chat-msg.arabic-msg.user { color: #60a5fa; }
+    .arabic-label { font-size: 0.72rem; color: #888; margin-bottom: 2px; }
   </style>
 </head>
 <body>
@@ -350,6 +499,13 @@
   </div>
   <main>
     <div class="chat-container">
+      <!-- Language Selector Bar -->
+      <div class="lang-bar" id="langBar">
+        <span class="lang-bar-label">🌐 Language:</span>
+        <button type="button" class="lang-btn active" id="langEn" onclick="setLanguage('en')" title="English">EN 🇬🇧</button>
+        <button type="button" class="lang-btn ar-btn" id="langAr" onclick="setLanguage('ar')" title="Arabic">AR 🇸🇦</button>
+        <button type="button" class="lang-btn" id="langAuto" onclick="setLanguage('auto')" title="Auto-detect">Auto 🔍</button>
+      </div>
       <div class="chat-log" id="chatLog"></div>
       <form id="chatForm">
         <input type="text" id="chatInput" autocomplete="off" placeholder="Type your question..." />
@@ -369,7 +525,7 @@
       <!-- Thinking indicator -->
       <div id="thinkingIndicator" class="thinking-indicator">
         <div class="thinking-dots"><span></span><span></span><span></span></div>
-        <span>Thinking...</span>
+        <span id="thinkingText">Thinking...</span>
       </div>
       <!-- Voice waveform visualization -->
       <div id="voiceWaveform" class="voice-waveform">
@@ -377,11 +533,35 @@
       </div>
       <!-- AI speaking indicator -->
       <div id="aiSpeakingGlow" class="ai-speaking-glow">
-        🔊 AI is speaking...
+        🔊 <span id="aiSpeakingText">AI is speaking...</span>
       </div>
     </div>
     <audio id="audioPlayer" style="display:none"></audio>
   </main>
+
+  <!-- Arabic Support Download Modal -->
+  <div class="ar-modal-overlay" id="arModal">
+    <div class="ar-modal">
+      <h2><span class="ar-flag">🇸🇦</span> Arabic Mode – Required Files</h2>
+      <p>To enable full Arabic support (voice input, chat, and RAG interaction), the system needs to download additional model files.</p>
+      <ul class="req-list">
+        <li>📦 <strong>Whisper Multilingual STT</strong> – faster-whisper medium (Arabic voice input)</li>
+        <li>🔊 <strong>XTTS v2 Arabic TTS</strong> – already included in the system</li>
+        <li>🌐 <strong>Translation module</strong> – uses local LLM (no internet needed)</li>
+      </ul>
+      <p style="color:#f6c33c; font-size:0.82rem;">⚠ Note: Arabic questions are restricted to topics within the system knowledge base (Amazon services). General off-topic questions will be politely declined.</p>
+      <div class="ar-modal-actions">
+        <button type="button" class="btn-dl" id="arDlBtn" onclick="startArabicDownload()">⬇ Download Arabic Models</button>
+        <button type="button" class="btn-skip" onclick="skipArabicDownload()">Use without voice</button>
+      </div>
+      <div class="ar-dl-progress" id="arDlProgress">
+        <div class="ar-dl-status" id="arDlStatus">Preparing download...</div>
+        <div class="ar-dl-progress-bar-bg">
+          <div class="ar-dl-progress-bar" id="arDlBar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
   <script>
     // Navigation menu functions
     function openNav() {
@@ -412,6 +592,176 @@
     let lastTranscript = '';
     let lastAIResponse = '';
     let reconnectAttempts = 0;
+
+    // ===== LANGUAGE MANAGEMENT =====
+    let currentLanguage = 'en'; // 'en' | 'ar' | 'auto'
+    let arabicModelsChecked = false; // whether we've shown the Arabic download modal
+
+    const UI_STRINGS = {
+      en: {
+        thinking: 'Thinking...',
+        speaking: 'AI is speaking...',
+        placeholder: 'Type your question...',
+        start: '🎤 Start',
+        stop: '⏹️ Stop',
+        mute: '🔇 Stop',
+        connected: 'Connected to Assistify RAG system.',
+        recordStart: '[🎤 Recording started - speak now]',
+        recordStop: '[⏸️ Recording stopped]',
+        sessionEnd: '[⏹️ Voice session ended]',
+        interrupted: '[🔊 Interrupted — listening...]',
+      },
+      ar: {
+        thinking: '...جارٍ التفكير',
+        speaking: '🔊 المساعد يتحدث...',
+        placeholder: 'اكتب سؤالك هنا...',
+        start: '🎤 ابدأ',
+        stop: '⏹️ إيقاف',
+        mute: '🔇 وقف',
+        connected: 'متصل بنظام Assistify.',
+        recordStart: '[🎤 بدأ التسجيل - تحدث الآن]',
+        recordStop: '[⏸️ توقف التسجيل]',
+        sessionEnd: '[⏹️ انتهت جلسة الصوت]',
+        interrupted: '[🔊 تم المقاطعة — جارٍ الاستماع...]',
+      },
+    };
+
+    function getUIStr(key) {
+      const lang = currentLanguage === 'auto' ? 'en' : currentLanguage;
+      return (UI_STRINGS[lang] || UI_STRINGS.en)[key] || UI_STRINGS.en[key];
+    }
+
+    function setLanguage(lang) {
+      currentLanguage = lang;
+      document.getElementById('langEn').classList.toggle('active', lang === 'en');
+      document.getElementById('langAr').classList.toggle('active', lang === 'ar');
+      document.getElementById('langAuto').classList.toggle('active', lang === 'auto');
+
+      // Update UI text
+      const thinkingText = document.getElementById('thinkingText');
+      const aiSpeakingText = document.getElementById('aiSpeakingText');
+      const chatInputEl = document.getElementById('chatInput');
+      if (thinkingText) thinkingText.textContent = getUIStr('thinking');
+      if (aiSpeakingText) aiSpeakingText.textContent = getUIStr('speaking');
+      if (chatInputEl) chatInputEl.placeholder = getUIStr('placeholder');
+      if (btnStart) btnStart.textContent = getUIStr('start');
+      if (btnStop) btnStop.textContent = getUIStr('stop');
+      if (btnMute) btnMute.textContent = getUIStr('mute');
+
+      // Chat log RTL direction when Arabic
+      if (chatLog) {
+        chatLog.style.direction = (lang === 'ar') ? 'rtl' : 'ltr';
+      }
+
+      // Show Arabic download modal once
+      if (lang === 'ar' && !arabicModelsChecked) {
+        arabicModelsChecked = true;
+        checkArabicModels();
+      }
+
+      localStorage.setItem('assistify_lang', lang);
+    }
+
+    async function checkArabicModels() {
+      try {
+        const resp = await fetch('/arabic/status', { credentials: 'include' });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!data.multilingual_model_ready) {
+            document.getElementById('arModal').classList.add('show');
+          }
+        } else {
+          // Endpoint not available, show modal anyway for info
+          document.getElementById('arModal').classList.add('show');
+        }
+      } catch (e) {
+        document.getElementById('arModal').classList.add('show');
+      }
+    }
+
+    async function startArabicDownload() {
+      const btn = document.getElementById('arDlBtn');
+      const progress = document.getElementById('arDlProgress');
+      const bar = document.getElementById('arDlBar');
+      const status = document.getElementById('arDlStatus');
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Downloading...';
+      progress.classList.add('show');
+      status.textContent = 'Contacting server...';
+      bar.style.width = '5%';
+
+      try {
+        status.textContent = 'Checking existing models...';
+        bar.style.width = '15%';
+
+        const resp = await fetch('/arabic/download', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await resp.json();
+
+        if (data.status === 'already_ready') {
+          bar.style.width = '100%';
+          status.textContent = '✅ All Arabic models ready!';
+          setTimeout(() => document.getElementById('arModal').classList.remove('show'), 1500);
+        } else if (data.status === 'downloading') {
+          bar.style.width = '30%';
+          status.textContent = 'Downloading multilingual model... (this may take a few minutes)';
+          // Poll for completion
+          pollDownloadStatus(bar, status);
+        } else if (data.status === 'done') {
+          bar.style.width = '100%';
+          status.textContent = '✅ Arabic models downloaded! Restart the server to apply.';
+          btn.textContent = '✅ Done';
+          btn.disabled = false;
+        } else {
+          bar.style.width = '0%';
+          status.textContent = '❌ ' + (data.message || 'Download failed');
+          btn.textContent = '⬇ Retry';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        bar.style.width = '0%';
+        status.textContent = '❌ Network error: ' + e.message;
+        btn.textContent = '⬇ Retry';
+        btn.disabled = false;
+      }
+    }
+
+    async function pollDownloadStatus(bar, status) {
+      let pct = 30;
+      const ticker = setInterval(async () => {
+        try {
+          const resp = await fetch('/arabic/status', { credentials: 'include' });
+          const data = await resp.json();
+          pct = Math.min(pct + 5, 90);
+          bar.style.width = pct + '%';
+          if (data.multilingual_model_ready) {
+            clearInterval(ticker);
+            bar.style.width = '100%';
+            status.textContent = '✅ Arabic models ready! Restart server to use voice input in Arabic.';
+            const btn = document.getElementById('arDlBtn');
+            btn.textContent = '✅ Done — Close';
+            btn.disabled = false;
+            btn.onclick = () => document.getElementById('arModal').classList.remove('show');
+          }
+        } catch(e) { /* ignore poll errors */ }
+      }, 4000);
+    }
+
+    function skipArabicDownload() {
+      document.getElementById('arModal').classList.remove('show');
+    }
+
+    // Restore saved language
+    (function() {
+      const saved = localStorage.getItem('assistify_lang');
+      if (saved && ['en', 'ar', 'auto'].includes(saved)) {
+        setLanguage(saved);
+      }
+    })();
 
     // ---- Streaming TTS queue & barge-in state ----
     let pauseAudioSending = false;   // pause mic→WS during TTS but keep mic alive
@@ -655,14 +1005,17 @@
             console.log('Total Pipeline:', data.latency.total_ms, 'ms');
             console.log('=== END SERVER LATENCY ===');
           }
-          // Wait for all TTS audio to finish playing
-          _handleTtsComplete();
+          // In Arabic mode, TTS is handled async by arabic_tts_complete event
+          // Don't call _handleTtsComplete() now, as Arabic TTS hasn't started yet
+          if (!data.arabic_mode) {
+            _handleTtsComplete();
+          }
 
         } else if(data.type === 'aiResponse') {
           // Fallback: non-streaming full response
           if(data.text && data.text.trim() && data.text !== lastAIResponse) {
             lastAIResponse = data.text;
-            appendMsg('assistant', data.text);
+            appendMsg('assistant', data.text, detectArabicText(data.text));
             hideThinking();
 
             if (_liveCallMode && isRecording) {
@@ -676,7 +1029,7 @@
         } else if(data.type === 'transcript') {
           if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
             lastTranscript = data.text;
-            appendMsg('user', data.text);
+            appendMsg('user', data.text, detectArabicText(data.text));
           }
         } else if(data.type === 'kb_updated') {
           // Knowledge base changed while user is in chat — show sticky banner
@@ -689,6 +1042,28 @@
           appendMsg('system', data.message);
         } else if(data.type === 'control') {
           console.log('[Control]', data);
+        } else if(data.type === 'arabic_tts_complete') {
+          // Arabic TTS finished — clean up audio state fully
+          if (_wsPendingChunks && _wsPendingChunks.length > 0) {
+            _scheduleAllPending();
+          }
+          const _ctx2 = _getTTSAudioContext();
+          const _rem = Math.max(0, _wsScheduledTime - _ctx2.currentTime);
+          setTimeout(() => {
+            _wsAudioState = 'idle';
+            isTTSPlaying = false;
+            pauseAudioSending = false;
+            hideAISpeaking();
+            for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+            _ttsSources = [];
+            // Resume live call recording if active
+            if (_liveCallMode) {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+              }
+              if (!isRecording) startRecording(true);
+            }
+          }, _rem * 1000 + 300);
         }
       } catch(e) {
         if(typeof event.data === 'string') {
@@ -714,17 +1089,34 @@
       if (isTTSPlaying || isThinking) {
         bargeIn(true); // silent barge-in for text input
       }
-      ws.send(JSON.stringify({ text }));
-      appendMsg('user', text);
+
+      // Determine effective language (auto = detect from text)
+      const effectiveLang = currentLanguage === 'auto'
+        ? (detectArabicText(text) ? 'ar' : 'en')
+        : currentLanguage;
+
+      ws.send(JSON.stringify({ text, language: effectiveLang }));
+      appendMsg('user', text, effectiveLang === 'ar');
       chatInput.value = '';
       lastTranscript = text;
     };
 
+    // Simple Arabic text detector (checks Unicode Arabic block proportion)
+    function detectArabicText(text) {
+      if (!text) return false;
+      const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+      return arabicChars > text.length * 0.2;
+    }
+
     // For user messages
-    function appendMsg(role, text) {
+    function appendMsg(role, text, isArabic) {
       const msg = document.createElement('div');
-      msg.className = `chat-msg ${role}`;
-      msg.textContent = `${role === 'assistant' ? 'Assistant:' : (role === 'user' ? 'You:' : '')} ${text}`;
+      const arabic = isArabic || detectArabicText(text);
+      msg.className = `chat-msg ${role}${arabic ? ' arabic-msg' : ''}`;
+      const label = role === 'assistant'
+        ? (arabic ? 'المساعد:' : 'Assistant:')
+        : (role === 'user' ? (arabic ? 'أنت:' : 'You:') : '');
+      msg.textContent = `${label} ${text}`;
       chatLog.appendChild(msg);
       chatLog.scrollTop = chatLog.scrollHeight;
     }
@@ -754,6 +1146,11 @@
       console.log("[DEBUG] btnStart clicked");
       _unlockAudio();
       _liveCallMode = true;
+      // Inform the server of the current language for STT + LLM routing
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const effectiveLang = currentLanguage === 'auto' ? 'auto' : currentLanguage;
+        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language: effectiveLang }));
+      }
       await startRecording();
     };
     
@@ -1007,20 +1404,28 @@
 
     // ---- Streaming Response Display ----
     function handleResponseChunk(text, index) {
+      const arabic = detectArabicText(text);
       if (index === 0) {
         _streamingMsgEl = document.createElement('div');
-        _streamingMsgEl.className = 'chat-msg assistant';
-        _streamingMsgEl.textContent = 'Assistant: ' + text;
+        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + text;
         chatLog.appendChild(_streamingMsgEl);
       } else if (_streamingMsgEl) {
+        const isAr = _streamingMsgEl.classList.contains('arabic-msg') || arabic;
         _streamingMsgEl.textContent += ' ' + text;
+        if (arabic && !_streamingMsgEl.classList.contains('arabic-msg')) {
+          _streamingMsgEl.classList.add('arabic-msg');
+          _streamingMsgEl.textContent = 'المساعد: ' + _streamingMsgEl.textContent.replace(/^Assistant: /, '');
+        }
       }
       chatLog.scrollTop = chatLog.scrollHeight;
     }
 
     function finalizeStreamingDisplay(fullText) {
       if (_streamingMsgEl) {
-        _streamingMsgEl.textContent = 'Assistant: ' + fullText;
+        const arabic = detectArabicText(fullText);
+        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + fullText;
         _streamingMsgEl = null;
       }
       chatLog.scrollTop = chatLog.scrollHeight;

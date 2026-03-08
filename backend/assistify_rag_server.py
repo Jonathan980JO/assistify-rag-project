@@ -122,6 +122,9 @@ OLLAMA_API_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
 
 # Track interrupt events per connection for barge-in support
 interrupt_events = {}
+# Per-connection WebSocket write lock — prevents concurrent send() calls from
+# call_llm_streaming and _tts_arabic_response background tasks crashing the socket.
+_ws_write_locks: dict[str, asyncio.Lock] = {}
 
 # ========== STABILIZATION: Concurrency + Resource Guards ==========
 # Semaphore(1) = only ONE voice pipeline at a time (Part 2)
@@ -339,13 +342,23 @@ tts_session: aiohttp.ClientSession = None
 
 # Global faster-whisper model (typing-safe forward reference)
 whisper_model: Optional['_WhisperModel'] = None
+# Multilingual faster-whisper model — loaded at startup when present, used for Arabic STT
+whisper_model_multilingual: Optional['_WhisperModel'] = None
+
+# Path to multilingual model (sibling of english model dir)
+_MULTILINGUAL_MODEL_PATH = Path(WHISPER_MODEL_PATH).parent / "faster-whisper-medium"
 
 # XTTS v2 is now a separate microservice — no local model held in this process
 xtts_model = None  # kept for status endpoint backward compat
 
+# Pre-rendered Arabic acknowledgment PCM audio (populated at startup via XTTS).
+# Streamed immediately when an Arabic query arrives so the user hears audio
+# within ~1 second while the actual answer is still being generated.
+_arabic_ack_pcm: bytes = b""
+
 @app.on_event("startup")
 async def startup_event():
-    global llm_session, tts_session, whisper_model, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
+    global llm_session, tts_session, whisper_model, whisper_model_multilingual, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
     
     init_database()
     init_analytics_db()
@@ -442,6 +455,26 @@ async def startup_event():
                        f"Start it with: start_xtts_service.bat  ({e})")
         xtts_model = None
 
+    # ---- Try to load multilingual faster-whisper model for Arabic STT ----
+    if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
+        logger.info(f"Multilingual faster-whisper model found at {_MULTILINGUAL_MODEL_PATH} — loading for Arabic STT...")
+        try:
+            import os as _os
+            _cpu_threads = int(_os.getenv("WHISPER_CPU_THREADS", str(min(_os.cpu_count() or 4, 8))))
+            whisper_model_multilingual = WhisperModel(
+                str(_MULTILINGUAL_MODEL_PATH),
+                device=WHISPER_DEVICE,
+                compute_type=WHISPER_COMPUTE_TYPE,
+                download_root=None,
+                cpu_threads=_cpu_threads,
+                num_workers=1,
+            )
+            logger.info(f"✓ Multilingual faster-whisper loaded (Arabic STT ready, cpu_threads={_cpu_threads})")
+        except Exception as _ml_e:
+            logger.warning(f"Multilingual model found but failed to load: {_ml_e} — Arabic STT will use English model as fallback")
+    else:
+        logger.info(f"Multilingual faster-whisper not found at {_MULTILINGUAL_MODEL_PATH} — Arabic STT download available via /arabic/download")
+
     # Fire-and-forget warmups — run in the background, invisible to users
     asyncio.create_task(_warmup_llm())
     asyncio.create_task(_warmup_xtts())
@@ -527,31 +560,47 @@ async def _warmup_llm():
 
 
 async def _warmup_xtts():
-    """Background task: send a dummy TTS request to warm up the XTTS model.
-    
-    This loads the XTTS v2 model into GPU memory on startup, so the first
-    user TTS request doesn't trigger a cold-start load (which adds 2-3 seconds).
+    """Background task: warm up the XTTS model and pre-render the Arabic
+    acknowledgment phrase so it can be streamed instantly on the first Arabic query.
     """
+    global _arabic_ack_pcm
     await asyncio.sleep(10)  # let the XTTS service finish initializing
     logger.info(f"[Warmup] Sending TTS warmup request to {XTTS_SERVICE_URL}...")
     try:
         async with aiohttp.ClientSession() as session:
+            # -- English warmup (keeps existing behaviour) --
             async with session.post(
                 f"{XTTS_SERVICE_URL}/synthesize",
-                json={
-                    "text": "test",
-                    "speaker": XTTS_SPEAKER,
-                    "language": XTTS_LANGUAGE,
-                },
+                json={"text": "test", "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 if resp.status == 200:
-                    # Discard the audio — we only needed to trigger the load
                     await resp.read()
-                    logger.info(f"[Warmup] ✓ XTTS model warmed up")
+                    logger.info("[Warmup] ✓ XTTS model warmed up")
                 else:
                     text = await resp.text()
                     logger.warning(f"[Warmup] XTTS warmup returned {resp.status}: {text[:120]}")
+
+            # -- Arabic acknowledgment pre-render --
+            # Synthesize a short phrase and cache the raw PCM (skip the 44-byte WAV header).
+            # This audio will be streamed to the client immediately when any Arabic
+            # query arrives, giving <1s perceived first-audio latency.
+            _ACK_PHRASE = "حسناً"
+            try:
+                async with session.post(
+                    f"{XTTS_SERVICE_URL}/synthesize",
+                    json={"text": _ACK_PHRASE, "speaker": XTTS_SPEAKER, "language": "ar"},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as ar_resp:
+                    if ar_resp.status == 200:
+                        wav_bytes = await ar_resp.read()
+                        # Strip the 44-byte WAV header to get raw PCM16
+                        _arabic_ack_pcm = wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
+                        logger.info(f"[Warmup] ✓ Arabic acknowledgment audio cached ({len(_arabic_ack_pcm):,} bytes PCM)")
+                    else:
+                        logger.warning("[Warmup] Arabic ack pre-render failed — acknowledgment audio disabled")
+            except Exception as e_ar:
+                logger.warning(f"[Warmup] Arabic ack pre-render error: {e_ar}")
     except Exception as e:
         logger.warning(f"[Warmup] XTTS warmup failed (service may not be running): {e}")
 
@@ -725,6 +774,123 @@ def verify_csrf(request: Request):
     csrf_cookie = request.cookies.get("csrf_token")
     if not csrf_cookie or csrf_header != csrf_cookie:
         raise HTTPException(status_code=403, detail="CSRF token missing or invalid")
+
+# ========== ARABIC LANGUAGE SUPPORT ==========
+
+# Arabic refusal message for off-topic questions (outside Amazon/system scope)
+ARABIC_OFF_TOPIC_RESPONSE = (
+    "عذراً، لا أستطيع الإجابة على هذا السؤال. أنا مساعد Assistify ومتخصص فقط في خدمات Amazon "
+    "والمعلومات المتعلقة بالنظام. يمكنني مساعدتك في الأسئلة المتعلقة بالخدمات والمنتجات الموجودة "
+    "في قاعدة المعرفة."
+)
+
+ARABIC_GENERAL_TOPICS = frozenset([
+    'مرحبا', 'مرحباً', 'أهلاً', 'اهلا', 'السلام عليكم', 'كيف حالك', 'شكراً', 'شكرا',
+    'وداعاً', 'مع السلامة', 'صباح الخير', 'مساء الخير'
+])
+
+def _is_arabic_small_talk(text: str) -> bool:
+    """Return True if the Arabic text is a greeting/farewell/small talk."""
+    t = text.strip().lower()
+    # Check against known greeting patterns
+    for phrase in ARABIC_GENERAL_TOPICS:
+        if phrase in t:
+            return True
+    # Very short messages (≤4 words) are likely greetings
+    if len(t.split()) <= 4:
+        return True
+    return False
+
+
+async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> str:
+    """Translate text between Arabic and English using the local LLM.
+
+    Uses the same Ollama model already loaded in VRAM — no external API needed.
+    Returns the translated text, or the original text if translation fails.
+    """
+    global llm_session
+    lang_names = {"ar": "Arabic", "en": "English"}
+    src = lang_names.get(source_lang, source_lang)
+    tgt = lang_names.get(target_lang, target_lang)
+
+    # Build a very directive prompt — small models like qwen2.5:3b need explicit task framing
+    if target_lang == "ar":
+        system_msg = (
+            "أنت مترجم محترف. مهمتك الوحيدة هي ترجمة النص إلى اللغة العربية.\n"
+            "القواعد الصارمة:\n"
+            "- اكتب فقط النص العربي المترجم\n"
+            "- لا تكتب أي كلمة بالإنجليزية\n"
+            "- لا تضف شرحاً أو ملاحظات\n"
+            "- لا تكرر النص الأصلي\n"
+            "الإخراج يجب أن يكون بالعربية فقط."
+        )
+        user_msg = f"ترجم هذا النص إلى العربية:\n\n{text}"
+    else:
+        system_msg = (
+            "You are a professional translator. Your only task is to translate text to English.\n"
+            "Strict rules:\n"
+            "- Output ONLY the English translation\n"
+            "- Do NOT output any Arabic\n"
+            "- Do NOT add explanations or notes\n"
+            "- Do NOT repeat the original text"
+        )
+        user_msg = f"Translate this text to English:\n\n{text}"
+
+    messages = [
+        {"role": "system", "content": system_msg},
+        {"role": "user", "content": user_msg},
+    ]
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": messages,
+        "stream": False,
+        "keep_alive": -1,
+        "options": {"num_ctx": 2048, "num_gpu": 99, "temperature": 0.05, "num_predict": 512},
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=30, connect=5, sock_read=25)
+        _sess = llm_session
+        if _sess is None or _sess.closed:
+            _sess = aiohttp.ClientSession()
+        async with _sess.post(LLM_URL, json=payload, timeout=timeout) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                translated = data["choices"][0]["message"]["content"].strip()
+
+                # Validate: if translating to Arabic, result must contain Arabic characters
+                if target_lang == "ar":
+                    arabic_char_count = sum(1 for c in translated if '\u0600' <= c <= '\u06FF')
+                    if arabic_char_count < 3:
+                        logger.warning(
+                            f"Translation to Arabic failed — model returned non-Arabic output: '{translated[:80]}'. Retrying with stricter prompt."
+                        )
+                        # Retry once with an even simpler, purely Arabic system prompt
+                        retry_messages = [
+                            {"role": "system", "content": "مترجم. أجب بالعربية فقط. لا إنجليزية إطلاقاً."},
+                            {"role": "user", "content": f"ترجم: {text}"},
+                        ]
+                        payload["messages"] = retry_messages
+                        async with _sess.post(LLM_URL, json=payload, timeout=timeout) as resp2:
+                            if resp2.status == 200:
+                                data2 = await resp2.json()
+                                translated = data2["choices"][0]["message"]["content"].strip()
+                                arabic_char_count2 = sum(1 for c in translated if '\u0600' <= c <= '\u06FF')
+                                if arabic_char_count2 < 3:
+                                    logger.warning(f"Arabic translation retry also failed. Falling back to original.")
+                                    return text
+
+                logger.info(f"Translation ({src}→{tgt}): '{text[:60]}' → '{translated[:60]}'")
+                return translated
+    except Exception as e:
+        logger.warning(f"Translation failed ({src}→{tgt}): {e}")
+    return text  # Fallback: return original text
+
+
+def _detect_language(text: str) -> str:
+    """Heuristic language detection: returns 'ar' if Arabic chars dominate, else 'en'."""
+    arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
+    return "ar" if arabic_chars > len(text) * 0.2 else "en"
+
 
 # ========== HELPER: RAG+LLM ==========
 async def call_llm_with_rag(text: str, connection_id: str, user):
@@ -962,7 +1128,99 @@ def _normalize_digits_for_tts(text: str) -> str:
 # Adaptive TTS chunk sizing — adjusts words-per-chunk based on real-time perf
 from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
 
-async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: asyncio.Event = None, t_meta=None):
+
+async def _tts_arabic_response(arabic_text: str, websocket: WebSocket, connection_id: str = ""):
+    """Send a full Arabic text string to XTTS and stream PCM audio over WebSocket.
+
+    Used after Arabic response generation to synthesize speech in Arabic.
+    Fires as a background task so the caller doesn't block.
+    """
+    if not arabic_text or not arabic_text.strip():
+        return
+
+    # Split into ~200-char chunks to respect XTTS token limit
+    import re as _re2
+    MAX_CHUNK = 200
+    # Split on sentence boundaries first, then hard-clip remaining pieces
+    raw_sentences = _re2.split(r'(?<=[.؟!،])\s+', arabic_text.strip())
+    tts_sentences = []
+    for s in raw_sentences:
+        while len(s) > MAX_CHUNK:
+            tts_sentences.append(s[:MAX_CHUNK])
+            s = s[MAX_CHUNK:]
+        if s.strip():
+            tts_sentences.append(s.strip())
+
+    # Use the shared per-connection write lock so this background task never
+    # sends bytes concurrently with call_llm_streaming (which causes WS errors).
+    _lock = _ws_write_locks.get(connection_id) or asyncio.Lock()
+
+    async def _ws_send_json(payload):
+        async with _lock:
+            await websocket.send_json(payload)
+
+    async def _ws_send_bytes(data):
+        async with _lock:
+            await websocket.send_bytes(data)
+
+    try:
+        _sess = tts_session
+        if _sess is None or _sess.closed:
+            return  # TTS service not available
+
+        for sentence in tts_sentences:
+            clean = _re2.sub(r'[\U00010000-\U0010ffff]', '', sentence, flags=_re2.UNICODE).strip()
+            if not clean:
+                continue
+            try:
+                await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+                resp = await _sess.post(
+                    f"{XTTS_SERVICE_URL}/synthesize",
+                    json={"text": clean, "speaker": XTTS_SPEAKER, "language": "ar"},
+                )
+                if resp.status == 200:
+                    header_skipped = False
+                    header_buf = b''
+                    pcm_remainder = b''
+                    async for chunk in resp.content.iter_chunked(4096):
+                        if not header_skipped:
+                            header_buf += chunk
+                            if len(header_buf) >= 44:
+                                data = header_buf[44:]
+                                header_skipped = True
+                                header_buf = b''
+                                if not data:
+                                    continue
+                            else:
+                                continue
+                        else:
+                            data = chunk
+                        if pcm_remainder:
+                            data = pcm_remainder + data
+                            pcm_remainder = b''
+                        if len(data) % 2 != 0:
+                            pcm_remainder = data[-1:]
+                            data = data[:-1]
+                        if data:
+                            await _ws_send_bytes(data)
+                    resp.close()
+                else:
+                    resp.close()
+                    await _ws_send_json({"type": "ttsFallback", "text": clean})
+                await _ws_send_json({"type": "ttsAudioEnd"})
+            except Exception as e:
+                logger.warning(f"Arabic TTS chunk error: {e}")
+    except Exception as e:
+        logger.warning(f"Arabic TTS session error: {e}")
+
+    try:
+        async with _lock:
+            await websocket.send_json({"type": "arabic_tts_complete"})
+    except Exception:
+        pass
+
+
+async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: asyncio.Event = None, t_meta=None, language: str = "en"):
     """Stream LLM response with overlapping TTS via producer-consumer pipeline.
 
     Architecture:
@@ -998,11 +1256,87 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         cleanup_old_conversations()
     
     history = conversation_history[connection_id]
-    
+
+    # ===== ARABIC LANGUAGE HANDLING =====
+    # Auto-detect if caller passed "auto"
+    if language == "auto":
+        language = _detect_language(text)
+
+    arabic_mode = (language == "ar")
+    xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
+    original_arabic_text = text  # preserve for later use
+
+    if arabic_mode:
+        # ---- Fire instant Arabic acknowledgment audio (<1s perceived latency) ----
+        if _arabic_ack_pcm:
+            # Register the per-connection lock now (before any background task can race us).
+            if connection_id not in _ws_write_locks:
+                _ws_write_locks[connection_id] = asyncio.Lock()
+            _ack_lock = _ws_write_locks[connection_id]
+            try:
+                async with _ack_lock:
+                    await websocket.send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+                    await websocket.send_bytes(_arabic_ack_pcm)
+                    await websocket.send_json({"type": "ttsAudioEnd"})
+                t_meta["first_ack_sent"] = time.perf_counter()  # stamp for latency report
+            except Exception:
+                pass  # don't let ack failure block the actual answer
+
+        # 1. Allow small talk in Arabic (greetings, thanks, etc.)
+        if _is_arabic_small_talk(text):
+            logger.info(f"{connection_id} Arabic small-talk detected — routing through normally")
+            text_for_rag = text  # will be handled as greeting below
+            arabic_small_talk = True
+        else:
+            arabic_small_talk = False
+            # 2. Translate Arabic query → English for RAG search using fast translator
+            logger.info(f"{connection_id} Arabic mode: translating query to English…")
+            try:
+                translated_query = await asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: __import__('deep_translator', fromlist=['GoogleTranslator'])
+                               .GoogleTranslator(source='ar', target='en').translate(text)
+                )
+                text_for_rag = translated_query if translated_query else text
+                logger.info(f"Translation (Arabic→English): '{text[:60]}' → '{text_for_rag[:60]}'")
+            except Exception as _te:
+                logger.warning(f"deep_translator AR→EN failed ({_te}) — falling back to LLM translation")
+                try:
+                    text_for_rag = await asyncio.wait_for(
+                        translate_with_llm(text, "ar", "en"), timeout=20.0
+                    )
+                except Exception:
+                    text_for_rag = text
+
+            # 3. Search RAG with the translated English text
+            rag_docs_check = search_documents(text_for_rag, top_k=3)
+            if not rag_docs_check:
+                # Off-topic: no relevant docs in the knowledge base → Arabic refusal
+                logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
+                try:
+                    await websocket.send_json({
+                        "type": "aiResponseChunk", "text": ARABIC_OFF_TOPIC_RESPONSE,
+                        "index": 0, "done": True
+                    })
+                    await websocket.send_json({
+                        "type": "aiResponseDone", "fullText": ARABIC_OFF_TOPIC_RESPONSE,
+                        "sources": 0
+                    })
+                    # TTS for the Arabic refusal
+                    asyncio.create_task(_tts_arabic_response(ARABIC_OFF_TOPIC_RESPONSE, websocket, connection_id))
+                except Exception:
+                    pass
+                return
+            # Use the English translation for RAG
+            text = text_for_rag
+    else:
+        arabic_small_talk = False
+
     # RAG search (same as non-streaming)
     greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
-    is_greeting = len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns)
-    
+    # In Arabic small-talk mode, treat as greeting
+    is_greeting = arabic_small_talk or (len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns))
+
     if is_greeting:
         relevant_docs = []
     else:
@@ -1030,19 +1364,44 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct."""
         logger.info(f"{connection_id} RAG: {len(relevant_docs)} docs injected as authoritative context")
     
-    system_prompt = f"""You are Assistify, a helpful assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence.{context_block}"""
+    if arabic_mode:
+        if arabic_small_talk:
+            system_prompt = (
+                "You are a friendly assistant named Assistify. "
+                "Reply ONLY in Arabic (العربية). Do NOT use Chinese, English, or Thai. "
+                "Specifically DO NOT output the token 'ควร' or any ไทย/Thai text. "
+                "Keep your greeting under 10 words.\n"
+                "أنت مساعد ودود اسمه Assistify. رد بتحية عربية قصيرة وودية. أجب بالعربية فقط. "
+                "لا تستخدم الصينية أو الإنجليزية أو التايلاندية. ولا تكتب 'ควร'."
+            )
+        else:
+            system_prompt = (
+                "You are Assistify, an Amazon services assistant. "
+                "You MUST respond ONLY in Arabic (العربية). "
+                "NEVER respond in Chinese (中文), English, or Thai (ไทย). "
+                "Do NOT output the token 'ควร' or any Thai words. "
+                "Use clear Arabic sentences. Keep your answer under 100 words. "
+                "Do not cut off mid-sentence.\n"
+                "أنت Assistify، مساعد متخصص في خدمات أمازون. أجب بالعربية فقط. "
+                "لا تستخدم الصينية أو الإنجليزية أو التايلاندية. لا تكتب 'ควร'."
+                f"{context_block}"
+            )
+    else:
+        system_prompt = f"""You are Assistify, a helpful assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence. Always respond in English.{context_block}"""
     messages = [{"role": "system", "content": system_prompt}]
     # When KB context is present, skip conversation history to prevent stale
     # old answers from overriding fresh KB data.
     if not relevant_docs:
         messages.extend(history[-10:])
-    messages.append({"role": "user", "content": text.strip()})
+    # In Arabic mode always send the original Arabic question so the model
+    # sees an Arabic user turn and stays in Arabic. (text was replaced with
+    # the English translation for RAG search — do NOT send that to the LLM.)
+    user_message = original_arabic_text.strip() if arabic_mode else text.strip()
+    messages.append({"role": "user", "content": user_message})
     
     username = user.get("username", "unknown")
     user_role = user.get("role", "unknown")
     query_length = len(text.strip())
-    
-    # Send "thinking" status to client
     try:
         await websocket.send_json({"type": "thinking"})
     except Exception:
@@ -1062,7 +1421,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             "num_ctx": 2048,
             "temperature": effective_temperature,
             "top_p": 0.9,
-            "num_predict": 180,
+            "num_predict": 300 if arabic_mode else 180,  # Arabic needs more tokens
             "num_gpu": 99,
         }
     }
@@ -1085,7 +1444,9 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 
     # ---- Producer-Consumer Pipeline: LLM → Queue → TTS ----
     sentence_queue = asyncio.Queue()
-    _ws_send_lock = asyncio.Lock()
+    # Reuse the per-connection lock so _tts_arabic_response background tasks
+    # and this function never write to the socket concurrently.
+    _ws_send_lock = _ws_write_locks.get(connection_id) or asyncio.Lock()
 
     async def _safe_ws_json(data):
         async with _ws_send_lock:
@@ -1136,19 +1497,21 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 t_meta["first_sentence_ready"] = first_sentence_time
                 logger.info(f"LATENCY [First Sentence Ready]: {(first_sentence_time - perf_start)*1000:.0f}ms")
 
-            try:
-                await _safe_ws_json({
-                    "type": "aiResponseChunk",
-                    "text": chunk_text,
-                    "index": sentence_index,
-                    "done": False,
-                    "timing": t_meta if sentence_index == 0 else None
-                })
-                sentence_index += 1
-            except Exception:
-                return
+            # In Arabic mode, suppress English display — user will see Arabic at the end
+            if not arabic_mode:
+                try:
+                    await _safe_ws_json({
+                        "type": "aiResponseChunk",
+                        "text": chunk_text,
+                        "index": sentence_index,
+                        "done": False,
+                        "timing": t_meta if sentence_index == 0 else None
+                    })
+                    sentence_index += 1
+                except Exception:
+                    return
 
-            # Normalize spaced digits for TTS only (display text unchanged)
+            # Always put on TTS queue (tts_consumer decides whether to process in arabic mode)
             await sentence_queue.put(_normalize_digits_for_tts(chunk_text))
             first_chunk_sent = True
 
@@ -1328,6 +1691,10 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 if not clean:
                     continue
 
+                # In Arabic mode, skip per-chunk TTS — we'll do a single Arabic TTS at the end
+                if arabic_mode:
+                    continue
+
                 chunk_start = time.perf_counter()
 
                 try:
@@ -1335,7 +1702,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 
                     resp = await _tts_sess.post(
                         f"{XTTS_SERVICE_URL}/synthesize",
-                        json={"text": clean, "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
+                        json={"text": clean, "speaker": XTTS_SPEAKER, "language": xtts_lang},
                     )
 
                     if resp.status == 200:
@@ -1423,8 +1790,26 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         # Run LLM producer and TTS consumer concurrently — overlapping generation
         await asyncio.gather(llm_producer(), tts_consumer())
 
-        # Validate the full response
-        if full_response.strip():
+        # ===== ARABIC: LLM already responded in Arabic — send directly + TTS =====
+        if arabic_mode and full_response.strip():
+            arabic_chars = sum(1 for c in full_response if '\u0600' <= c <= '\u06FF')
+            logger.info(f"{connection_id} Arabic mode: direct response ({len(full_response.strip())} chars, {arabic_chars} Arabic chars)")
+            # Send the Arabic response as a single chunk to frontend
+            try:
+                await websocket.send_json({
+                    "type": "aiResponseChunk",
+                    "text": full_response.strip(),
+                    "index": 0,
+                    "done": True,
+                })
+            except Exception:
+                pass
+            # Start Arabic TTS (fire-and-forget)
+            asyncio.create_task(_tts_arabic_response(full_response.strip(), websocket, connection_id))
+        # ===== END ARABIC =====
+
+        # Validate the full response (skip for Arabic — validator is not Arabic-aware)
+        if full_response.strip() and not arabic_mode:
             validation_result = validate_response(full_response.strip(), text, relevant_docs)
             if not validation_result.is_valid:
                 logger.warning(f"Streaming response validation FAILED - Severity: {validation_result.severity}")
@@ -1432,8 +1817,10 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             elif validation_result.modified_response:
                 full_response = validation_result.modified_response
 
-            # Update conversation history
-            history.append({"role": "user", "content": text.strip()})
+        if full_response.strip():
+            # Store original Arabic question in history (not the English translation)
+            history_user_text = original_arabic_text if arabic_mode else text.strip()
+            history.append({"role": "user", "content": history_user_text})
             history.append({"role": "assistant", "content": full_response.strip()})
 
         # Send completion message with latency metrics (Phase 6)
@@ -1444,7 +1831,11 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 
         first_token_ms = ((first_token_time - perf_start) * 1000) if first_token_time else None
         first_sentence_ms = ((first_sentence_time - perf_start) * 1000) if first_sentence_time else None
-        first_tts_ms = ((first_tts_chunk_time - perf_start) * 1000) if first_tts_chunk_time else None
+        _ack_time = t_meta.get("first_ack_sent")
+        first_tts_ms = (
+            (first_tts_chunk_time - perf_start) * 1000 if first_tts_chunk_time
+            else ((_ack_time - perf_start) * 1000 if _ack_time else None)
+        )
         total_ms = (t_llm_done - perf_start) * 1000
 
         # Finalise adaptive chunk stats for this query
@@ -1454,7 +1845,11 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         logger.info(f"=== LATENCY REPORT [{connection_id}] ===")
         logger.info(f"  LLM First Token:    {first_token_ms:.0f}ms" if first_token_ms else f"  LLM First Token:    N/A")
         logger.info(f"  First Sentence:     {first_sentence_ms:.0f}ms" if first_sentence_ms else f"  First Sentence:     N/A")
-        logger.info(f"  First TTS Chunk:    {first_tts_ms:.0f}ms" if first_tts_ms else f"  First TTS Chunk:    N/A")
+        _tts_label = "Ack Audio" if (arabic_mode and not first_tts_chunk_time and first_tts_ms) else "First TTS Chunk"
+        if first_tts_ms is not None and arabic_mode and not first_tts_chunk_time and first_tts_ms < 10:
+            logger.info(f"  {_tts_label}:    <10ms (cached PCM, instant)")
+        else:
+            logger.info(f"  {_tts_label}:    {first_tts_ms:.0f}ms" if first_tts_ms else "  First TTS Chunk:    N/A")
         logger.info(f"  Total Pipeline:     {total_ms:.0f}ms")
         logger.info(f"  Adaptive Tier:      {adaptive_stats['current_tier']} | words={adaptive_stats['words_per_chunk']} buf={adaptive_stats['buffer_delay_s']:.2f}s")
         logger.info(f"  TTS Chunks:         {tts_chunk_count} (total TTS time: {tts_total_time:.2f}s)")
@@ -1465,6 +1860,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 "type": "aiResponseDone",
                 "fullText": full_response.strip(),
                 "sources": len(relevant_docs),
+                "arabic_mode": arabic_mode,
                 "timing": t_meta,
                 "latency": {
                     "first_token_ms": round(first_token_ms) if first_token_ms else None,
@@ -1716,6 +2112,79 @@ async def statistics():
         "active_connections": len(conversation_history),
         "knowledge_base": "ChromaDB"
     }
+
+
+# ========== ARABIC LANGUAGE SUPPORT ENDPOINTS ==========
+
+# Track ongoing Arabic model download
+_arabic_download_task: asyncio.Task | None = None
+_arabic_download_status: dict = {"state": "idle", "message": ""}
+
+
+def _arabic_multilingual_model_ready() -> bool:
+    """Return True if a multilingual (non-English-only) Whisper model is loaded or on-disk."""
+    if whisper_model_multilingual is not None:
+        return True
+    return _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir())
+
+
+@app.get("/arabic/status")
+async def arabic_status(user=Depends(require_login())):
+    """Return whether the multilingual Whisper model (for Arabic STT) is ready."""
+    model_on_disk = _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir())
+    model_loaded  = whisper_model_multilingual is not None
+    xtts_arabic_ok = xtts_model is not None  # XTTS v2 supports Arabic natively
+    return {
+        "multilingual_model_ready": model_on_disk or model_loaded,
+        "multilingual_model_loaded": model_loaded,
+        "multilingual_model_on_disk": model_on_disk,
+        "xtts_arabic_ready": xtts_arabic_ok,
+        "download_state": _arabic_download_status.get("state", "idle"),
+        "download_message": _arabic_download_status.get("message", ""),
+        "model_path": str(_MULTILINGUAL_MODEL_PATH),
+    }
+
+
+@app.post("/arabic/download")
+async def arabic_download_models(user=Depends(require_login())):
+    """Download the multilingual faster-whisper model for Arabic STT support.
+
+    Downloads to: backend/Models/faster-whisper-medium/
+    Returns immediately; actual download runs in background.
+    """
+    global _arabic_download_task, _arabic_download_status
+
+    if _arabic_multilingual_model_ready():
+        return {"status": "already_ready", "message": "Multilingual model already present."}
+
+    if _arabic_download_task and not _arabic_download_task.done():
+        return {"status": "downloading", "message": "Download already in progress."}
+
+    async def _do_download():
+        global _arabic_download_status, whisper_model_multilingual
+        _arabic_download_status = {"state": "downloading", "message": "Downloading faster-whisper medium (multilingual)…"}
+        dest = _MULTILINGUAL_MODEL_PATH
+        dest.mkdir(parents=True, exist_ok=True)
+        try:
+            from faster_whisper import WhisperModel as _WM
+            logger.info(f"[Arabic Setup] Downloading multilingual model to: {dest}")
+            _model = _WM(
+                "medium",
+                device="cpu",
+                compute_type="int8",
+                download_root=str(dest.parent),
+            )
+            # Keep the loaded model global so it's immediately usable without restart
+            whisper_model_multilingual = _model
+            _arabic_download_status = {"state": "ready", "message": "Multilingual model ready."}
+            logger.info("[Arabic Setup] ✓ Multilingual model downloaded and loaded into memory.")
+        except Exception as e:
+            _arabic_download_status = {"state": "error", "message": str(e)}
+            logger.error(f"[Arabic Setup] Download failed: {e}")
+
+    _arabic_download_task = asyncio.create_task(_do_download())
+    return {"status": "downloading", "message": "Download started in background."}
+
 
 @app.get("/assets/{filename}")
 async def get_audio(filename: str):
@@ -2042,6 +2511,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
     # Create cancel event for barge-in support
     cancel_event = asyncio.Event()
     interrupt_events[connection_id] = cancel_event
+    # Per-connection write lock — shared with _tts_arabic_response background tasks
+    _ws_write_locks[connection_id] = asyncio.Lock()
 
     user = None
     try:
@@ -2065,6 +2536,185 @@ async def rag_ws_endpoint(websocket: WebSocket):
     # 10 chunks × ~50ms each = ~500ms — bridges natural inter-word pauses.
     silence_chunks_needed = 10           # ~500ms true silence before transcription fires
     silence_threshold_energy = 0.008    # Strict: only truly quiet audio counts as silence
+    # Per-connection language setting (can be updated by set_language control message)
+    session_language = "en"
+
+    # ========== STABILIZED auto_transcribe ==========
+    # Defined here (not inside the conditional) so it is always in scope when
+    # stop_recording or any other handler calls it.
+    async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None, lang="en"):
+        nonlocal user
+        global _active_voice_task, _active_voice_conn_id
+        global _pipeline_run_count, _last_gpu_reserved_mb
+        global _consecutive_gpu_growth, _consecutive_cpu_growth, _sessions_blocked
+        import time as _time
+
+        # ---- Memory-leak gate ----
+        if _sessions_blocked:
+            logger.error(f"MEMORY LEAK SUSPECTED — refusing new voice session [{conn_id}]")
+            try:
+                await ws.send_json({"type": "aiResponse", "text": "System paused for safety. Please restart the server.", "sources": 0})
+            except Exception:
+                pass
+            return
+
+        session_start = _time.perf_counter()
+        mem_before = _get_memory_snapshot()
+        logger.info(f"===== VOICE SESSION START  [{conn_id}] =====")
+        logger.info(f"  GPU before: reserved={mem_before['gpu_reserved_mb']:.0f}MB  alloc={mem_before['gpu_allocated_mb']:.0f}MB  |  CPU RSS={mem_before['cpu_rss_mb']:.0f}MB")
+
+        # Cancel any previously-active voice task (Part 1 — only 1 at a time)
+        if _active_voice_task and not _active_voice_task.done():
+            logger.warning(f"Cancelling previous voice session [{_active_voice_conn_id}]")
+            _active_voice_task.cancel()
+            try:
+                await _active_voice_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        _active_voice_conn_id = conn_id
+
+        try:
+            # Part 2 — only 1 pipeline at a time
+            async with voice_semaphore:
+                t_stt_start = _time.perf_counter()
+
+                if t_meta and "speech_end" in t_meta:
+                    latency_vad_to_stt = t_stt_start - t_meta["speech_end"]
+                    logger.info(f"VOICE LATENCY [Speech End -> STT Start]: {latency_vad_to_stt*1000:.2f}ms")
+
+                pcm16 = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+
+                if len(pcm16) < 8000:
+                    logger.debug(f"{conn_id} Audio too short ({len(pcm16)} samples), skipping")
+                    return
+
+                vram_stt_before = 0
+                if torch.cuda.is_available():
+                    vram_stt_before = torch.cuda.memory_reserved(0) / 1024**2
+
+                # Part 3 — STT timeout
+                def _run_stt(audio_data):
+                    """Run faster-whisper transcribe in a thread. Returns (segments_list, info)."""
+                    # Pass language explicitly — never use None (auto-detect) to avoid per-call detection overhead
+                    stt_lang = "ar" if lang == "ar" else "en"
+                    # Pick the best available model for the language
+                    _model = whisper_model_multilingual if (
+                        lang == "ar" and whisper_model_multilingual is not None
+                    ) else whisper_model
+                    # Use beam_size=1 (greedy) for Arabic on CPU — fastest decode
+                    _beam = 1 if lang == "ar" else WHISPER_BEAM_SIZE
+                    segs_gen, info = _model.transcribe(
+                        audio_data,
+                        language=stt_lang,
+                        beam_size=_beam,
+                        temperature=0.0,
+                        vad_filter=WHISPER_VAD_FILTER,
+                        vad_parameters=dict(min_silence_duration_ms=300, threshold=0.3),
+                        condition_on_previous_text=False,
+                        compression_ratio_threshold=2.4,
+                        log_prob_threshold=-1.0,
+                        no_speech_threshold=0.8,
+                        word_timestamps=False,
+                        without_timestamps=True,
+                    )
+                    return list(segs_gen), info
+
+                # Timeout: Arabic on CPU needs more headroom (medium model ~4-8s for short clips)
+                _stt_timeout = 30.0 if lang == "ar" else 10.0
+                try:
+                    loop = asyncio.get_event_loop()
+                    segments_list, _stt_info = await asyncio.wait_for(
+                        loop.run_in_executor(None, _run_stt, pcm16),
+                        timeout=_stt_timeout,
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(f"{conn_id} STT TIMEOUT (>{_stt_timeout:.0f} s) — dropping audio")
+                    return
+
+                full_text = " ".join([seg.text.strip() for seg in segments_list]).strip()
+                t_stt_end = _time.perf_counter()
+                stt_duration = t_stt_end - t_stt_start
+
+                vram_stt_after = 0
+                if torch.cuda.is_available():
+                    vram_stt_after = torch.cuda.memory_reserved(0) / 1024**2
+
+                if not full_text or len(full_text) <= 2:
+                    logger.debug(f"{conn_id} whisper returned empty text, skipping")
+                    return
+
+                audio_len = len(data_bytes) / (SAMPLE_RATE * 2)  # seconds
+                logger.info(f"{conn_id} WHISPER RESULT: '{full_text}' ({len(segments_list)} segments, {audio_len:.2f}s audio, STT took {stt_duration*1000:.0f}ms)")
+
+                t_meta = t_meta or {}
+                t_meta.update({
+                    "stt_start": t_stt_start,
+                    "stt_end": t_stt_end,
+                    "vram_stt_before": vram_stt_before,
+                    "vram_stt_after": vram_stt_after,
+                })
+
+                try:
+                    await ws.send_json({
+                        "type": "transcript",
+                        "text": full_text,
+                        "final": True,
+                        "timing": t_meta,
+                    })
+
+                    cancel_evt = interrupt_events.get(conn_id)
+                    if cancel_evt:
+                        cancel_evt.clear()
+                    await call_llm_streaming(
+                        ws, full_text, conn_id,
+                        user or {"username": "anon", "role": "user"},
+                        cancel_evt,
+                        t_meta,
+                        language=lang,
+                    )
+                except RuntimeError as re:
+                    logger.debug(f"{conn_id} WebSocket closed: {re}")
+        except asyncio.CancelledError:
+            logger.warning(f"{conn_id} Voice pipeline cancelled (superseded)")
+        except Exception as e:
+            logger.exception(f"Auto-transcription error: {e}")
+        finally:
+            # Part 7 + 9 — memory + session-end logging
+            mem_after = _get_memory_snapshot()
+            duration = (_time.perf_counter() - session_start) * 1000
+            _pipeline_run_count += 1
+            logger.info(f"===== VOICE SESSION END    [{conn_id}] =====")
+            logger.info(f"  SESSION DURATION: {duration:.0f}ms")
+            logger.info(f"  GPU after : reserved={mem_after['gpu_reserved_mb']:.0f}MB  alloc={mem_after['gpu_allocated_mb']:.0f}MB  |  CPU RSS={mem_after['cpu_rss_mb']:.0f}MB")
+            delta_gpu = mem_after["gpu_reserved_mb"] - mem_before["gpu_reserved_mb"]
+            delta_cpu = mem_after["cpu_rss_mb"] - mem_before["cpu_rss_mb"]
+
+            # Track consecutive growth
+            if delta_gpu > 50:
+                _consecutive_gpu_growth += 1
+                logger.warning(f"  ⚠ GPU memory grew by {delta_gpu:.0f}MB (consecutive: {_consecutive_gpu_growth}/{MEMORY_GROWTH_LIMIT})")
+            else:
+                _consecutive_gpu_growth = 0
+
+            if delta_cpu > 100:
+                _consecutive_cpu_growth += 1
+                logger.warning(f"  ⚠ CPU RSS grew by {delta_cpu:.0f}MB (consecutive: {_consecutive_cpu_growth}/{MEMORY_GROWTH_LIMIT})")
+            else:
+                _consecutive_cpu_growth = 0
+
+            # Cross-run GPU growth check
+            if _pipeline_run_count > 1 and mem_after["gpu_reserved_mb"] > _last_gpu_reserved_mb + 100:
+                logger.warning(f"  ⚠ CONTINUOUS GPU GROWTH across runs (prev={_last_gpu_reserved_mb:.0f} now={mem_after['gpu_reserved_mb']:.0f})")
+            _last_gpu_reserved_mb = mem_after["gpu_reserved_mb"]
+
+            # Block new sessions after MEMORY_GROWTH_LIMIT consecutive growth events
+            if _consecutive_gpu_growth >= MEMORY_GROWTH_LIMIT or _consecutive_cpu_growth >= MEMORY_GROWTH_LIMIT:
+                _sessions_blocked = True
+                logger.critical(f"  🛑 MEMORY LEAK SUSPECTED — blocking all new voice sessions")
+                logger.critical(f"     GPU consecutive growth: {_consecutive_gpu_growth}  |  CPU consecutive growth: {_consecutive_cpu_growth}")
+
+            _active_voice_task = None
+            _active_voice_conn_id = None
 
     try:
         while True:
@@ -2122,171 +2772,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         speech_start_time = None
 
                         logger.info(f"{connection_id} ✓ TRANSCRIBE TRIGGERED: {len(chunk)} bytes ({audio_duration_sec:.2f}s audio) after {triggered_after} silent chunks")
-                        
-                        # ========== STABILIZED auto_transcribe ==========
-                        # Parts 2/3/4/7/9: semaphore, timeouts, cleanup, memory, logging
-                        async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None):
-                            global _active_voice_task, _active_voice_conn_id
-                            global _pipeline_run_count, _last_gpu_reserved_mb
-                            global _consecutive_gpu_growth, _consecutive_cpu_growth, _sessions_blocked
-                            import time as _time
-
-                            # ---- Memory-leak gate ----
-                            if _sessions_blocked:
-                                logger.error(f"MEMORY LEAK SUSPECTED — refusing new voice session [{conn_id}]")
-                                try:
-                                    await ws.send_json({"type": "aiResponse", "text": "System paused for safety. Please restart the server.", "sources": 0})
-                                except Exception:
-                                    pass
-                                return
-
-                            session_start = _time.perf_counter()
-                            mem_before = _get_memory_snapshot()
-                            logger.info(f"===== VOICE SESSION START  [{conn_id}] =====")
-                            logger.info(f"  GPU before: reserved={mem_before['gpu_reserved_mb']:.0f}MB  alloc={mem_before['gpu_allocated_mb']:.0f}MB  |  CPU RSS={mem_before['cpu_rss_mb']:.0f}MB")
-
-                            # Cancel any previously-active voice task (Part 1 — only 1 at a time)
-                            if _active_voice_task and not _active_voice_task.done():
-                                logger.warning(f"Cancelling previous voice session [{_active_voice_conn_id}]")
-                                _active_voice_task.cancel()
-                                try:
-                                    await _active_voice_task
-                                except (asyncio.CancelledError, Exception):
-                                    pass
-                            _active_voice_conn_id = conn_id
-
-                            try:
-                                # Part 2 — only 1 pipeline at a time
-                                async with voice_semaphore:
-                                    t_stt_start = _time.perf_counter()
-
-                                    if t_meta and "speech_end" in t_meta:
-                                        latency_vad_to_stt = t_stt_start - t_meta["speech_end"]
-                                        logger.info(f"VOICE LATENCY [Speech End -> STT Start]: {latency_vad_to_stt*1000:.2f}ms")
-
-                                    pcm16 = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
-
-                                    if len(pcm16) < 8000:
-                                        logger.debug(f"{conn_id} Audio too short ({len(pcm16)} samples), skipping")
-                                        return
-
-                                    vram_stt_before = 0
-                                    if torch.cuda.is_available():
-                                        vram_stt_before = torch.cuda.memory_reserved(0) / 1024**2
-
-                                    # Part 3 — STT timeout (10 s)
-                                    def _run_stt(audio_data):
-                                        """Run faster-whisper transcribe in a thread. Returns (segments_list, info)."""
-                                        segs_gen, info = whisper_model.transcribe(
-                                            audio_data,
-                                            language="en",
-                                            beam_size=WHISPER_BEAM_SIZE,
-                                            temperature=0.0,
-                                            vad_filter=WHISPER_VAD_FILTER,
-                                            vad_parameters=dict(min_silence_duration_ms=300, threshold=0.3),
-                                            condition_on_previous_text=False,
-                                            compression_ratio_threshold=2.4,
-                                            log_prob_threshold=-1.0,
-                                            no_speech_threshold=0.8,
-                                            word_timestamps=False,
-                                        )
-                                        return list(segs_gen), info
-
-                                    try:
-                                        loop = asyncio.get_event_loop()
-                                        segments_list, _stt_info = await asyncio.wait_for(
-                                            loop.run_in_executor(None, _run_stt, pcm16),
-                                            timeout=10.0,
-                                        )
-                                    except asyncio.TimeoutError:
-                                        logger.error(f"{conn_id} STT TIMEOUT (>10 s) — dropping audio")
-                                        return
-
-                                    full_text = " ".join([seg.text.strip() for seg in segments_list]).strip()
-                                    t_stt_end = _time.perf_counter()
-                                    stt_duration = t_stt_end - t_stt_start
-
-                                    vram_stt_after = 0
-                                    if torch.cuda.is_available():
-                                        vram_stt_after = torch.cuda.memory_reserved(0) / 1024**2
-
-                                    if not full_text or len(full_text) <= 2:
-                                        logger.debug(f"{conn_id} whisper returned empty text, skipping")
-                                        return
-
-                                    audio_len = len(data_bytes) / (SAMPLE_RATE * 2)  # seconds
-                                    logger.info(f"{conn_id} WHISPER RESULT: '{full_text}' ({len(segments_list)} segments, {audio_len:.2f}s audio, STT took {stt_duration*1000:.0f}ms)")
-
-                                    t_meta = t_meta or {}
-                                    t_meta.update({
-                                        "stt_start": t_stt_start,
-                                        "stt_end": t_stt_end,
-                                        "vram_stt_before": vram_stt_before,
-                                        "vram_stt_after": vram_stt_after,
-                                    })
-
-                                    try:
-                                        await ws.send_json({
-                                            "type": "transcript",
-                                            "text": full_text,
-                                            "final": True,
-                                            "timing": t_meta,
-                                        })
-
-                                        cancel_evt = interrupt_events.get(conn_id)
-                                        if cancel_evt:
-                                            cancel_evt.clear()
-                                        await call_llm_streaming(
-                                            ws, full_text, conn_id,
-                                            user or {"username": "anon", "role": "user"},
-                                            cancel_evt,
-                                            t_meta,
-                                        )
-                                    except RuntimeError as re:
-                                        logger.debug(f"{conn_id} WebSocket closed: {re}")
-                            except asyncio.CancelledError:
-                                logger.warning(f"{conn_id} Voice pipeline cancelled (superseded)")
-                            except Exception as e:
-                                logger.exception(f"Auto-transcription error: {e}")
-                            finally:
-                                # Part 7 + 9 — memory + session-end logging
-                                mem_after = _get_memory_snapshot()
-                                duration = (_time.perf_counter() - session_start) * 1000
-                                _pipeline_run_count += 1
-                                logger.info(f"===== VOICE SESSION END    [{conn_id}] =====")
-                                logger.info(f"  SESSION DURATION: {duration:.0f}ms")
-                                logger.info(f"  GPU after : reserved={mem_after['gpu_reserved_mb']:.0f}MB  alloc={mem_after['gpu_allocated_mb']:.0f}MB  |  CPU RSS={mem_after['cpu_rss_mb']:.0f}MB")
-                                delta_gpu = mem_after["gpu_reserved_mb"] - mem_before["gpu_reserved_mb"]
-                                delta_cpu = mem_after["cpu_rss_mb"] - mem_before["cpu_rss_mb"]
-
-                                # Track consecutive growth
-                                if delta_gpu > 50:
-                                    _consecutive_gpu_growth += 1
-                                    logger.warning(f"  ⚠ GPU memory grew by {delta_gpu:.0f}MB (consecutive: {_consecutive_gpu_growth}/{MEMORY_GROWTH_LIMIT})")
-                                else:
-                                    _consecutive_gpu_growth = 0
-
-                                if delta_cpu > 100:
-                                    _consecutive_cpu_growth += 1
-                                    logger.warning(f"  ⚠ CPU RSS grew by {delta_cpu:.0f}MB (consecutive: {_consecutive_cpu_growth}/{MEMORY_GROWTH_LIMIT})")
-                                else:
-                                    _consecutive_cpu_growth = 0
-
-                                # Cross-run GPU growth check
-                                if _pipeline_run_count > 1 and mem_after["gpu_reserved_mb"] > _last_gpu_reserved_mb + 100:
-                                    logger.warning(f"  ⚠ CONTINUOUS GPU GROWTH across runs (prev={_last_gpu_reserved_mb:.0f} now={mem_after['gpu_reserved_mb']:.0f})")
-                                _last_gpu_reserved_mb = mem_after["gpu_reserved_mb"]
-
-                                # Block new sessions after MEMORY_GROWTH_LIMIT consecutive growth events
-                                if _consecutive_gpu_growth >= MEMORY_GROWTH_LIMIT or _consecutive_cpu_growth >= MEMORY_GROWTH_LIMIT:
-                                    _sessions_blocked = True
-                                    logger.critical(f"  🛑 MEMORY LEAK SUSPECTED — blocking all new voice sessions")
-                                    logger.critical(f"     GPU consecutive growth: {_consecutive_gpu_growth}  |  CPU consecutive growth: {_consecutive_cpu_growth}")
-
-                                _active_voice_task = None
-                                _active_voice_conn_id = None
-                        
-                        task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, timing_meta))
+                        task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, timing_meta, lang=session_language))
                         _active_voice_task = task
                     elif silence_counter >= silence_chunks_needed and len(audio_buffer) <= 48000 and speech_start_time is not None:
                         # Buffer too small to be a real utterance — drain it
@@ -2324,7 +2810,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     audio_buffer.clear()
                                     silence_counter = 0
                                     logger.info(f"{connection_id} ⏹ MANUAL STOP: transcribing {len(chunk)} bytes ({audio_duration_sec:.2f}s audio)")
-                                    task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id))
+                                    task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, lang=session_language))
                                     _active_voice_task = task
                             elif action == "clear_audio_buffer":
                                 # User muted - clear the buffer without transcribing
@@ -2342,19 +2828,31 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 audio_buffer.clear()
                                 silence_counter = 0
                                 logger.info(f"{connection_id} User barge-in - LLM generation interrupted")
+
+                            elif action == "set_language":
+                                # Frontend informed us of language selection (en/ar/auto)
+                                new_lang = payload.get("language", "en")
+                                if new_lang in ("en", "ar", "auto"):
+                                    session_language = new_lang
+                                    logger.info(f"{connection_id} Language set to: {session_language}")
                         
                         elif "text" in payload:
                             # Handle typed text queries with streaming
                             text = payload["text"].strip()
+                            # Allow per-message language override; fall back to session setting
+                            msg_lang = payload.get("language", session_language)
+                            if msg_lang in ("en", "ar", "auto"):
+                                session_language = msg_lang  # update session preference
                             if text:
-                                logger.info(f"{connection_id} text query: {text}")
+                                logger.info(f"{connection_id} text query [{msg_lang}]: {text}")
                                 cancel_evt = interrupt_events.get(connection_id)
                                 if cancel_evt:
                                     cancel_evt.clear()
                                 await call_llm_streaming(
                                     websocket, text, connection_id,
                                     user or {"username": "anon", "role": "user"},
-                                    cancel_evt
+                                    cancel_evt,
+                                    language=msg_lang,
                                 )
             
             elif msg["type"] == "websocket.disconnect":
@@ -2373,9 +2871,10 @@ async def rag_ws_endpoint(websocket: WebSocket):
         except Exception:
             pass
     finally:
-        # Cleanup interrupt event
+        # Cleanup interrupt event and write lock
         if connection_id in interrupt_events:
             del interrupt_events[connection_id]
+        _ws_write_locks.pop(connection_id, None)
         # Cancel dangling voice task on disconnect
         if _active_voice_task and not _active_voice_task.done() and _active_voice_conn_id == connection_id:
             logger.info(f"Cancelling dangling voice task for {connection_id}")

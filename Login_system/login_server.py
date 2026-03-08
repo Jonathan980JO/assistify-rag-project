@@ -2416,6 +2416,54 @@ def logout(request: Request):
 
 
 
+
+# ========== ARABIC LANGUAGE SUPPORT PROXIES ==========
+@app.get("/arabic/status")
+async def arabic_status_proxy(request: Request):
+    """Proxy Arabic model status check to the RAG server."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        serializer.loads(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"{RAG_HTTP_BASE}/arabic/status",
+                timeout=aiohttp.ClientTimeout(total=10),
+                headers={"Cookie": request.headers.get("cookie", "")},
+            ) as resp:
+                data = await resp.json()
+                return JSONResponse(content=data, status_code=resp.status)
+    except Exception as e:
+        return JSONResponse(content={"multilingual_model_ready": False, "error": str(e)}, status_code=200)
+
+
+@app.post("/arabic/download")
+async def arabic_download_proxy(request: Request):
+    """Proxy Arabic model download request to the RAG server."""
+    token = request.cookies.get(SESSION_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    try:
+        serializer.loads(token)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{RAG_HTTP_BASE}/arabic/download",
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={"Cookie": request.headers.get("cookie", "")},
+            ) as resp:
+                data = await resp.json()
+                return JSONResponse(content=data, status_code=resp.status)
+    except Exception as e:
+        return JSONResponse(content={"status": "error", "message": str(e)}, status_code=502)
+
+
 # ========== TTS PROXY (forward to RAG server XTTS v2) ==========
 @app.post("/tts")
 async def tts_proxy(request: Request):
