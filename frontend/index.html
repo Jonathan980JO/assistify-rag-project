@@ -591,6 +591,7 @@
     let processor = null;
     let lastTranscript = '';
     let lastAIResponse = '';
+    let lastUserMsgEl = null;  // reference to last user bubble — updated when STT correction arrives
     let reconnectAttempts = 0;
 
     // ===== LANGUAGE MANAGEMENT =====
@@ -1029,7 +1030,18 @@
         } else if(data.type === 'transcript') {
           if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
             lastTranscript = data.text;
-            appendMsg('user', data.text, detectArabicText(data.text));
+            lastUserMsgEl = appendMsg('user', data.text, detectArabicText(data.text));
+          }
+        } else if(data.type === 'transcriptCorrection') {
+          // Backend corrected the garbled Arabic STT — update the 'أنت:' bubble silently
+          if(data.text && data.text.trim() && lastUserMsgEl) {
+            const arabic = detectArabicText(data.text);
+            const label = arabic ? '\u0623\u0646\u062a:' : 'You:';
+            lastUserMsgEl.textContent = `${label} ${data.text}`;
+            if(arabic && !lastUserMsgEl.classList.contains('arabic-msg')) {
+              lastUserMsgEl.classList.add('arabic-msg');
+            }
+            lastTranscript = data.text;  // keep in sync
           }
         } else if(data.type === 'kb_updated') {
           // Knowledge base changed while user is in chat — show sticky banner
@@ -1119,6 +1131,7 @@
       msg.textContent = `${label} ${text}`;
       chatLog.appendChild(msg);
       chatLog.scrollTop = chatLog.scrollHeight;
+      return msg;  // caller may hold reference for later in-place correction
     }
 
     // ---- KB update banner ----

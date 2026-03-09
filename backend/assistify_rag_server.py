@@ -346,7 +346,8 @@ whisper_model: Optional['_WhisperModel'] = None
 whisper_model_multilingual: Optional['_WhisperModel'] = None
 
 # Path to multilingual model (sibling of english model dir)
-_MULTILINGUAL_MODEL_PATH = Path(WHISPER_MODEL_PATH).parent / "faster-whisper-medium"
+# "small" (~244M) is used — fast enough on GPU (<0.5s) and much lighter than "medium" on CPU
+_MULTILINGUAL_MODEL_PATH = Path(WHISPER_MODEL_PATH).parent / "faster-whisper-small"
 
 # XTTS v2 is now a separate microservice — no local model held in this process
 xtts_model = None  # kept for status endpoint backward compat
@@ -456,20 +457,37 @@ async def startup_event():
         xtts_model = None
 
     # ---- Try to load multilingual faster-whisper model for Arabic STT ----
-    if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
-        logger.info(f"Multilingual faster-whisper model found at {_MULTILINGUAL_MODEL_PATH} — loading for Arabic STT...")
+    # Resolution order:
+    #   1. Direct folder  (faster-whisper-small/)        ← created by /arabic/download or manual placement
+    #   2. HF cache folder (models--Systran--faster-whisper-small/snapshots/<hash>/)  ← already present if
+    #      the model was previously downloaded via huggingface_hub
+    def _find_ml_model_path() -> Path | None:
+        """Return the best available multilingual model path, or None."""
+        # 1. Direct folder
+        if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
+            return _MULTILINGUAL_MODEL_PATH
+        # 2. HF cache format: Models/models--Systran--faster-whisper-small/snapshots/<hash>/
+        _hf_cache = _MULTILINGUAL_MODEL_PATH.parent / "models--Systran--faster-whisper-small" / "snapshots"
+        if _hf_cache.exists():
+            _snaps = sorted(_hf_cache.iterdir())
+            if _snaps:
+                return _snaps[-1]   # latest snapshot
+        return None
+
+    _ml_resolved = _find_ml_model_path()
+    if _ml_resolved:
+        logger.info(f"Multilingual faster-whisper model found at {_ml_resolved} — loading for Arabic STT...")
         try:
-            import os as _os
-            _cpu_threads = int(_os.getenv("WHISPER_CPU_THREADS", str(min(_os.cpu_count() or 4, 8))))
-            whisper_model_multilingual = WhisperModel(
-                str(_MULTILINGUAL_MODEL_PATH),
-                device=WHISPER_DEVICE,
-                compute_type=WHISPER_COMPUTE_TYPE,
-                download_root=None,
-                cpu_threads=_cpu_threads,
-                num_workers=1,
-            )
-            logger.info(f"✓ Multilingual faster-whisper loaded (Arabic STT ready, cpu_threads={_cpu_threads})")
+            # Prefer GPU for multilingual model: drops Arabic STT from ~6s → ~0.3s
+            _ml_device  = "cuda" if torch.cuda.is_available() else "cpu"
+            _ml_compute = "float16" if _ml_device == "cuda" else "int8"
+            _ml_kwargs: dict = {"device": _ml_device, "compute_type": _ml_compute, "download_root": None}
+            if _ml_device == "cpu":
+                import os as _os
+                _cpu_threads = int(_os.getenv("WHISPER_CPU_THREADS", str(min(_os.cpu_count() or 4, 8))))
+                _ml_kwargs.update({"cpu_threads": _cpu_threads, "num_workers": 1})
+            whisper_model_multilingual = WhisperModel(str(_ml_resolved), **_ml_kwargs)
+            logger.info(f"✓ Multilingual faster-whisper loaded (Arabic STT ready, device={_ml_device}, compute={_ml_compute})")
         except Exception as _ml_e:
             logger.warning(f"Multilingual model found but failed to load: {_ml_e} — Arabic STT will use English model as fallback")
     else:
@@ -892,6 +910,18 @@ def _detect_language(text: str) -> str:
     return "ar" if arabic_chars > len(text) * 0.2 else "en"
 
 
+# Arabic STT initial prompt — primes the Whisper decoder with domain-relevant
+# vocabulary so it prefers "أبيع" (sell) over "أبي" (daddy), "يجب" over "أجب", etc.
+_ARABIC_STT_INITIAL_PROMPT = (
+    "لماذا يجب أن أبيع على أمازون؟ "
+    "ما هو البيع على أمازون؟ "
+    "كيف أبدأ البيع؟ "
+    "ما الذي يمكنني بيعه في متجر أمازون؟ "
+    "ما هي رسوم البيع على أمازون؟ "
+    "كيف أسجل كبائع على أمازون؟"
+)
+
+
 # ========== HELPER: RAG+LLM ==========
 async def call_llm_with_rag(text: str, connection_id: str, user):
     global llm_session
@@ -1288,6 +1318,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     arabic_mode = (language == "ar")
     xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
     original_arabic_text = text  # preserve for later use
+    _prefetched_rag_docs = None  # cached from Arabic guard check to avoid double RAG search
 
     if arabic_mode:
         # ---- Fire instant Arabic acknowledgment audio (<1s perceived latency) ----
@@ -1331,8 +1362,9 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 except Exception:
                     text_for_rag = text
 
-            # 3. Search RAG with the translated English text
+            # 3. Search RAG with the translated English text (cache result to avoid double search below)
             rag_docs_check = search_documents(text_for_rag, top_k=3)
+            _prefetched_rag_docs = rag_docs_check  # reuse in the main RAG block
             if not rag_docs_check:
                 # Off-topic: no relevant docs in the knowledge base → Arabic refusal
                 logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
@@ -1362,6 +1394,9 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
     if is_greeting:
         relevant_docs = []
+    elif _prefetched_rag_docs is not None:
+        # Arabic path: reuse result from guard check — avoids a second identical RAG search
+        relevant_docs = _prefetched_rag_docs
     else:
         relevant_docs = search_documents(text, top_k=3)
     
@@ -1444,7 +1479,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             "num_ctx": 2048,
             "temperature": effective_temperature,
             "top_p": 0.9,
-            "num_predict": 300 if arabic_mode else 180,  # Arabic needs more tokens
+            "num_predict": 200 if arabic_mode else 180,  # Arabic: capped for latency
             "num_gpu": 99,
         }
     }
@@ -1714,10 +1749,6 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 if not clean:
                     continue
 
-                # In Arabic mode, skip per-chunk TTS — we'll do a single Arabic TTS at the end
-                if arabic_mode:
-                    continue
-
                 chunk_start = time.perf_counter()
 
                 try:
@@ -1764,7 +1795,8 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                                     first_tts_chunk_time = time.perf_counter()
                                     t_meta["first_tts_chunk"] = first_tts_chunk_time
                                     first_chunk_latency_s = first_tts_chunk_time - perf_start
-                                    logger.info(f"LATENCY [First TTS Chunk]: {first_chunk_latency_s*1000:.0f}ms")
+                                    _lang_tag = " (Arabic)" if arabic_mode else ""
+                                    logger.info(f"LATENCY [First TTS Chunk{_lang_tag}]: {first_chunk_latency_s*1000:.0f}ms")
 
                                     # Feed latency into adaptive manager — may adjust mid-query
                                     adaptive_words, adaptive_buffer = (
@@ -1813,11 +1845,11 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         # Run LLM producer and TTS consumer concurrently — overlapping generation
         await asyncio.gather(llm_producer(), tts_consumer())
 
-        # ===== ARABIC: LLM already responded in Arabic — send directly + TTS =====
+        # ===== ARABIC: Send full Arabic text as the final display chunk =====
+        # (TTS was already streamed live by tts_consumer concurrently with LLM generation)
         if arabic_mode and full_response.strip():
             arabic_chars = sum(1 for c in full_response if '\u0600' <= c <= '\u06FF')
             logger.info(f"{connection_id} Arabic mode: direct response ({len(full_response.strip())} chars, {arabic_chars} Arabic chars)")
-            # Send the Arabic response as a single chunk to frontend
             try:
                 await websocket.send_json({
                     "type": "aiResponseChunk",
@@ -1827,17 +1859,6 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 })
             except Exception:
                 pass
-            # Await Arabic TTS so the latency report captures real TTS timings
-            _ar_first_chunk, _ar_chunk_count, _ar_total_time = await _tts_arabic_response(
-                full_response.strip(), websocket, connection_id, perf_start=perf_start
-            )
-            if _ar_first_chunk is not None and first_tts_chunk_time is None:
-                first_tts_chunk_time = _ar_first_chunk
-                t_meta["first_tts_chunk"] = first_tts_chunk_time
-                first_chunk_latency_s = first_tts_chunk_time - perf_start
-                adaptive_words, adaptive_buffer = adaptive_manager.record_first_chunk_latency(first_chunk_latency_s)
-            tts_chunk_count += _ar_chunk_count
-            tts_total_time += _ar_total_time
         # ===== END ARABIC =====
 
         # Validate the full response (skip for Arabic — validator is not Arabic-aware)
@@ -2146,10 +2167,14 @@ _arabic_download_status: dict = {"state": "idle", "message": ""}
 
 
 def _arabic_multilingual_model_ready() -> bool:
-    """Return True if a multilingual (non-English-only) Whisper model is loaded or on-disk."""
+    """Return True if a multilingual Whisper model is loaded or on-disk (direct folder or HF cache)."""
     if whisper_model_multilingual is not None:
         return True
-    return _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir())
+    if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
+        return True
+    # Also check HF cache format: models--Systran--faster-whisper-small/snapshots/<hash>/
+    _hf_snaps = _MULTILINGUAL_MODEL_PATH.parent / "models--Systran--faster-whisper-small" / "snapshots"
+    return _hf_snaps.exists() and any(_hf_snaps.iterdir())
 
 
 @app.get("/arabic/status")
@@ -2173,7 +2198,7 @@ async def arabic_status(user=Depends(require_login())):
 async def arabic_download_models(user=Depends(require_login())):
     """Download the multilingual faster-whisper model for Arabic STT support.
 
-    Downloads to: backend/Models/faster-whisper-medium/
+    Downloads to: backend/Models/faster-whisper-small/
     Returns immediately; actual download runs in background.
     """
     global _arabic_download_task, _arabic_download_status
@@ -2186,22 +2211,25 @@ async def arabic_download_models(user=Depends(require_login())):
 
     async def _do_download():
         global _arabic_download_status, whisper_model_multilingual
-        _arabic_download_status = {"state": "downloading", "message": "Downloading faster-whisper medium (multilingual)…"}
+        _arabic_download_status = {"state": "downloading", "message": "Downloading faster-whisper small (multilingual)…"}
         dest = _MULTILINGUAL_MODEL_PATH
         dest.mkdir(parents=True, exist_ok=True)
         try:
             from faster_whisper import WhisperModel as _WM
-            logger.info(f"[Arabic Setup] Downloading multilingual model to: {dest}")
-            _model = _WM(
-                "medium",
-                device="cpu",
-                compute_type="int8",
-                download_root=str(dest.parent),
-            )
+            # Load on GPU if available — cuts Arabic STT from ~6s to ~0.3s
+            _dl_device  = "cuda" if torch.cuda.is_available() else "cpu"
+            _dl_compute = "float16" if _dl_device == "cuda" else "int8"
+            _dl_kwargs: dict = {"device": _dl_device, "compute_type": _dl_compute, "download_root": str(dest.parent)}
+            if _dl_device == "cpu":
+                import os as _os
+                _cpu_threads = int(_os.getenv("WHISPER_CPU_THREADS", str(min(_os.cpu_count() or 4, 8))))
+                _dl_kwargs.update({"cpu_threads": _cpu_threads, "num_workers": 1})
+            logger.info(f"[Arabic Setup] Downloading multilingual small model to: {dest} (device={_dl_device}, compute={_dl_compute})")
+            _model = _WM("small", **_dl_kwargs)
             # Keep the loaded model global so it's immediately usable without restart
             whisper_model_multilingual = _model
-            _arabic_download_status = {"state": "ready", "message": "Multilingual model ready."}
-            logger.info("[Arabic Setup] ✓ Multilingual model downloaded and loaded into memory.")
+            _arabic_download_status = {"state": "ready", "message": f"Multilingual small model ready (device={_dl_device})."}
+            logger.info(f"[Arabic Setup] ✓ Multilingual small model downloaded and loaded (device={_dl_device}, compute={_dl_compute}).")
         except Exception as e:
             _arabic_download_status = {"state": "error", "message": str(e)}
             logger.error(f"[Arabic Setup] Download failed: {e}")
@@ -2625,8 +2653,11 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     _model = whisper_model_multilingual if (
                         lang == "ar" and whisper_model_multilingual is not None
                     ) else whisper_model
-                    # Use beam_size=1 (greedy) for Arabic on CPU — fastest decode
-                    _beam = 1 if lang == "ar" else WHISPER_BEAM_SIZE
+                    # Arabic on GPU: beam_size=5 for accuracy; English: greedy (beam=1)
+                    _beam = 5 if lang == "ar" else WHISPER_BEAM_SIZE
+                    # Arabic: initial_prompt primes decoder with domain vocabulary
+                    # (prevents "أبيع"→"أبي", "يجب"→"أجب", etc.)
+                    _initial_prompt = _ARABIC_STT_INITIAL_PROMPT if lang == "ar" else None
                     segs_gen, info = _model.transcribe(
                         audio_data,
                         language=stt_lang,
@@ -2640,11 +2671,12 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         no_speech_threshold=0.8,
                         word_timestamps=False,
                         without_timestamps=True,
+                        initial_prompt=_initial_prompt,
                     )
                     return list(segs_gen), info
 
-                # Timeout: Arabic on CPU needs more headroom (medium model ~4-8s for short clips)
-                _stt_timeout = 30.0 if lang == "ar" else 10.0
+                # Timeout: small model on GPU ~0.3s, on CPU ~2s — 10s is safe headroom for both
+                _stt_timeout = 10.0
                 try:
                     loop = asyncio.get_event_loop()
                     segments_list, _stt_info = await asyncio.wait_for(
@@ -2689,6 +2721,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     cancel_evt = interrupt_events.get(conn_id)
                     if cancel_evt:
                         cancel_evt.clear()
+
                     await call_llm_streaming(
                         ws, full_text, conn_id,
                         user or {"username": "anon", "role": "user"},
