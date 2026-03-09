@@ -169,42 +169,18 @@ async def chat_completions(request: ChatRequest):
     GPU_LAYERS = 99  # large number = "put everything on GPU"
 
     try:
-        # Try OpenAI-compatible endpoint first (Ollama >= 0.1.24)
-        resp = await http_client.post("/v1/chat/completions", json={
-            "model": model,
-            "messages": request.messages,
-            "max_tokens": min(request.max_tokens, 180),
-            "temperature": 0.6,
-            "stream": False,
-            "keep_alive": -1,
-            "options": {
-                "num_ctx": 2048,
-                "temperature": 0.6,
-                "top_p": 0.9,
-                "num_predict": 180,
-                "num_gpu": GPU_LAYERS,
-            },
-        })
-
-        if resp.status_code == 200:
-            return resp.json()
-
-        # Fallback: use Ollama's native /api/chat endpoint
-        logger.warning(
-            f"/v1/chat/completions returned {resp.status_code}, "
-            "falling back to /api/chat"
-        )
-
+        # Use Ollama native /api/chat so num_ctx/num_gpu are respected and
+        # the runner is shared with assistify_rag_server (same KvSize=3072).
         resp2 = await http_client.post("/api/chat", json={
             "model": model,
             "messages": request.messages,
             "keep_alive": -1,
             "options": {
-                "num_ctx": 2048,
+                "num_ctx": 3072,       # MUST match assistify_rag_server.py
+                "num_gpu": GPU_LAYERS, # MUST match assistify_rag_server.py (99)
                 "temperature": 0.6,
                 "top_p": 0.9,
                 "num_predict": 180,
-                "num_gpu": GPU_LAYERS,
             },
             "stream": False,
         })

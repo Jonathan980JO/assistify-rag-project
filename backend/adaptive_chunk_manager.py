@@ -56,9 +56,9 @@ TIER_SLOW   = _Tier("slow",    6,  8, 0.15)
 # First-chunk policy — aggressive low-latency
 # ---------------------------------------------------------------------------
 
-FIRST_CHUNK_MIN_WORDS  = 3       # send first chunk after this many words …
-FIRST_CHUNK_MAX_WORDS  = 5       # … or hard-cap at this many
-FIRST_CHUNK_TIMEOUT_MS = 300     # … or after 300 ms since first token (whichever is first)
+FIRST_CHUNK_MIN_WORDS  = 5       # send first chunk after this many words …
+FIRST_CHUNK_MAX_WORDS  = 8       # … or hard-cap at this many
+FIRST_CHUNK_TIMEOUT_MS = 380     # … or after 380 ms since first token (whichever is first)
 
 # ---------------------------------------------------------------------------
 # Subsequent-chunk flush policy

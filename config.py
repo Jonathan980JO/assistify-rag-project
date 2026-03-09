@@ -127,7 +127,7 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:7001/au
 # Model & service endpoints
 # Points directly to Ollama's built-in OpenAI-compatible endpoint.
 # main_llm_server.py is NOT used — it was just a redundant middleman.
-LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:11434/v1/chat/completions")
+LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:11434/api/chat")
 
 # Ollama configuration — GPU inference via local Ollama service
 # Model name must match exactly what `ollama list` shows
