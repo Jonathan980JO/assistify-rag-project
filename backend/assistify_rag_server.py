@@ -1129,14 +1129,20 @@ def _normalize_digits_for_tts(text: str) -> str:
 from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
 
 
-async def _tts_arabic_response(arabic_text: str, websocket: WebSocket, connection_id: str = ""):
+async def _tts_arabic_response(
+    arabic_text: str,
+    websocket: WebSocket,
+    connection_id: str = "",
+    *,
+    perf_start: float = 0.0,
+) -> tuple:
     """Send a full Arabic text string to XTTS and stream PCM audio over WebSocket.
 
-    Used after Arabic response generation to synthesize speech in Arabic.
-    Fires as a background task so the caller doesn't block.
+    Returns (first_chunk_time, chunk_count, total_time_s) for latency tracking.
+    Can be awaited directly to capture real TTS timings in the latency report.
     """
     if not arabic_text or not arabic_text.strip():
-        return
+        return None, 0, 0.0
 
     # Split into ~200-char chunks to respect XTTS token limit
     import re as _re2
@@ -1163,16 +1169,21 @@ async def _tts_arabic_response(arabic_text: str, websocket: WebSocket, connectio
         async with _lock:
             await websocket.send_bytes(data)
 
+    first_chunk_time: float = None
+    chunk_count: int = 0
+    total_time: float = 0.0
+
     try:
         _sess = tts_session
         if _sess is None or _sess.closed:
-            return  # TTS service not available
+            return None, 0, 0.0  # TTS service not available
 
         for sentence in tts_sentences:
             clean = _re2.sub(r'[\U00010000-\U0010ffff]', '', sentence, flags=_re2.UNICODE).strip()
             if not clean:
                 continue
             try:
+                chunk_start = time.perf_counter()
                 await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
                 resp = await _sess.post(
                     f"{XTTS_SERVICE_URL}/synthesize",
@@ -1203,7 +1214,17 @@ async def _tts_arabic_response(arabic_text: str, websocket: WebSocket, connectio
                             data = data[:-1]
                         if data:
                             await _ws_send_bytes(data)
+                            if first_chunk_time is None:
+                                first_chunk_time = time.perf_counter()
+                                if perf_start:
+                                    logger.info(
+                                        f"LATENCY [First TTS Chunk (Arabic)]: "
+                                        f"{(first_chunk_time - perf_start) * 1000:.0f}ms"
+                                    )
                     resp.close()
+                    chunk_elapsed = time.perf_counter() - chunk_start
+                    chunk_count += 1
+                    total_time += chunk_elapsed
                 else:
                     resp.close()
                     await _ws_send_json({"type": "ttsFallback", "text": clean})
@@ -1218,6 +1239,8 @@ async def _tts_arabic_response(arabic_text: str, websocket: WebSocket, connectio
             await websocket.send_json({"type": "arabic_tts_complete"})
     except Exception:
         pass
+
+    return first_chunk_time, chunk_count, total_time
 
 
 async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: asyncio.Event = None, t_meta=None, language: str = "en"):
@@ -1804,8 +1827,17 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 })
             except Exception:
                 pass
-            # Start Arabic TTS (fire-and-forget)
-            asyncio.create_task(_tts_arabic_response(full_response.strip(), websocket, connection_id))
+            # Await Arabic TTS so the latency report captures real TTS timings
+            _ar_first_chunk, _ar_chunk_count, _ar_total_time = await _tts_arabic_response(
+                full_response.strip(), websocket, connection_id, perf_start=perf_start
+            )
+            if _ar_first_chunk is not None and first_tts_chunk_time is None:
+                first_tts_chunk_time = _ar_first_chunk
+                t_meta["first_tts_chunk"] = first_tts_chunk_time
+                first_chunk_latency_s = first_tts_chunk_time - perf_start
+                adaptive_words, adaptive_buffer = adaptive_manager.record_first_chunk_latency(first_chunk_latency_s)
+            tts_chunk_count += _ar_chunk_count
+            tts_total_time += _ar_total_time
         # ===== END ARABIC =====
 
         # Validate the full response (skip for Arabic — validator is not Arabic-aware)
@@ -1831,11 +1863,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 
         first_token_ms = ((first_token_time - perf_start) * 1000) if first_token_time else None
         first_sentence_ms = ((first_sentence_time - perf_start) * 1000) if first_sentence_time else None
-        _ack_time = t_meta.get("first_ack_sent")
-        first_tts_ms = (
-            (first_tts_chunk_time - perf_start) * 1000 if first_tts_chunk_time
-            else ((_ack_time - perf_start) * 1000 if _ack_time else None)
-        )
+        first_tts_ms = (first_tts_chunk_time - perf_start) * 1000 if first_tts_chunk_time else None
         total_ms = (t_llm_done - perf_start) * 1000
 
         # Finalise adaptive chunk stats for this query
@@ -1845,11 +1873,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         logger.info(f"=== LATENCY REPORT [{connection_id}] ===")
         logger.info(f"  LLM First Token:    {first_token_ms:.0f}ms" if first_token_ms else f"  LLM First Token:    N/A")
         logger.info(f"  First Sentence:     {first_sentence_ms:.0f}ms" if first_sentence_ms else f"  First Sentence:     N/A")
-        _tts_label = "Ack Audio" if (arabic_mode and not first_tts_chunk_time and first_tts_ms) else "First TTS Chunk"
-        if first_tts_ms is not None and arabic_mode and not first_tts_chunk_time and first_tts_ms < 10:
-            logger.info(f"  {_tts_label}:    <10ms (cached PCM, instant)")
-        else:
-            logger.info(f"  {_tts_label}:    {first_tts_ms:.0f}ms" if first_tts_ms else "  First TTS Chunk:    N/A")
+        logger.info(f"  First TTS Chunk:    {first_tts_ms:.0f}ms" if first_tts_ms else "  First TTS Chunk:    N/A")
         logger.info(f"  Total Pipeline:     {total_ms:.0f}ms")
         logger.info(f"  Adaptive Tier:      {adaptive_stats['current_tier']} | words={adaptive_stats['words_per_chunk']} buf={adaptive_stats['buffer_delay_s']:.2f}s")
         logger.info(f"  TTS Chunks:         {tts_chunk_count} (total TTS time: {tts_total_time:.2f}s)")
