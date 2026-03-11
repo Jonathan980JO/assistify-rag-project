@@ -1208,7 +1208,8 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 3. Even if the Knowledge Base contradicts popular knowledge, you MUST follow the Knowledge Base.
 4. State the Knowledge Base facts directly and confidently as the correct answer.
 5. Do NOT say "according to my knowledge" or "actually" — just state the KB facts.
-6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct."""
+6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct.
+7. If the user's question is in Arabic, translate the KNOWLEDGE BASE answer into Arabic FAITHFULLY and LITERALLY. Do NOT invent, paraphrase, or substitute ANY content that is not explicitly stated in the KNOWLEDGE BASE. Every fact, number, and detail must come directly from the KB — no additions, no replacements."""
         logger.info(f"RAG: Found {len(relevant_docs)} docs, injected as authoritative context")
     else:
         logger.info("RAG: No RAG context - using general knowledge")
@@ -1694,7 +1695,8 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 3. Even if the Knowledge Base contradicts popular knowledge, you MUST follow the Knowledge Base.
 4. State the Knowledge Base facts directly and confidently as the correct answer.
 5. Do NOT say "according to my knowledge" or "actually" — just state the KB facts.
-6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct."""
+6. If earlier messages in this conversation contradict the KNOWLEDGE BASE, IGNORE those earlier messages — the KNOWLEDGE BASE is always more recent and correct.
+7. If the user's question is in Arabic, translate the KNOWLEDGE BASE answer into Arabic FAITHFULLY and LITERALLY. Do NOT invent, paraphrase, or substitute ANY content that is not explicitly stated in the KNOWLEDGE BASE. Every fact, number, and detail must come directly from the KB — no additions, no replacements."""
         logger.info(f"{connection_id} RAG: {len(relevant_docs)} docs injected as authoritative context")
     
     if arabic_mode:
@@ -1715,7 +1717,9 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 "4. أجب في جملة واحدة أو جملتين فقط (أقل من 35 كلمة). "
                 "يُحظر تمامًا استخدام القوائم المرقّمة أو النقطية أو أي ترقيم (1. 2. 3. \u2022 -). "
                 "اكتب فقرة واحدة متصلة. لا تقطع الجملة في المنتصف أبدًا.\n"
-                "5. إذا كان السياق بالإنجليزية، ترجمه وأجب بالعربية — لكن اترك الأسماء التقنية كما هي."
+                "5. إجابتك يجب أن تأتي فقط من قاعدة المعرفة (KNOWLEDGE BASE) أدناه. "
+                "ترجم محتوى قاعدة المعرفة إلى العربية بأمانة ودقة حرفية — لا تختلق أو تستبدل أو تضيف أي معلومة غير موجودة في قاعدة المعرفة. "
+                "كل رقم وكل حقيقة يجب أن تأتي من قاعدة المعرفة مباشرة. اترك الأسماء التقنية كما هي بالإنجليزية."
                 f"{context_block}"
             )
     else:
