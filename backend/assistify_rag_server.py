@@ -50,6 +50,7 @@ import wave
 import aiohttp
 import torch
 import time
+import random
 import numpy as np
 import psutil
 import traceback
@@ -357,11 +358,26 @@ xtts_model = None  # kept for status endpoint backward compat
 # within ~1 second while the actual answer is still being generated.
 _arabic_ack_pcm: bytes = b""
 
-# Pre-rendered Arabic opener phrase PCM — played right before LLM streaming starts,
-# bridging the ~3-4s XTTS synthesis gap for the first real content chunk.
-# Must match the assistant-prefill string passed in call_llm_streaming.
-_ARABIC_OPENER_PHRASE = "بناءً على المعلومات المتاحة،"
-_arabic_opener_pcm: bytes = b""
+# 10 varied Arabic opener phrases — the assistant rotates through them so
+# responses don't sound robotic.  All are pre-rendered as PCM at startup;
+# each query picks one round-robin.  The chosen phrase is used both as the
+# LLM assistant-prefill and as the immediately-played pre-cached audio.
+_ARABIC_OPENER_PHRASES: list[str] = [
+    "بناءً على المعلومات المتاحة،",
+    "وفقاً لما لديّ من معلومات،",
+    "استناداً إلى ما هو متاح،",
+    "من خلال ما يتوفر لديّ،",
+    "بحسب البيانات الموجودة،",
+    "وفق ما أعرفه عن هذا،",
+    "بناءً على السياق المتوفر،",
+    "استناداً لما تم جمعه،",
+    "من واقع المعلومات المتاحة،",
+    "نظراً لما هو موجود من بيانات،",
+]
+_ARABIC_OPENER_PHRASE = _ARABIC_OPENER_PHRASES[0]  # backward-compat alias
+_arabic_opener_pcm: bytes = b""           # default PCM (first phrase)
+_arabic_opener_pool: dict[str, bytes] = {}  # phrase text → raw PCM bytes
+_arabic_opener_counter: int = 0            # round-robin index across queries
 
 @app.on_event("startup")
 async def startup_event():
@@ -509,14 +525,21 @@ async def startup_event():
         from watchdog.observers import Observer
         from watchdog.events import FileSystemEventHandler
 
+        # Capture the running event loop NOW (in the async context) so the
+        # watchdog callbacks — which run in a separate OS thread — can safely
+        # schedule coroutines without calling get_event_loop() from a thread
+        # (which raises RuntimeError in Python 3.10+ when no loop is set for
+        # that thread).
+        _main_loop = asyncio.get_running_loop()
+
         class _AssetsHandler(FileSystemEventHandler):
             def on_created(self, event):
                 if event.is_directory:
                     return
                 try:
                     fname = Path(event.src_path).name
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        lambda: asyncio.create_task(_reindex_file_auto(fname))
+                    _main_loop.call_soon_threadsafe(
+                        lambda f=fname: _main_loop.create_task(_reindex_file_auto(f))
                     )
                 except Exception:
                     logger.exception("Assets handler on_created error")
@@ -526,8 +549,8 @@ async def startup_event():
                     return
                 try:
                     fname = Path(event.src_path).name
-                    asyncio.get_event_loop().call_soon_threadsafe(
-                        lambda: asyncio.create_task(_reindex_file_auto(fname))
+                    _main_loop.call_soon_threadsafe(
+                        lambda f=fname: _main_loop.create_task(_reindex_file_auto(f))
                     )
                 except Exception:
                     logger.exception("Assets handler on_modified error")
@@ -606,36 +629,53 @@ async def _warmup_xtts():
                     logger.warning(f"[Warmup] XTTS warmup returned {resp.status}: {text[:120]}")
 
             # -- Arabic acknowledgment + opener pre-render --
-            # Synthesize both phrases and cache their raw PCM (WAV header stripped).
-            # ack  : played instantly on every Arabic query (perceived 0ms latency)
-            # opener: played right before LLM streaming starts, bridging the ~4s
-            #         XTTS synthesis gap for the first real content chunk.
-            global _arabic_ack_pcm, _arabic_opener_pcm
-            _ACK_PHRASE = "حسناً"
-            for _phrase, _label, _target in [
-                (_ACK_PHRASE,          "ack",   "_arabic_ack_pcm"),
-                (_ARABIC_OPENER_PHRASE, "opener", "_arabic_opener_pcm"),
-            ]:
+            # Synthesize ack phrase first (short, fast), then pre-render all 10
+            # opener phrases in parallel so startup cost stays low.
+            global _arabic_ack_pcm, _arabic_opener_pcm, _arabic_opener_pool
+            _ACK_PHRASE = "تفضل"
+            try:
+                async with session.post(
+                    f"{XTTS_SERVICE_URL}/synthesize",
+                    json={"text": _ACK_PHRASE, "speaker": XTTS_SPEAKER, "language": "ar"},
+                    timeout=aiohttp.ClientTimeout(total=60),
+                ) as _ack_resp:
+                    if _ack_resp.status == 200:
+                        _wav = await _ack_resp.read()
+                        _arabic_ack_pcm = _wav[44:] if len(_wav) > 44 else _wav
+                        logger.info(f"[Warmup] ✓ Arabic ack audio cached ({len(_arabic_ack_pcm):,} bytes PCM)")
+                    else:
+                        logger.warning("[Warmup] Arabic ack pre-render failed")
+            except Exception as _e_ack:
+                logger.warning(f"[Warmup] Arabic ack pre-render error: {_e_ack}")
+
+            # Pre-render all 10 opener phrases in parallel
+            async def _render_opener_phrase(_sess, phrase: str) -> tuple:
                 try:
-                    async with session.post(
+                    async with _sess.post(
                         f"{XTTS_SERVICE_URL}/synthesize",
-                        json={"text": _phrase, "speaker": XTTS_SPEAKER, "language": "ar"},
+                        json={"text": phrase, "speaker": XTTS_SPEAKER, "language": "ar"},
                         timeout=aiohttp.ClientTimeout(total=60),
-                    ) as ar_resp:
-                        if ar_resp.status == 200:
-                            wav_bytes = await ar_resp.read()
-                            pcm = wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
-                            if _label == "ack":
-                                _arabic_ack_pcm = pcm
-                            else:
-                                _arabic_opener_pcm = pcm
-                            logger.info(
-                                f"[Warmup] ✓ Arabic {_label} audio cached ({len(pcm):,} bytes PCM)"
-                            )
+                    ) as _r:
+                        if _r.status == 200:
+                            _wav = await _r.read()
+                            _pcm = _wav[44:] if len(_wav) > 44 else _wav
+                            logger.info(f"[Warmup] ✓ Opener '{phrase[:25]}' cached ({len(_pcm):,} bytes PCM)")
+                            return phrase, _pcm
                         else:
-                            logger.warning(f"[Warmup] Arabic {_label} pre-render failed")
-                except Exception as e_ar:
-                    logger.warning(f"[Warmup] Arabic {_label} pre-render error: {e_ar}")
+                            logger.warning(f"[Warmup] Opener '{phrase[:25]}' pre-render failed")
+                except Exception as _e_op:
+                    logger.warning(f"[Warmup] Opener '{phrase[:25]}' error: {_e_op}")
+                return phrase, b""
+
+            _opener_results = await asyncio.gather(
+                *[_render_opener_phrase(session, p) for p in _ARABIC_OPENER_PHRASES]
+            )
+            for _ph, _pcm in _opener_results:
+                if _pcm:
+                    _arabic_opener_pool[_ph] = _pcm
+            # Set default fallback to first phrase
+            if _ARABIC_OPENER_PHRASES[0] in _arabic_opener_pool:
+                _arabic_opener_pcm = _arabic_opener_pool[_ARABIC_OPENER_PHRASES[0]]
     except Exception as e:
         logger.warning(f"[Warmup] XTTS warmup failed (service may not be running): {e}")
 
@@ -954,6 +994,66 @@ def _sanitize_arabic_text(text: str) -> str:
     # Collapse any double-spaces left by stripping
     result = _re_mod.sub(r'  +', ' ', result).strip()
     return result if result else text  # fallback to original if everything was stripped
+
+
+# ---- Arabic digit-to-word table for TTS normalization ----
+_AR_TTS_DIGIT_MAP = {
+    '0': 'صِفر', '1': 'واحِد', '2': 'اثنان', '3': 'ثلاثة',
+    '4': 'أربعة', '5': 'خمسة', '6': 'ستة', '7': 'سبعة',
+    '8': 'ثمانية', '9': 'تسعة',
+}
+
+
+def _preprocess_for_tts(text: str, language: str = "ar") -> str:
+    """Normalize a text chunk just before it is sent to XTTS synthesis.
+
+    Targets the most common causes of XTTS stuttering and unnatural pacing:
+      1. Strip markdown (##, **, *, numbered/bullet lists) — XTTS reads
+         symbols aloud or hesitates at them.
+      2. Expand isolated single Western digits to Arabic word equivalents so
+         XTTS doesn't trip over a lone '3' inside Arabic text.
+      3. Remove consecutive duplicate punctuation ('،،' → '،').
+      4. Ensure the chunk ends with a light pause character ('،') when it
+         trails off mid-phrase — gives XTTS a natural breath boundary.
+      5. Strip emoji / private-use characters.
+    """
+    if not text:
+        return text
+
+    # 1. Strip markdown formatting
+    text = _re_mod.sub(r'^#+\s*', '', text, flags=_re_mod.MULTILINE)   # headings
+    text = _re_mod.sub(r'\*{1,3}([^*]+)\*{1,3}', r'\1', text)          # bold/italic
+    # Numbered list items: replace "1." / "2." etc. with a comma separator
+    text = _re_mod.sub(r'(?m)^\s*\d+\.\s+', '، ', text)
+    # Bullet list items
+    text = _re_mod.sub(r'(?m)^\s*[-•]\s+', '، ', text)
+
+    if language == "ar":
+        # 2. Expand isolated single digits ('3 سنوات' → 'ثلاثة سنوات')
+        text = _re_mod.sub(
+            r'(?<!\d)\d(?!\d)',
+            lambda m: _AR_TTS_DIGIT_MAP.get(m.group(), m.group()),
+            text,
+        )
+
+        # 3. Collapse repeated punctuation
+        text = _re_mod.sub(r'[،,]{2,}', '،', text)
+        text = _re_mod.sub(r'[؟?!]{2,}', lambda m: m.group()[0], text)
+
+        # 4. Add trailing pause if chunk ends without punctuation
+        #    (signals XTTS that the phrase is complete → prevents rushed ending)
+        if text and text[-1] not in '.؟?!،,؛:':
+            text = text + '،'
+
+    # 5. Remove emoji
+    text = _re_mod.sub(
+        r'[\U0001F300-\U0001FAFF\U0001F900-\U0001F9FF\U00002600-\U000027BF]',
+        '', text,
+    )
+
+    # Collapse multiple spaces / newlines
+    text = _re_mod.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> str:
@@ -1607,17 +1707,30 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             system_prompt = (
                 "أنت Assistify، مساعد خدمات أمازون. "
                 "القواعد الصارمة:\n"
-                "1. أجب بالعربية فقط — يُمنع استخدام أي كلمة إنجليزية أو صينية.\n"
+                "1. أجب بالعربية فقط — يُمنع منعاً باتاً استخدام أي كلمة بالإنجليزية أو الصينية أو أي لغة غير العربية.\n"
                 "2. احتفظ بأسماء الخدمات والمنتجات كما هي بالإنجليزية: Amazon, Prime, "
                 "'Prime badge', FBA, FBM, Kindle, Alexa — لا تترجمها أبداً. "
                 "مثلاً: 'شارة Prime' وليس 'التوتر الأزرق'.\n"
                 "3. لا تبدأ إجابتك بـ 'حسناً' أو 'حسنا' أو 'بالتأكيد'. ابدأ بالإجابة مباشرة.\n"
-                "4. أجب في جملتين إلى 3 جمل كاملة تغطي كل نقطة أساسية (أقل من 70 كلمة). لا تقطع الجملة في المنتصف أبدًا.\n"
+                "4. أجب في جملة واحدة أو جملتين فقط (أقل من 35 كلمة). "
+                "يُحظر تمامًا استخدام القوائم المرقّمة أو النقطية أو أي ترقيم (1. 2. 3. \u2022 -). "
+                "اكتب فقرة واحدة متصلة. لا تقطع الجملة في المنتصف أبدًا.\n"
                 "5. إذا كان السياق بالإنجليزية، ترجمه وأجب بالعربية — لكن اترك الأسماء التقنية كما هي."
                 f"{context_block}"
             )
     else:
         system_prompt = f"""You are Assistify, a helpful assistant. Keep responses under 80 words. Use short conversational sentences. Be concise — answer in 2-3 sentences maximum. Never cut off mid-sentence. Always respond in English.{context_block}"""
+    # Pick a varied opener phrase for this query (round-robin across the pool)
+    global _arabic_opener_counter
+    _chosen_opener: str = _ARABIC_OPENER_PHRASE      # fallback default
+    _chosen_opener_pcm: bytes = _arabic_opener_pcm   # fallback default PCM
+    if arabic_mode and _arabic_opener_pool:
+        _pool_ready = [p for p in _ARABIC_OPENER_PHRASES if _arabic_opener_pool.get(p)]
+        if _pool_ready:
+            _chosen_opener = _pool_ready[_arabic_opener_counter % len(_pool_ready)]
+            _chosen_opener_pcm = _arabic_opener_pool[_chosen_opener]
+            _arabic_opener_counter += 1
+
     messages = [{"role": "system", "content": system_prompt}]
     # When KB context is present, skip conversation history to prevent stale
     # old answers from overriding fresh KB data.
@@ -1632,7 +1745,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
     # its response in Arabic rather than defaulting to Chinese when the KB context
     # is in English.  Ollama supports the 'assistant' partial-response pattern.
     if arabic_mode:
-        messages.append({"role": "assistant", "content": "بناءً على المعلومات المتاحة، "})
+        messages.append({"role": "assistant", "content": _chosen_opener + " "})
     
     username = user.get("username", "unknown")
     user_role = user.get("role", "unknown")
@@ -1656,11 +1769,11 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             "num_ctx": 3072,
             "temperature": effective_temperature,
             "top_p": 0.9,
-            # Arabic BPE tokens are ~2-3 chars each; 200 tokens ≈ 65-80 Arabic
-            # words — enough for 2-3 complete sentences covering the key RAG facts.
-            # Shorter responses cut total TTS time from ~20s down to ~8s.
-            # 180 tokens remains sufficient for English.
-            "num_predict": 200 if arabic_mode else 180,
+            # Arabic BPE tokens are ~2-3 chars each; 95 tokens ≈ 30-35 Arabic
+            # words — 1-2 concise sentences, fastest TTS rendering (~5s).
+            # Reduced from 150 to 95 to cut synthesis time and GPU pressure.
+            # 160 tokens remains sufficient for English.
+            "num_predict": 95 if arabic_mode else 160,
             "num_gpu": 99,
         }
     }
@@ -1671,12 +1784,13 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
     # arabic_chars counting is not fooled by a short LLM continuation that starts
     # mid-sentence (after the prefill) and so the final fullText includes the opener.
     if arabic_mode:
-        full_response = _ARABIC_OPENER_PHRASE + " "
-        sentence_index = 1  # opener occupies index 0 ({OLLAMA_MODEL}) | query: {text[:60]}... | context_docs: {len(relevant_docs)}")
+        full_response = _chosen_opener + " "
+        sentence_index = 1  # opener occupies index 0
 
     first_token_time = None
     first_sentence_time = None
-    first_tts_chunk_time = None
+    first_tts_chunk_time = None    # first actual XTTS synthesis byte received
+    first_opener_time: float | None = None  # pre-cached opener PCM sent (~ms after query)
     vram_llm_active = 0
 
     # ---- Adaptive chunk sizing ----
@@ -1724,23 +1838,30 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         chunk_start_wall: float | None = None    # wall-clock when current chunk accumulation began
 
         # Pre-fetch policy values from adaptive manager
-        # Arabic: use ultra-aggressive first-chunk policy (2 words / 150ms) so XTTS
-        # synthesis starts as early as possible.  The pre-cached opener already fills
-        # the ~2-3s synthesis gap, so the 2-word chunk just needs to arrive before
-        # the opener audio finishes playing.
+        # Arabic: the pre-cached opener fills the ~2-3s synthesis gap, so
+        # the first real LLM chunk needs enough words to make a meaningful
+        # TTS request.  Using 5-8 words prevents single-character Chinese
+        # tokens from causing per-token log spam when the LLM misbehaves.
         if arabic_mode:
-            fc_min  = 2
-            fc_max  = 3
-            fc_tmo  = 0.15   # 150 ms
+            fc_min  = 5
+            fc_max  = 8
+            fc_tmo  = 0.50   # 500 ms
         else:
             fc_min  = adaptive_manager.first_chunk_min_words()
             fc_max  = adaptive_manager.first_chunk_max_words()
             fc_tmo  = adaptive_manager.first_chunk_timeout_s()
         sub_tmo  = adaptive_manager.subsequent_timeout_s()
 
+        # Track consecutive dropped non-Arabic chunks.  If the LLM is
+        # outputting entirely Chinese/English, we must still graduate out of
+        # "first chunk" mode after enough tokens so the producer doesn't
+        # degenerate into per-token flushing (50+ log lines, wasted CPU).
+        _non_arabic_drops = 0
+
         async def _flush_buffer():
             """Send accumulated words to WebSocket + TTS queue, reset state."""
             nonlocal word_buffer, sentence_index, first_sentence_time, chunk_start_wall, first_chunk_sent
+            nonlocal _non_arabic_drops
             chunk_text = " ".join(word_buffer).strip()
             word_buffer = []
             chunk_start_wall = None  # reset timer for next chunk
@@ -1751,6 +1872,27 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             # In Arabic mode: sanitize stray English words (keep brand names)
             if arabic_mode:
                 chunk_text = _sanitize_arabic_text(chunk_text)
+                if not chunk_text or len(chunk_text) <= 3:
+                    # Still graduate out of first-chunk mode so we stop
+                    # per-token log-spamming when LLM outputs non-Arabic.
+                    _non_arabic_drops += 1
+                    if _non_arabic_drops >= 3:
+                        first_chunk_sent = True
+                    return
+                # Drop chunks that are purely English/Latin — these are RAG context
+                # being regurgitated by the LLM before it switches to Arabic output.
+                # _sanitize_arabic_text returns all-English text unchanged (caller
+                # decides), so we must explicitly reject it here.
+                if not any('\u0600' <= c <= '\u06FF' for c in chunk_text):
+                    _non_arabic_drops += 1
+                    if _non_arabic_drops >= 3:
+                        first_chunk_sent = True
+                    return
+                # Strip markdown / numbered-list formatting from display text too
+                # (prevents "1. التسجيل 2. التحقق..." leaking into the chat bubble).
+                chunk_text = _re_mod.sub(r'(?m)^\s*\d+\.\s+', '، ', chunk_text)
+                chunk_text = _re_mod.sub(r'(?m)^\s*[-\u2022]\s+', '، ', chunk_text)
+                chunk_text = _re_mod.sub(r'^\u060c\s*', '', chunk_text).strip()
                 if not chunk_text or len(chunk_text) <= 3:
                     return
 
@@ -1955,8 +2097,10 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 if cancel_event and cancel_event.is_set():
                     break
 
-                # Clean text for TTS
+                # Clean text for TTS — strip surrogate-pairs then apply deep
+                # Arabic normalization (digits, markdown, punctuation, pauses)
                 clean = _re.sub(r'[\U00010000-\U0010ffff]', '', sentence, flags=_re.UNICODE).strip()
+                clean = _preprocess_for_tts(clean, language=xtts_lang)
                 if not clean:
                     continue
 
@@ -2007,7 +2151,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                                     t_meta["first_tts_chunk"] = first_tts_chunk_time
                                     first_chunk_latency_s = first_tts_chunk_time - perf_start
                                     _lang_tag = " (Arabic)" if arabic_mode else ""
-                                    logger.info(f"LATENCY [First TTS Chunk{_lang_tag}]: {first_chunk_latency_s*1000:.0f}ms")
+                                    logger.info(f"LATENCY [First XTTS Synthesis{_lang_tag}]: {first_chunk_latency_s*1000:.0f}ms")
 
                                     # Feed latency into adaptive manager — may adjust mid-query
                                     adaptive_words, adaptive_buffer = (
@@ -2057,21 +2201,20 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         # the first visible chunk (index 0) BEFORE the LLM generates any tokens.
         # This fills the ~2-3s XTTS synthesis gap so the user hears audio within
         # ~200ms of the query, not 5-6s later.
-        if arabic_mode and _arabic_opener_pcm:
+        if arabic_mode and _chosen_opener_pcm:
             try:
-                await _safe_ws_json({"type": "aiResponseChunk", "text": _ARABIC_OPENER_PHRASE,
+                await _safe_ws_json({"type": "aiResponseChunk", "text": _chosen_opener,
                                      "index": 0, "done": False, "timing": t_meta})
                 await _safe_ws_json({"type": "ttsAudioStart", "sampleRate": 24000})
-                await _safe_ws_bytes(_arabic_opener_pcm)
+                await _safe_ws_bytes(_chosen_opener_pcm)
                 await _safe_ws_json({"type": "ttsAudioEnd"})
-                if first_tts_chunk_time is None:
-                    first_tts_chunk_time = time.perf_counter()
-                    tts_chunk_count += 1
+                first_opener_time = time.perf_counter()
+                tts_chunk_count += 1
                 logger.info(
-                    f"LATENCY [Opener Audio Played]: "
-                    f"{(first_tts_chunk_time - perf_start)*1000:.0f}ms"
+                    f"LATENCY [Opener Audio Played (cached)]: "
+                    f"{(first_opener_time - perf_start)*1000:.0f}ms"
                 )
-                t_meta["first_ack_sent"] = first_tts_chunk_time
+                t_meta["first_ack_sent"] = first_opener_time
             except Exception as _op_e:
                 logger.warning(f"{connection_id} Opener playback error: {_op_e}")
 
@@ -2083,7 +2226,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
             # Count Arabic chars in the LLM-generated portion only (the opener
             # phrase was pre-seeded into full_response before streaming and must
             # not mask a Chinese-only LLM response from the fallback logic).
-            _opener_len = len(_ARABIC_OPENER_PHRASE) + 1  # +1 for space
+            _opener_len = len(_chosen_opener) + 1  # +1 for space
             _llm_portion = full_response[_opener_len:].strip() if arabic_mode else full_response
             arabic_chars = sum(1 for c in _llm_portion if '\u0600' <= c <= '\u06FF')
             logger.info(f"{connection_id} Arabic mode: streamed response ({len(full_response.strip())} chars, {arabic_chars} Arabic chars in LLM portion)")
@@ -2112,7 +2255,11 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                     # assumption and use a direct Arabic-only prompt.
                     if _src_lang == "zh":
                         _direct_msgs = [
-                            {"role": "system", "content": "انت مترجم. أجب بالعربية فقط. لا إنجليزية إطلاقًا."},
+                            {"role": "system", "content": (
+                                "أنت مساعد يجيب بالعربية فقط. لا تكتب أي كلمة بالإنجليزية أو الصينية. "
+                                "أجب في جملة أو جملتين فقط (أقل من 35 كلمة). "
+                                "يُحظر استخدام القوائم المرقمة أو النقطية."
+                            )},
                             {"role": "user", "content": f"سؤال المستخدم: {original_arabic_text}\n\nأجب عنه بالعربية:"},
                         ]
                         _fb_payload = {
@@ -2121,7 +2268,7 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                             "stream": False,
                             "keep_alive": -1,
                             "options": {"num_ctx": 3072, "num_gpu": 99,
-                                        "temperature": 0.1, "num_predict": 300},
+                                        "temperature": 0.1, "num_predict": 95},
                         }
                         import aiohttp as _aiohttp_fb
                         _fb_sess = llm_session
@@ -2196,8 +2343,16 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
 
         first_token_ms = ((first_token_time - perf_start) * 1000) if first_token_time else None
         first_sentence_ms = ((first_sentence_time - perf_start) * 1000) if first_sentence_time else None
+        first_opener_ms = (first_opener_time - perf_start) * 1000 if first_opener_time else None
         first_tts_ms = (first_tts_chunk_time - perf_start) * 1000 if first_tts_chunk_time else None
         total_ms = (t_llm_done - perf_start) * 1000
+
+        # Sanity check: first_tts_ms must be > first_sentence_ms > first_token_ms.
+        # If first_tts_chunk_time was somehow set earlier than first_sentence_time
+        # (e.g. a timing race) clamp it so the report stays logical.
+        if first_tts_ms is not None and first_sentence_ms is not None:
+            if first_tts_ms < first_sentence_ms:
+                first_tts_ms = None  # discard bad reading
 
         # Finalise adaptive chunk stats for this query
         adaptive_manager.finish_query(tts_chunk_count, tts_total_time)
@@ -2209,11 +2364,13 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
         if translate_ms:
             cached_lbl = "cached" if _translate_was_cached else "live"
             logger.info(f"  Translation (AR→EN): {translate_ms:.0f}ms ({cached_lbl})")
-        logger.info(f"  LLM First Token:    {first_token_ms:.0f}ms" if first_token_ms else f"  LLM First Token:    N/A")
+        logger.info(f"  LLM First Token:    {first_token_ms:.0f}ms" if first_token_ms else "  LLM First Token:    N/A")
         if translate_ms and first_token_ms:
             logger.info(f"  LLM excl.translate: {first_token_ms - translate_ms:.0f}ms")
-        logger.info(f"  First Sentence:     {first_sentence_ms:.0f}ms" if first_sentence_ms else f"  First Sentence:     N/A")
-        logger.info(f"  First TTS Chunk:    {first_tts_ms:.0f}ms" if first_tts_ms else "  First TTS Chunk:    N/A")
+        logger.info(f"  First Sentence:     {first_sentence_ms:.0f}ms" if first_sentence_ms else "  First Sentence:     N/A")
+        if first_opener_ms is not None:
+            logger.info(f"  Opener (cached):    {first_opener_ms:.0f}ms  ← pre-rendered, not synthesis")
+        logger.info(f"  First XTTS Synth:   {first_tts_ms:.0f}ms" if first_tts_ms else "  First XTTS Synth:   N/A")
         logger.info(f"  Total Pipeline:     {total_ms:.0f}ms")
         logger.info(f"  Adaptive Tier:      {adaptive_stats['current_tier']} | words={adaptive_stats['words_per_chunk']} buf={adaptive_stats['buffer_delay_s']:.2f}s")
         logger.info(f"  TTS Chunks:         {tts_chunk_count} (total TTS time: {tts_total_time:.2f}s)")
@@ -2232,7 +2389,8 @@ CRITICAL RULES — YOU MUST FOLLOW THESE WITHOUT EXCEPTION:
                 "latency": {
                     "first_token_ms": round(first_token_ms) if first_token_ms else None,
                     "first_sentence_ms": round(first_sentence_ms) if first_sentence_ms else None,
-                    "first_tts_chunk_ms": round(first_tts_ms) if first_tts_ms else None,
+                    "first_opener_ms": round(first_opener_ms) if first_opener_ms else None,
+                    "first_tts_synthesis_ms": round(first_tts_ms) if first_tts_ms else None,
                     "total_ms": round(total_ms),
                 },
                 "adaptive_chunk": {
