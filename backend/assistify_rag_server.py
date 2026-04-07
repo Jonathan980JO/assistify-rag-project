@@ -2789,16 +2789,30 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                     logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=%s chunk=%s sentence=%s", entity_l, mrej, chunk_idx, s[:180])
                     continue
 
+                if entity_l == "reinforcement":
+                    sl_bad = s.lower()
+                    if re.search(r"\b(?:if\s+reinforcement\s+is\s+withheld|response\s+rate\s+decreases|no\s+response\s+is\s+shown|extinction|acquire\s+a\s+particular\s+behavior|does\s+not\s+readily\s+demonstrate)\b", sl_bad):
+                        logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=reinforcement_bad_fragment chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
+                        continue
+
                 explain_bonus = 0.0
                 if re.search(r"\b(?:works|operate|involves|includes|forms\s+an\s+association|consequence|reinforcement|punishment|strengthens?|weakens?|increases?|decreases?)\b", s.lower()):
                     explain_bonus = 0.5
                 if query_work_mode and re.search(r"\b(?:increases?|decreases?|withheld|provided|strengthens?|weakens?)\b", s.lower()):
                     explain_bonus += 0.7
+                reinforcement_bonus = 0.0
+                reinforcement_penalty = 0.0
+                if entity_l == "reinforcement":
+                    sl = s.lower()
+                    if re.search(r"\b(?:strengthens?\s+behavior|increases?\s+the\s+likelihood|increases?\s+the\s+probability|follow(?:ing)?\s+it\s+with\s+a\s+consequence|consequence\s+follow(?:s|ing)|reward|positive\s+reinforcement|negative\s+reinforcement|remov(?:e|ing)\s+an\s+unpleasant)\b", sl):
+                        reinforcement_bonus += 1.25
+                    if re.search(r"\b(?:if\s+reinforcement\s+is\s+withheld|response\s+rate\s+decreases|no\s+response\s+is\s+shown|extinction|acquire\s+a\s+particular\s+behavior|does\s+not\s+readily\s+demonstrate)\b", sl):
+                        reinforcement_penalty += 1.8
                 starts_entity_bonus = 0.4 if re.match(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\b", s.lower()) else 0.0
                 list_penalty = 0.4 if (s.count(",") >= 3 or "/" in s) else 0.0
                 word_len = len(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9'\-]*", s))
                 length_penalty = 0.04 * max(0, word_len - 28)
-                score = dscore + (2.0 if entity_hit else 0.7) + (0.5 if prev_entity_hit else 0.0) + explain_bonus + starts_entity_bonus - list_penalty - length_penalty - (0.01 * (sent_idx + cand_idx))
+                score = dscore + (2.0 if entity_hit else 0.7) + (0.5 if prev_entity_hit else 0.0) + explain_bonus + reinforcement_bonus + starts_entity_bonus - reinforcement_penalty - list_penalty - length_penalty - (0.01 * (sent_idx + cand_idx))
                 candidates.append((score, doc_rank, sent_idx, chunk_idx, s, entity_hit, prev_entity_hit))
                 logger.info("[GROUNDED SENTENCE ACCEPT] entity=%s chunk=%s score=%.3f sentence=%s", entity_l, chunk_idx, score, s[:180])
 
@@ -9830,6 +9844,15 @@ def _passes_strict_definition_relevance_guard(query_text: str, answer_sentence: 
         logger.info("[STRICT DEF PREF MISS] query=%s reason=empty_norm", q_low[:120])
         return False
 
+    if norm_entity == "reinforcement":
+        bad_reinforcement_fragments = (
+            "does learn or acquire a particular behavior",
+            "does not readily demonstrate it until reinforcement is provided",
+        )
+        if any(frag in norm_sentence for frag in bad_reinforcement_fragments):
+            logger.info("[STRICT DEF PREF MISS] entity=%s reason=known_bad_reinforcement_fragment", entity_l)
+            return False
+
     if re.search(rf"\b{re.escape(norm_entity)}\b", norm_sentence):
         logger.info("[STRICT DEF PREF PASS] entity=%s mode=exact_phrase", entity_l)
         return True
@@ -14064,6 +14087,16 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             has_entity, entity = _extract_entity_from_definition_query(query_text)
             entity_l = (entity or "").strip().lower()
             entity_norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", entity_l)).strip()
+            bad_reinforcement_fragments = (
+                "does learn or acquire a particular behavior",
+                "does not readily demonstrate it until reinforcement is provided",
+                "performance may not be the same as what one has actually learnt",
+            )
+            def _is_bad_reinforcement_definition_sentence(sentence: str) -> bool:
+                if entity_norm != "reinforcement":
+                    return False
+                low_sentence = (sentence or "").lower()
+                return any(frag in low_sentence for frag in bad_reinforcement_fragments)
             concept_q = (query_text or "").strip().lower().startswith("what is") or (query_text or "").strip().lower().startswith("define")
             entity_tokens = [
                 t for t in re.findall(r"[a-z0-9]{2,}", entity_l)
@@ -14094,6 +14127,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     m = pat.search(src_compact_low)
                     if m:
                         direct = src_compact[m.start():m.end()].strip()
+                        if _is_bad_reinforcement_definition_sentence(direct):
+                            direct = ""
                         if not re.search(r"\b(?:\d{4}|\d{3,4}s|translated|book|publication|edition|isbn|https?://|www\.|kdpublications)\b", direct, flags=re.IGNORECASE):
                             return direct.rstrip(" .") + "."
 
@@ -14110,6 +14145,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                             continue
                         if re.search(r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography|father\s+of)\b", sent, flags=re.IGNORECASE):
                             continue
+                        if _is_bad_reinforcement_definition_sentence(sent):
+                            continue
                         if entity_norm and re.search(rf"\b{re.escape(entity_norm)}\b(?:[\s\"'`”’]+)(?:is|refers\s+to|can\s+be\s+defined\s+as)\b", sent_low_norm):
                             return sent.strip()
 
@@ -14119,6 +14156,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     low = sent.lower()
                     wc = len(re.findall(r"[a-zA-Z][a-zA-Z\-']*", sent))
                     if wc < 6 or wc > 40:
+                        continue
+                    if _is_bad_reinforcement_definition_sentence(sent):
                         continue
                     if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", sent):
                         continue
