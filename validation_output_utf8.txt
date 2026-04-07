@@ -1,0 +1,28 @@
+﻿Initialising test session...
+
+================================================================================
+QUERY: What are the six Ms?
+================================================================================
+
+[LiveRAGManager] Query: 'what are the six ms?'
+
+================================================== DEBUG RAG PROMPT ==================================================
+SYSTEM: Error processing query: 'charmap' codec can't encode character '\u2192' in position 3595: character maps to <undefined>
+
+================================================================================
+QUERY: What are the phases of the pre-scientific management period before 1880?
+================================================================================
+
+[LiveRAGManager] Query: 'what are the phases of the pre-scientific management period before 1880?'
+
+================================================== DEBUG RAG PROMPT ==================================================
+SYSTEM: Error processing query: 'charmap' codec can't encode character '\u2192' in position 4176: character maps to <undefined>
+
+================================================================================
+QUERY: What are the five levels in MaslowÆs hierarchy of needs as presented in the book?
+================================================================================
+
+[LiveRAGManager] Query: 'what are the five levels in maslowÆs hierarchy of needs as presented in the book?'
+
+================================================== DEBUG RAG PROMPT ==================================================
+SYSTEM: Error processing query: 'charmap' codec can't encode character '\u2192' in position 4176: character maps to <undefined>

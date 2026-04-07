@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notifications - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+            --warning: #f59e0b;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            padding: 0;
+            margin: 0;
+        }
+        /* Header and Menu Styles */
+        header {
+            background: var(--sidebar);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 998;
+        }
+        .menu-btn {
+            background: var(--accent);
+            color: var(--light);
+            border: none;
+            font-size: 24px;
+            width: 48px;
+            height: 48px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .menu-btn:hover {
+            background: #0e8c6d;
+        }
+        .header-title {
+            font-size: 1.5rem;
+            margin: 0;
+            color: var(--accent);
+        }
+        .header-spacer {
+            width: 72px;
+        }
+        .nav-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 999;
+        }
+        .nav-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .nav-menu {
+            position: fixed;
+            top: 0;
+            left: -280px;
+            width: 280px;
+            height: 100%;
+            background: var(--sidebar);
+            box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+            transition: left 0.3s;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        .nav-menu.open {
+            left: 0;
+        }
+        .nav-header {
+            padding: 24px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .nav-header h2 {
+            margin: 0;
+            color: var(--accent);
+            font-size: 1.5rem;
+        }
+        .nav-links {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .nav-links li {
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 16px 24px;
+            color: var(--light);
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .nav-link:hover {
+            background: rgba(16,163,127,0.2);
+        }
+        .nav-link svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        h1 {
+            color: var(--accent);
+            margin-bottom: 24px;
+        }
+        .back-link {
+            display: inline-block;
+            color: var(--accent);
+            text-decoration: none;
+            margin-bottom: 20px;
+        }
+        .actions {
+            margin-bottom: 20px;
+        }
+        .btn {
+            background: var(--accent);
+            color: var(--light);
+            border: none;
+            padding: 10px 20px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            margin-right: 10px;
+        }
+        .btn:hover { opacity: 0.9; }
+        .notification {
+            background: var(--sidebar);
+            padding: 20px;
+            border-radius: 12px;
+            margin-bottom: 12px;
+            border-left: 4px solid var(--accent);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        .notification:hover { background: #333; }
+        .notification.unread {
+            border-left-color: var(--warning);
+            background: #2f2f2f;
+        }
+        .notification.priority-high { border-left-color: var(--danger); }
+        .notification-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        .notification-title {
+            font-weight: 600;
+            font-size: 1.1em;
+            color: var(--accent);
+        }
+        .notification-time {
+            font-size: 0.85em;
+            color: var(--muted);
+        }
+        .notification-message {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+        .notification-link {
+            color: var(--accent);
+            text-decoration: none;
+            font-size: 0.9em;
+        }
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--muted);
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+            margin-left: 8px;
+        }
+        .badge-unread { background: var(--warning); color: #fff; }
+        .badge-high { background: var(--danger); color: #fff; }
+    </style>
+    <script src="/static/security.js"></script>
+    <script>
+        function openNav() {
+            document.querySelector('.nav-menu').classList.add('open');
+            document.querySelector('.nav-overlay').classList.add('show');
+        }
+        
+        function closeNav() {
+            document.querySelector('.nav-menu').classList.remove('open');
+            document.querySelector('.nav-overlay').classList.remove('show');
+        }
+    </script>
+</head>
+<body>
+    <!-- Navigation Overlay -->
+    <div class="nav-overlay" onclick="closeNav()"></div>
+    
+    <!-- Side Navigation Menu -->
+    <nav class="nav-menu">
+        <div class="nav-header">
+            <h2>Menu</h2>
+        </div>
+        <ul class="nav-links">
+            <li>
+                <a href="/main" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+                    Home
+                </a>
+            </li>
+            <li>
+                <a href="/frontend/index.html" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+                    Chat
+                </a>
+            </li>
+            <li>
+                <a href="/profile" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                    Profile Settings
+                </a>
+            </li>
+            <li>
+                <a href="/logout" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+                    Logout
+                </a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Header with hamburger button -->
+    <header>
+        <button class="menu-btn" onclick="openNav()">☰</button>
+        <h1 class="header-title">Assistify</h1>
+        <div class="header-spacer"></div>
+    </header>
+
+    <div class="container">
+        <h1>🔔 Notifications</h1>
+        
+        <div class="actions">
+            <button class="btn" onclick="markAllRead()">Mark All as Read</button>
+            <button class="btn" style="background: #6b7280;" onclick="loadNotifications()">Refresh</button>
+        </div>
+        
+        <div id="notifications-container"></div>
+    </div>
+
+    <script>
+        function getCookie(name) {
+            const v = `; ${document.cookie}`;
+            const parts = v.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
+        const csrf = getCookie('csrf_token');
+
+        async function loadNotifications() {
+            try {
+                const response = await fetch('/api/notifications', {
+                    credentials: 'same-origin',
+                    headers: { 'x-csrf-token': csrf }
+                });
+                const data = await response.json();
+                
+                const container = document.getElementById('notifications-container');
+                
+                if (data.notifications.length === 0) {
+                    Security.safeSetHTML(container, '<div class="empty-state"><h2>No notifications yet</h2><p>You\'re all caught up! 🎉</p></div>';
+                    return;
+                }
+                
+                const html = data.notifications.map(notif => {
+                    const time = new Date(notif.created_at).toLocaleString();
+                    const unreadClass = notif.is_read ? '' : 'unread';
+                    const priorityClass = notif.priority === 'high' ? 'priority-high' : '';
+                    const unreadBadge = notif.is_read ? '' : '<span class="badge badge-unread">NEW</span>';
+                    const priorityBadge = notif.priority === 'high' ? '<span class="badge badge-high">HIGH</span>' : '';
+                    
+                    return `
+                        <div class="notification ${unreadClass} ${priorityClass}" onclick="handleNotificationClick(${notif.id}, '${notif.link || ''}')">
+                            <div class="notification-header">
+                                <div class="notification-title">${notif.title}${unreadBadge}${priorityBadge}</div>
+                                <div class="notification-time">${time}</div>
+                            </div>
+                            <div class=\"notification-message\">${notif.message}</div>
+                            ${notif.link ? `<a href=\"${notif.link}\" class=\"notification-link\" onclick=\"event.stopPropagation()\">View Details →</a>` : ''}
+                        </div>
+                    `;
+                }).join('');
+                Security.safeSetHTML(container, html);
+            } catch (error) {
+                console.error('Error loading notifications:', error);
+            }
+        }
+
+        async function handleNotificationClick(id, link) {
+            // Mark as read
+            try {
+                await fetch(`/api/notifications/${id}/read`, {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'x-csrf-token': csrf }
+                });
+                
+                // Navigate to link if provided
+                if (link) {
+                    window.location.href = link;
+                } else {
+                    loadNotifications();
+                }
+            } catch (error) {
+                console.error('Error marking notification as read:', error);
+            }
+        }
+
+        async function markAllRead() {
+            try {
+                await fetch('/api/notifications/mark-all-read', {
+                    method: 'POST',
+                    credentials: 'same-origin',
+                    headers: { 'x-csrf-token': csrf }
+                });
+                loadNotifications();
+            } catch (error) {
+                console.error('Error marking all as read:', error);
+            }
+        }
+
+        // Load notifications on page load
+        loadNotifications();
+        
+        // Refresh every 30 seconds
+        setInterval(loadNotifications, 30000);
+    </script>
+</body>
+</html>

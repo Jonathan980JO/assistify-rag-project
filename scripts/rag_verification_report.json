@@ -1,0 +1,54 @@
+[
+  {
+    "id": "q1_factual",
+    "question": "What is the official definition of psychology as stated in the text?",
+    "num_chunks": 2,
+    "top_similarity": 0.7960002946853637,
+    "found_topics": [
+      "behavior"
+    ],
+    "missing_topics": [
+      "scientific study",
+      "mind"
+    ],
+    "duration_s": 0.358
+  },
+  {
+    "id": "q2_entity",
+    "question": "Who was Peter Drucker and what did he say about management by objectives?",
+    "num_chunks": 2,
+    "top_similarity": 0.8457423973083495,
+    "found_topics": [
+      "Peter Drucker",
+      "MBO",
+      "Management by Objectives",
+      "goals"
+    ],
+    "missing_topics": [
+      "targets"
+    ],
+    "duration_s": 0.03
+  },
+  {
+    "id": "q3_deep",
+    "question": "What are the key takeaways from the later sections of the document?",
+    "num_chunks": 3,
+    "top_similarity": 1.3410973683743244,
+    "found_topics": [],
+    "missing_topics": [
+      "conclusion",
+      "review",
+      "summary"
+    ],
+    "duration_s": 0.114
+  },
+  {
+    "id": "q4_outofscope",
+    "question": "What is the capital of France?",
+    "num_chunks": 3,
+    "top_similarity": 0.6638839447986691,
+    "found_topics": [],
+    "missing_topics": [],
+    "duration_s": 0.036
+  }
+]

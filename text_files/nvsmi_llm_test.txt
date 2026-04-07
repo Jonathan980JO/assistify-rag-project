@@ -1,0 +1,1532 @@
+Sat Feb 28 02:01:48 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   60C    P0             43W /  115W |    5572MiB /   8192MiB |      7%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:49 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   61C    P0             43W /  115W |    5575MiB /   8192MiB |      9%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:50 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   61C    P0             43W /  115W |    5575MiB /   8192MiB |     15%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:51 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   61C    P0             47W /  115W |    7805MiB /   8192MiB |     49%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:52 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   62C    P0             60W /  115W |    7846MiB /   8192MiB |     17%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:53 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   63C    P0             62W /  115W |    7836MiB /   8192MiB |     19%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:54 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   61C    P0             47W /  115W |    7837MiB /   8192MiB |     18%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:55 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   61C    P0             44W /  115W |    7838MiB /   8192MiB |      6%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:56 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   63C    P0             56W /  115W |    7820MiB /   8192MiB |      7%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:57 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   65C    P0             79W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:58 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   66C    P0             79W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:01:59 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   66C    P0             79W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:00 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   66C    P0             80W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:01 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   67C    P0             81W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:02 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   67C    P0             81W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:03 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   67C    P0             81W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:04 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   68C    P0             80W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:05 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   68C    P0             81W /  115W |    7820MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:07 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             85W /  115W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:08 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             85W /  115W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:09 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             84W /  115W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:10 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             83W /  115W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:11 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             84W /  115W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:12 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   70C    P0             83W /  115W |    7823MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:13 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   70C    P0             84W /  115W |    7823MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:14 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   70C    P0             84W /  115W |    7823MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:15 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   70C    P0             83W /  115W |    7823MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:16 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             85W /  115W |    7828MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:17 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  115W |    7828MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:18 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  116W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:19 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  117W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:20 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  117W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:21 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  117W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:22 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             85W /  117W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:23 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   71C    P0             84W /  117W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:24 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   72C    P0             84W /  116W |    7824MiB /   8192MiB |    100%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:25 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   70C    P0             70W /  116W |    7831MiB /   8192MiB |      7%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=========================================================================================|
+|    0   N/A  N/A           11244    C+G   ....0.3800.70\msedgewebview2.exe      N/A      |
+|    0   N/A  N/A           11712      C   ...nvs\assistify_xtts\python.exe      N/A      |
+|    0   N/A  N/A           13992    C+G   ..._cw5n1h2txyewy\SearchHost.exe      N/A      |
+|    0   N/A  N/A           14120    C+G   ...8wekyb3d8bbwe\SecHealthUI.exe      N/A      |
+|    0   N/A  N/A           14656    C+G   ...s\Mozilla Firefox\firefox.exe      N/A      |
+|    0   N/A  N/A           15352    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           16616    C+G   ...App_cw5n1h2txyewy\LockApp.exe      N/A      |
+|    0   N/A  N/A           17544    C+G   ...y\StartMenuExperienceHost.exe      N/A      |
+|    0   N/A  N/A           17724    C+G   ...IA App\CEF\NVIDIA Overlay.exe      N/A      |
+|    0   N/A  N/A           18600    C+G   ...em32\ApplicationFrameHost.exe      N/A      |
+|    0   N/A  N/A           19496    C+G   ...1g1gvanyjgm\WhatsApp.Root.exe      N/A      |
+|    0   N/A  N/A           23164    C+G   ...indows\System32\ShellHost.exe      N/A      |
+|    0   N/A  N/A           23180      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24108      C   ...nvs\assistify_main\python.exe      N/A      |
+|    0   N/A  N/A           24724    C+G   ...es\Microsoft VS Code\Code.exe      N/A      |
+|    0   N/A  N/A           25312    C+G   ...5n1h2txyewy\TextInputHost.exe      N/A      |
+|    0   N/A  N/A           30136      C   ...al\Programs\Ollama\ollama.exe      N/A      |
+|    0   N/A  N/A           31968    C+G   ...ntrolPanel\SystemSettings.exe      N/A      |
+|    0   N/A  N/A           32056    C+G   C:\Windows\explorer.exe               N/A      |
+|    0   N/A  N/A           32480    C+G   ...xyewy\ShellExperienceHost.exe      N/A      |
+|    0   N/A  N/A           32712    C+G   ...yb3d8bbwe\WindowsTerminal.exe      N/A      |
+|    0   N/A  N/A           33544    C+G   ...0_x64__8wekyb3d8bbwe\Time.exe      N/A      |
++-----------------------------------------------------------------------------------------+
+Sat Feb 28 02:02:26 2026       
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 591.86                 Driver Version: 591.86         CUDA Version: 13.1     |
++-----------------------------------------+------------------------+----------------------+
+| GPU  Name                  Driver-Model | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA GeForce RTX 3070 ...  WDDM  |   00000000:01:00.0  On |                  N/A |
+| N/A   69C    P0             64W /  118W |    7831MiB /   8192MiB |      7%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
++-----------------------------------------------------------------------------------------+
+| Processes:                                                                              |
+|  GPU   GI   CI              PID   Type   Process name                        GPU Memory |
+|        ID   ID                                                               Usage      |
+|=====================================================

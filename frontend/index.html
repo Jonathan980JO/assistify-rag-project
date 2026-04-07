@@ -1,0 +1,1902 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Assistify RAG Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body {
+      background: #232323;
+      color: #fafaff;
+      font-family: 'Segoe UI', Arial, sans-serif;
+      margin: 0;
+      padding: 0;
+      height: 100%;
+    }
+    header {
+      background: #2b2b2b;
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .menu-btn {
+      background: #10a37f;
+      border: none;
+      font-size: 24px;
+      color: #fff;
+      cursor: pointer;
+      padding: 8px 16px;
+      border-radius: 8px;
+      transition: background 0.3s;
+    }
+    .menu-btn:hover {
+      background: #0d8658;
+    }
+    .header-title {
+      flex: 1;
+      text-align: center;
+      font-size: 1.8rem;
+      font-weight: 700;
+      color: #10a37f;
+      margin: 0;
+    }
+    .header-spacer {
+      width: 72px;
+    }
+    .nav-menu {
+      position: fixed;
+      top: 0;
+      left: -280px;
+      width: 280px;
+      height: 100%;
+      background: #2b2b2b;
+      box-shadow: 2px 0 10px rgba(0,0,0,0.5);
+      transition: left 0.3s ease;
+      z-index: 1000;
+      overflow-y: auto;
+    }
+    .nav-menu.open {
+      left: 0;
+    }
+    .nav-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(0,0,0,0.5);
+      display: none;
+      z-index: 999;
+    }
+    .nav-overlay.show {
+      display: block;
+    }
+    .nav-header {
+      padding: 24px;
+      border-bottom: 1px solid #3a3a3a;
+    }
+    .nav-header h2 {
+      margin: 0;
+      color: #10a37f;
+      font-size: 1.5rem;
+    }
+    .nav-links {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+    }
+    .nav-link {
+      display: flex;
+      align-items: center;
+      padding: 1em 1.5em;
+      color: #fff;
+      text-decoration: none;
+      transition: background 0.2s;
+      border-left: 4px solid transparent;
+    }
+    .nav-link:hover {
+      background: #3a3a3a;
+      border-left-color: #10a37f;
+    }
+    .nav-link svg {
+      width: 20px;
+      height: 20px;
+      margin-right: 12px;
+    }
+    main {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      min-height: 85vh;
+      padding: 2em 0;
+    }
+    .chat-container {
+      background: #2b2b2b;
+      border-radius: 14px;
+      box-shadow: 0 2px 18px #101015cc;
+      padding: 1.4em;
+      width: 95vw;
+      max-width: 440px;
+      min-height: 60vh;
+      display: flex;
+      flex-direction: column;
+      gap: 1em;
+    }
+    .chat-log {
+      flex: 1;
+      overflow-y: auto;
+      margin-bottom: 1em;
+      padding-right: 4px;
+      font-size: 1.1em;
+    }
+    .chat-msg { margin: .8em 0; }
+    .user { color: #10a37f; font-weight: 600; }
+    .assistant { color: #f6c33c; }
+    form {
+      display: flex;
+      gap: 0.7em;
+      align-items: center;
+      margin-bottom: 0;
+    }
+    input[type="text"] {
+      flex: 1;
+      background: #24272a;
+      border: 1px solid #333;
+      color: #fff;
+      border-radius: 8px;
+      padding: .7em 1em;
+      font-size: 1.1em;
+      outline: none;
+    }
+    button {
+      background: #10a37f;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: .7em 1.2em;
+      font-size: 1em;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover {
+      background: #129c7d;
+    }
+    .voice-btn {
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 0.7em 1em;
+      font-size: 1em;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .voice-btn:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    }
+    .voice-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .voice-btn.recording {
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 6px #10a37f44; }
+      100% { box-shadow: 0 0 32px #10a37f88; }
+    }
+    /* Thinking indicator */
+    .thinking-indicator {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      color: #10a37f;
+      font-size: 0.95em;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .thinking-indicator.visible {
+      opacity: 1;
+    }
+    .thinking-dots {
+      display: flex;
+      gap: 4px;
+    }
+    .thinking-dots span {
+      display: inline-block;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #10a37f;
+      animation: thinkingDot 1.4s infinite ease-in-out both;
+    }
+    .thinking-dots span:nth-child(1) { animation-delay: -0.32s; }
+    .thinking-dots span:nth-child(2) { animation-delay: -0.16s; }
+    .thinking-dots span:nth-child(3) { animation-delay: 0s; }
+    @keyframes thinkingDot {
+      0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
+      40% { transform: scale(1); opacity: 1; }
+    }
+    /* Voice waveform animation */
+    .voice-waveform {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 3px;
+      height: 24px;
+      margin-top: 6px;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    .voice-waveform.active {
+      opacity: 1;
+    }
+    .voice-waveform span {
+      display: inline-block;
+      width: 3px;
+      background: #10a37f;
+      border-radius: 2px;
+      animation: waveform 0.7s infinite ease-in-out;
+    }
+    .voice-waveform span:nth-child(1) { animation-delay: 0s; height: 8px; }
+    .voice-waveform span:nth-child(2) { animation-delay: 0.1s; height: 14px; }
+    .voice-waveform span:nth-child(3) { animation-delay: 0.2s; height: 20px; }
+    .voice-waveform span:nth-child(4) { animation-delay: 0.3s; height: 14px; }
+    .voice-waveform span:nth-child(5) { animation-delay: 0.4s; height: 8px; }
+    @keyframes waveform {
+      0%, 100% { transform: scaleY(0.4); }
+      50% { transform: scaleY(1); }
+    }
+    /* AI speaking breathing glow */
+    .ai-speaking-glow {
+      text-align: center;
+      font-size: 0.85em;
+      color: #f6c33c;
+      opacity: 0;
+      transition: opacity 0.3s;
+      animation: breathe 2s infinite ease-in-out;
+    }
+    .ai-speaking-glow.active {
+      opacity: 1;
+    }
+    @keyframes breathe {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+    /* KB update notification banner */
+    #kb-update-banner {
+      display: none;
+      position: sticky;
+      top: 0;
+      z-index: 500;
+      background: #7c5c00;
+      color: #ffe9a0;
+      border-bottom: 2px solid #f0b429;
+      padding: 10px 18px;
+      font-size: 0.93rem;
+      font-weight: 600;
+      align-items: center;
+      gap: 10px;
+      animation: bannerSlideIn 0.3s ease;
+    }
+    #kb-update-banner.visible {
+      display: flex;
+    }
+    #kb-update-banner .kb-banner-icon { font-size: 1.2rem; }
+    #kb-update-banner .kb-banner-msg { flex: 1; }
+    #kb-update-banner .kb-banner-close {
+      background: none;
+      border: 2px solid #f0b429;
+      color: #ffe9a0;
+      border-radius: 5px;
+      padding: 2px 9px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      font-weight: 700;
+      transition: background 0.2s;
+    }
+    #kb-update-banner .kb-banner-close:hover { background: rgba(240,180,41,0.25); }
+    @keyframes bannerSlideIn {
+      from { opacity: 0; transform: translateY(-12px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ===== LANGUAGE SELECTOR BAR ===== */
+    .lang-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      background: #1e1e2e;
+      border-radius: 10px;
+      padding: 6px 10px;
+      border: 1px solid #333;
+    }
+    .lang-bar-label {
+      font-size: 0.78rem;
+      color: #aaa;
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .lang-btn {
+      flex: 1;
+      padding: 5px 10px;
+      border-radius: 7px;
+      border: 1.5px solid #444;
+      background: #2b2b2b;
+      color: #ccc;
+      font-size: 0.82rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: all 0.2s;
+      text-align: center;
+    }
+    .lang-btn:hover { border-color: #10a37f; color: #fff; }
+    .lang-btn.active {
+      background: #10a37f;
+      border-color: #10a37f;
+      color: #fff;
+      box-shadow: 0 2px 8px #10a37f55;
+    }
+    .lang-btn.ar-btn.active {
+      background: #2563eb;
+      border-color: #2563eb;
+      box-shadow: 0 2px 8px #2563eb55;
+    }
+
+    /* ===== ARABIC DOWNLOAD MODAL ===== */
+    .ar-modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.72);
+      z-index: 2000;
+      align-items: center;
+      justify-content: center;
+    }
+    .ar-modal-overlay.show { display: flex; }
+    .ar-modal {
+      background: #2b2b2b;
+      border-radius: 16px;
+      padding: 28px 28px 22px;
+      max-width: 420px;
+      width: 92vw;
+      box-shadow: 0 8px 36px rgba(0,0,0,0.5);
+      border: 1px solid #444;
+      animation: modalPop 0.25s ease;
+    }
+    @keyframes modalPop {
+      from { transform: scale(0.88); opacity: 0; }
+      to   { transform: scale(1);    opacity: 1; }
+    }
+    .ar-modal h2 {
+      color: #2563eb;
+      margin: 0 0 6px;
+      font-size: 1.2rem;
+    }
+    .ar-modal h2 .ar-flag { margin-right: 6px; }
+    .ar-modal p { color: #ccc; font-size: 0.88rem; line-height: 1.5; margin: 8px 0; }
+    .ar-modal .req-list {
+      background: #1e1e2e;
+      border-radius: 8px;
+      padding: 10px 14px;
+      margin: 10px 0;
+      list-style: none;
+    }
+    .ar-modal .req-list li {
+      color: #adf;
+      font-size: 0.82rem;
+      padding: 3px 0;
+      border-bottom: 1px solid #333;
+    }
+    .ar-modal .req-list li:last-child { border-bottom: none; }
+    .ar-modal-actions { display: flex; gap: 10px; margin-top: 16px; }
+    .ar-modal-actions .btn-dl {
+      flex: 2;
+      background: #2563eb;
+      color: #fff;
+      border: none;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .ar-modal-actions .btn-dl:hover { background: #1d4ed8; }
+    .ar-modal-actions .btn-dl:disabled { background: #555; cursor: not-allowed; }
+    .ar-modal-actions .btn-skip {
+      flex: 1;
+      background: #3a3a3a;
+      color: #ccc;
+      border: 1px solid #555;
+      border-radius: 8px;
+      padding: 9px 14px;
+      font-size: 0.88rem;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .ar-modal-actions .btn-skip:hover { background: #444; }
+    .ar-dl-progress {
+      display: none;
+      margin-top: 12px;
+      background: #1e1e2e;
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+    .ar-dl-progress.show { display: block; }
+    .ar-dl-progress-bar-bg {
+      background: #333;
+      border-radius: 100px;
+      height: 8px;
+      margin: 6px 0;
+      overflow: hidden;
+    }
+    .ar-dl-progress-bar {
+      height: 8px;
+      border-radius: 100px;
+      background: #2563eb;
+      width: 0%;
+      transition: width 0.4s;
+    }
+    .ar-dl-status { font-size: 0.8rem; color: #adf; }
+
+    /* Arabic RTL chat messages */
+    .chat-msg.arabic-msg {
+      direction: rtl;
+      text-align: right;
+      font-family: 'Tahoma', 'Arial Unicode MS', 'Segoe UI', sans-serif;
+    }
+    .chat-msg.arabic-msg.user { color: #60a5fa; }
+    .arabic-label { font-size: 0.72rem; color: #888; margin-bottom: 2px; }
+  </style>
+</head>
+<body>
+  <!-- Navigation Overlay -->
+  <div class="nav-overlay" id="navOverlay" onclick="closeNav()"></div>
+  
+  <!-- Side Navigation Menu -->
+  <nav class="nav-menu" id="navMenu">
+    <div class="nav-header">
+      <h2>Menu</h2>
+    </div>
+    <ul class="nav-links">
+      <li>
+        <a href="/main" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+          Home
+        </a>
+      </li>
+      <li>
+        <a href="/frontend/index.html" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+          Chat
+        </a>
+      </li>
+      <li>
+        <a href="/logout" class="nav-link">
+          <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+          Logout
+        </a>
+      </li>
+    </ul>
+  </nav>
+
+  <header>
+    <button class="menu-btn" onclick="openNav()">☰</button>
+    <h1 class="header-title">Assistify RAG Chat</h1>
+    <div class="header-spacer"></div>
+  </header>
+  <!-- KB update notification banner (shown when backend broadcasts kb_updated) -->
+  <div id="kb-update-banner">
+    <span class="kb-banner-icon">🔔</span>
+    <span class="kb-banner-msg">Knowledge base updated &mdash; your next reply will use the latest information.</span>
+    <button class="kb-banner-close" onclick="dismissKbBanner()">✕ Dismiss</button>
+  </div>
+  <main>
+    <div class="chat-container">
+      <!-- Language Selector Bar -->
+      <div class="lang-bar" id="langBar">
+        <span class="lang-bar-label">🌐 Language:</span>
+        <button type="button" class="lang-btn active" id="langEn" onclick="setLanguage('en')" title="English">EN 🇬🇧</button>
+        <button type="button" class="lang-btn ar-btn" id="langAr" onclick="setLanguage('ar')" title="Arabic">AR 🇸🇦</button>
+        <button type="button" class="lang-btn" id="langAuto" onclick="setLanguage('auto')" title="Auto-detect">Auto 🔍</button>
+      </div>
+      <div class="chat-log" id="chatLog"></div>
+      <form id="chatForm">
+        <input type="text" id="chatInput" autocomplete="off" placeholder="Type your question..." />
+        <button type="submit">Send</button>
+      </form>
+      <div style="display: flex; gap: 10px; margin-top: 10px;">
+        <button type="button" id="btnStart" class="voice-btn" style="flex: 1; background: #10a37f;">
+          🎤 Start
+        </button>
+        <button type="button" id="btnMute" class="voice-btn" style="flex: 1; background: #f59e0b;" disabled>
+          🔇 Stop
+        </button>
+        <button type="button" id="btnStop" class="voice-btn" style="flex: 1; background: #ef4444;" disabled>
+          ⏹️ Stop
+        </button>
+      </div>
+      <!-- Thinking indicator -->
+      <div id="thinkingIndicator" class="thinking-indicator">
+        <div class="thinking-dots"><span></span><span></span><span></span></div>
+        <span id="thinkingText">Thinking...</span>
+      </div>
+      <!-- Voice waveform visualization -->
+      <div id="voiceWaveform" class="voice-waveform">
+        <span></span><span></span><span></span><span></span><span></span>
+      </div>
+      <!-- AI speaking indicator -->
+      <div id="aiSpeakingGlow" class="ai-speaking-glow">
+        🔊 <span id="aiSpeakingText">AI is speaking...</span>
+      </div>
+    </div>
+    <audio id="audioPlayer" style="display:none"></audio>
+  </main>
+
+  <!-- Arabic Support Download Modal -->
+  <div class="ar-modal-overlay" id="arModal">
+    <div class="ar-modal">
+      <h2><span class="ar-flag">🇸🇦</span> Arabic Mode – Required Files</h2>
+      <p>To enable full Arabic support (voice input, chat, and RAG interaction), the system needs to download additional model files.</p>
+      <ul class="req-list">
+        <li>📦 <strong>Whisper Multilingual STT</strong> – faster-whisper medium (Arabic voice input)</li>
+        <li>🔊 <strong>XTTS v2 Arabic TTS</strong> – already included in the system</li>
+        <li>🌐 <strong>Translation module</strong> – uses local LLM (no internet needed)</li>
+      </ul>
+      <p style="color:#f6c33c; font-size:0.82rem;">⚠ Note: Arabic questions are restricted to topics within the system knowledge base (Amazon services). General off-topic questions will be politely declined.</p>
+      <div class="ar-modal-actions">
+        <button type="button" class="btn-dl" id="arDlBtn" onclick="startArabicDownload()">⬇ Download Arabic Models</button>
+        <button type="button" class="btn-skip" onclick="skipArabicDownload()">Use without voice</button>
+      </div>
+      <div class="ar-dl-progress" id="arDlProgress">
+        <div class="ar-dl-status" id="arDlStatus">Preparing download...</div>
+        <div class="ar-dl-progress-bar-bg">
+          <div class="ar-dl-progress-bar" id="arDlBar"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    // Navigation menu functions
+    function openNav() {
+      document.querySelector('.nav-menu').classList.add('open');
+      document.querySelector('.nav-overlay').classList.add('show');
+    }
+    
+    function closeNav() {
+      document.querySelector('.nav-menu').classList.remove('open');
+      document.querySelector('.nav-overlay').classList.remove('show');
+    }
+
+    // Connect to same-origin WebSocket (login server proxies to RAG server)
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsScheme}://${window.location.host}/ws`;
+    let ws = null;  // initialised by connectWebSocket() below
+    const chatLog = document.getElementById('chatLog');
+    const chatForm = document.getElementById('chatForm');
+    const chatInput = document.getElementById('chatInput');
+    const sendBtn = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
+    const btnStart = document.getElementById('btnStart');
+    const btnMute = document.getElementById('btnMute');
+    const btnStop = document.getElementById('btnStop');
+    let isRecording = false;
+    let isMuted = false;
+    let mediaRecorder = null;
+    let audioContext = null;
+    let mediaStream = null;
+    let processor = null;
+    let lastTranscript = '';
+    let lastAIResponse = '';
+    let lastUserMsgEl = null;  // reference to last user bubble — updated when STT correction arrives
+    let reconnectAttempts = 0;
+    let textRequestInFlight = false;
+    let full_response = '';
+    let wsResponseActive = false;
+    let wsResponseFinalized = false;
+
+    function resetWsResponseBuffer(reason = 'new_request') {
+      full_response = '';
+      wsResponseActive = true;
+      wsResponseFinalized = false;
+      _streamingMsgEl = null;
+      console.log(`[WS DEBUG] Response buffer reset (${reason})`);
+    }
+
+    function finalizeWsResponse(finalText) {
+      const resolved = (finalText || full_response || '').trim();
+      wsResponseFinalized = true;
+      wsResponseActive = false;
+      console.log(`[WS DEBUG] Final response length: ${resolved.length}`);
+      return resolved;
+    }
+
+    function setTextSubmitLock(locked) {
+      textRequestInFlight = !!locked;
+      if (sendBtn) {
+        sendBtn.disabled = textRequestInFlight;
+      }
+    }
+
+    // ===== LANGUAGE MANAGEMENT =====
+    let currentLanguage = 'en'; // 'en' | 'ar' | 'auto'
+    let arabicModelsChecked = false; // whether we've shown the Arabic download modal
+
+    const UI_STRINGS = {
+      en: {
+        thinking: 'Thinking...',
+        speaking: 'AI is speaking...',
+        placeholder: 'Type your question...',
+        start: '🎤 Start',
+        stop: '⏹️ Stop',
+        mute: '🔇 Stop',
+        connected: 'Connected to Assistify RAG system.',
+        recordStart: '[🎤 Recording started - speak now]',
+        recordStop: '[⏸️ Recording stopped]',
+        sessionEnd: '[⏹️ Voice session ended]',
+        interrupted: '[🔊 Interrupted — listening...]',
+      },
+      ar: {
+        thinking: '...جارٍ التفكير',
+        speaking: '🔊 المساعد يتحدث...',
+        placeholder: 'اكتب سؤالك هنا...',
+        start: '🎤 ابدأ',
+        stop: '⏹️ إيقاف',
+        mute: '🔇 وقف',
+        connected: 'متصل بنظام Assistify.',
+        recordStart: '[🎤 بدأ التسجيل - تحدث الآن]',
+        recordStop: '[⏸️ توقف التسجيل]',
+        sessionEnd: '[⏹️ انتهت جلسة الصوت]',
+        interrupted: '[🔊 تم المقاطعة — جارٍ الاستماع...]',
+      },
+    };
+
+    function getUIStr(key) {
+      const lang = currentLanguage === 'auto' ? 'en' : currentLanguage;
+      return (UI_STRINGS[lang] || UI_STRINGS.en)[key] || UI_STRINGS.en[key];
+    }
+
+    function setLanguage(lang) {
+      currentLanguage = lang;
+      document.getElementById('langEn').classList.toggle('active', lang === 'en');
+      document.getElementById('langAr').classList.toggle('active', lang === 'ar');
+      document.getElementById('langAuto').classList.toggle('active', lang === 'auto');
+
+      // Update UI text
+      const thinkingText = document.getElementById('thinkingText');
+      const aiSpeakingText = document.getElementById('aiSpeakingText');
+      const chatInputEl = document.getElementById('chatInput');
+      if (thinkingText) thinkingText.textContent = getUIStr('thinking');
+      if (aiSpeakingText) aiSpeakingText.textContent = getUIStr('speaking');
+      if (chatInputEl) chatInputEl.placeholder = getUIStr('placeholder');
+      if (btnStart) btnStart.textContent = getUIStr('start');
+      if (btnStop) btnStop.textContent = getUIStr('stop');
+      if (btnMute) btnMute.textContent = getUIStr('mute');
+
+      // Chat log RTL direction when Arabic
+      if (chatLog) {
+        chatLog.style.direction = (lang === 'ar') ? 'rtl' : 'ltr';
+      }
+
+      // Show Arabic download modal once
+      if (lang === 'ar' && !arabicModelsChecked) {
+        arabicModelsChecked = true;
+        checkArabicModels();
+      }
+
+      localStorage.setItem('assistify_lang', lang);
+    }
+
+    async function checkArabicModels() {
+      try {
+        const resp = await fetch('/arabic/status', { credentials: 'include' });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (!data.multilingual_model_ready) {
+            document.getElementById('arModal').classList.add('show');
+          }
+        } else {
+          // Endpoint not available, show modal anyway for info
+          document.getElementById('arModal').classList.add('show');
+        }
+      } catch (e) {
+        document.getElementById('arModal').classList.add('show');
+      }
+    }
+
+    async function startArabicDownload() {
+      const btn = document.getElementById('arDlBtn');
+      const progress = document.getElementById('arDlProgress');
+      const bar = document.getElementById('arDlBar');
+      const status = document.getElementById('arDlStatus');
+
+      btn.disabled = true;
+      btn.textContent = '⏳ Downloading...';
+      progress.classList.add('show');
+      status.textContent = 'Contacting server...';
+      bar.style.width = '5%';
+
+      try {
+        status.textContent = 'Checking existing models...';
+        bar.style.width = '15%';
+
+        const resp = await fetch('/arabic/download', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+        });
+        const data = await resp.json();
+
+        if (data.status === 'already_ready') {
+          bar.style.width = '100%';
+          status.textContent = '✅ All Arabic models ready!';
+          setTimeout(() => document.getElementById('arModal').classList.remove('show'), 1500);
+        } else if (data.status === 'downloading') {
+          bar.style.width = '30%';
+          status.textContent = 'Downloading multilingual model... (this may take a few minutes)';
+          // Poll for completion
+          pollDownloadStatus(bar, status);
+        } else if (data.status === 'done') {
+          bar.style.width = '100%';
+          status.textContent = '✅ Arabic models downloaded! Restart the server to apply.';
+          btn.textContent = '✅ Done';
+          btn.disabled = false;
+        } else {
+          bar.style.width = '0%';
+          status.textContent = '❌ ' + (data.message || 'Download failed');
+          btn.textContent = '⬇ Retry';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        bar.style.width = '0%';
+        status.textContent = '❌ Network error: ' + e.message;
+        btn.textContent = '⬇ Retry';
+        btn.disabled = false;
+      }
+    }
+
+    async function pollDownloadStatus(bar, status) {
+      let pct = 30;
+      const ticker = setInterval(async () => {
+        try {
+          const resp = await fetch('/arabic/status', { credentials: 'include' });
+          const data = await resp.json();
+          pct = Math.min(pct + 5, 90);
+          bar.style.width = pct + '%';
+          if (data.multilingual_model_ready) {
+            clearInterval(ticker);
+            bar.style.width = '100%';
+            status.textContent = '✅ Arabic models ready! Restart server to use voice input in Arabic.';
+            const btn = document.getElementById('arDlBtn');
+            btn.textContent = '✅ Done — Close';
+            btn.disabled = false;
+            btn.onclick = () => document.getElementById('arModal').classList.remove('show');
+          }
+        } catch(e) { /* ignore poll errors */ }
+      }, 4000);
+    }
+
+    function skipArabicDownload() {
+      document.getElementById('arModal').classList.remove('show');
+    }
+
+    // Restore saved language
+    (function() {
+      const saved = localStorage.getItem('assistify_lang');
+      if (saved && ['en', 'ar', 'auto'].includes(saved)) {
+        setLanguage(saved);
+      }
+    })();
+
+    // ---- Streaming TTS queue & barge-in state ----
+    let pauseAudioSending = false;   // pause mic→WS during TTS but keep mic alive
+    let isTTSPlaying = false;        // true while any TTS audio is playing
+    let ttsQueue = [];               // queue of sentences to speak
+    let ttsPrefetchCache = {};       // prefetched TTS audio blobs { text: blobURL }
+    let isThinking = false;          // true while AI is generating
+    let _streamingMsgEl = null;      // current streaming assistant message element
+    let bargeInThreshold = 0.04;     // energy threshold for barge-in detection
+    let consecutiveVoiceFrames = 0;  // consecutive high-energy frames during TTS
+    let bargeInFramesNeeded = 3;     // ~200ms to confirm user is speaking
+    let _active_timing = {};         // timing metadata for latency report
+
+    // Latency reporting — used globally by TTS and WebSocket handlers
+    function logLatencyReport(timing, fromXTTS = false) {
+      if (timing) {
+        Object.assign(_active_timing, timing);
+      }
+      if (!fromXTTS) return; // Wait until XTTS details arrive
+
+      const t = _active_timing;
+      if (!t.stt_end || !t.xtts_full_gen) return;
+
+      const speech_to_stt = (t.stt_start - t.speech_end) * 1000;
+      const stt_dur = (t.stt_end - t.stt_start) * 1000;
+      const llm_first = (t.llm_first_token - t.llm_send) * 1000;
+      const xtts_first = t.xtts_first_chunk; 
+      const stt_to_llm = (t.llm_send - t.stt_end) * 1000;
+      const total = speech_to_stt + stt_dur + stt_to_llm + llm_first + xtts_first;
+
+      console.log("=== VOICE PIPELINE LATENCY REPORT ===");
+      console.log(`Speech End → STT Start: ${speech_to_stt.toFixed(0)} ms`);
+      console.log(`STT Duration: ${stt_dur.toFixed(0)} ms`);
+      console.log(`LLM First Token: ${llm_first.toFixed(0)} ms`);
+      console.log(`XTTS First Audio: ${xtts_first.toFixed(0)} ms`);
+      console.log(`Total Latency: ${total.toFixed(0)} ms`);
+      console.log("=== END LATENCY REPORT ===");
+      
+      _active_timing = {}; // reset
+    }
+
+    // ---- WebSocket-streamed TTS audio (server-side pipeline) ----
+    let _wsAudioState = 'idle'; // 'idle' | 'buffering' | 'playing'
+    let _wsScheduledTime = 0;
+    let _wsPendingChunks = []; // Float32Array chunks before playback starts
+    let _wsPendingDuration = 0;
+    let _wsFirstChunkLogged = false;
+    const WS_PREBUFFER_SECS = 0.3; // minimum buffer before starting playback
+
+    function _handleTtsAudioStart(data) {
+      const ctx = _getTTSAudioContext();
+      if (_wsAudioState === 'idle') {
+        _wsAudioState = 'buffering';
+        _wsPendingChunks = [];
+        _wsPendingDuration = 0;
+        _wsScheduledTime = ctx.currentTime + 0.05;
+        _wsFirstChunkLogged = false;
+      }
+      isTTSPlaying = true;
+      if (_liveCallMode && isRecording) {
+        pauseAudioSending = true;
+      }
+      showAISpeaking();
+    }
+
+    function _handleWsAudioChunk(arrayBuffer) {
+      if (_wsAudioState === 'idle') return;
+
+      const int16 = new Int16Array(arrayBuffer);
+      if (int16.length === 0) return;
+
+      const float32 = new Float32Array(int16.length);
+      for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+      if (!_wsFirstChunkLogged) {
+        _wsFirstChunkLogged = true;
+        _active_timing.audio_playback_start = performance.now() / 1000;
+        logLatencyReport(null, true);
+        console.log('[TTS-WS] First audio chunk received from server');
+      }
+
+      if (_wsAudioState === 'buffering') {
+        _wsPendingChunks.push(float32);
+        _wsPendingDuration += float32.length / 24000;
+        if (_wsPendingDuration >= WS_PREBUFFER_SECS) {
+          _wsAudioState = 'playing';
+          _scheduleAllPending();
+        }
+      } else if (_wsAudioState === 'playing') {
+        _scheduleAudioChunk(float32);
+      }
+    }
+
+    function _scheduleAllPending() {
+      while (_wsPendingChunks.length > 0) {
+        _scheduleAudioChunk(_wsPendingChunks.shift());
+      }
+      _wsPendingDuration = 0;
+    }
+
+    function _scheduleAudioChunk(float32) {
+      const ctx = _getTTSAudioContext();
+      const audioBuffer = ctx.createBuffer(1, float32.length, 24000);
+      audioBuffer.getChannelData(0).set(float32);
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(_ttsGainNode);
+
+      // Jitter buffer: never let scheduledTime fall behind currentTime
+      if (_wsScheduledTime < ctx.currentTime) {
+        _wsScheduledTime = ctx.currentTime + 0.02;
+      }
+
+      source.start(_wsScheduledTime);
+      _ttsSources.push(source);
+      _wsScheduledTime += audioBuffer.duration;
+    }
+
+    function _handleTtsAudioEnd() {
+      // Flush any remaining buffered audio
+      if (_wsAudioState === 'buffering' && _wsPendingChunks.length > 0) {
+        _wsAudioState = 'playing';
+        _scheduleAllPending();
+      }
+      // More sentences may follow — don't reset to idle
+    }
+
+    function _handleTtsComplete() {
+      // Called from aiResponseDone — all sentences done
+      if (_wsPendingChunks.length > 0) {
+        _scheduleAllPending();
+      }
+
+      const ctx = _getTTSAudioContext();
+      const remaining = Math.max(0, _wsScheduledTime - ctx.currentTime);
+
+      setTimeout(() => {
+        _wsAudioState = 'idle';
+        isTTSPlaying = false;
+        pauseAudioSending = false;
+        hideAISpeaking();
+
+        // Clean up finished sources
+        for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+        _ttsSources = [];
+
+        // Resume mic in live call mode
+        if (_liveCallMode) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+          }
+          if (!isRecording) {
+            startRecording(true);
+          }
+        }
+      }, remaining * 1000 + 300);
+    }
+
+    function connectWebSocket() {
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer'; // receive binary TTS audio as ArrayBuffer
+
+      ws.onopen = () => {
+        console.log("[DEBUG] WebSocket connected successfully");
+        appendMsg('system', 'Connected to Assistify RAG system.');
+        reconnectAttempts = 0;
+      };
+
+      ws.onclose = () => {
+        wsResponseActive = false;
+        wsResponseFinalized = true;
+        setTextSubmitLock(false);
+        appendMsg('system', '[Connection lost - attempting to reconnect...]');
+        if(isRecording) {
+          stopRecording();
+        }
+        // Auto-reconnect after delay
+        reconnectAttempts++;
+        const delay = Math.min(1000 * reconnectAttempts, 5000);
+        setTimeout(connectWebSocket, delay);
+      };
+
+      ws.onerror = () => {
+        wsResponseActive = false;
+        wsResponseFinalized = true;
+        setTextSubmitLock(false);
+        appendMsg('system', '[Error] WebSocket connection failed.');
+      };
+
+      ws.onmessage = event => {
+      // Handle binary audio data from server-side TTS pipeline
+      if (event.data instanceof ArrayBuffer) {
+        _handleWsAudioChunk(event.data);
+        return;
+      }
+
+      try {
+        const data = JSON.parse(event.data);
+        if (data.timing) {
+          console.log(`[TIMING] Received timing data:`, data.timing);
+          Object.assign(_active_timing, data.timing);
+        }
+
+        if(data.type === 'thinking') {
+          // AI is about to generate — show thinking animation
+          showThinking();
+
+        } else if(data.type === 'ttsAudioStart') {
+          // Server-side TTS audio stream starting for a sentence
+          _handleTtsAudioStart(data);
+
+        } else if(data.type === 'ttsAudioEnd') {
+          // Server-side TTS audio stream ended for a sentence
+          _handleTtsAudioEnd();
+
+        } else if(data.type === 'ttsFallback') {
+          // XTTS unavailable — use browser speech synthesis
+          _speakBrowser(data.text);
+
+        } else if(data.type === 'aiResponseChunk') {
+          if (!wsResponseActive || wsResponseFinalized) {
+            return;
+          }
+          // Streaming: one sentence at a time (text display only — TTS handled server-side)
+          const chunkText = data.text || '';
+          full_response += chunkText;
+          hideThinking();
+          showAISpeaking();
+          handleResponseChunk(chunkText, data.index);
+
+          // Pause mic sending in live mode for barge-in detection
+          if (_liveCallMode && isRecording) {
+            pauseAudioSending = true;
+          } else if (!_liveCallMode && isRecording) {
+            stopRecording(true);
+          }
+          // TTS is now streamed server-side via WebSocket binary — no addToTTSQueue
+
+        } else if(data.type === 'aiResponseDone') {
+          if (!wsResponseActive || wsResponseFinalized) {
+            return;
+          }
+          // Streaming complete
+          hideThinking();
+          const finalText = finalizeWsResponse(data.fullText || '');
+          if(finalText) {
+            lastAIResponse = finalText;
+            finalizeStreamingDisplay(finalText);
+          }
+          // Log server-side latency metrics (Phase 6)
+          if (data.latency) {
+            console.log('=== SERVER LATENCY REPORT ===');
+            console.log('LLM First Token:', data.latency.first_token_ms, 'ms');
+            console.log('First Sentence:', data.latency.first_sentence_ms, 'ms');
+            console.log('First TTS Chunk:', data.latency.first_tts_chunk_ms, 'ms');
+            console.log('Total Pipeline:', data.latency.total_ms, 'ms');
+            console.log('=== END SERVER LATENCY ===');
+          }
+          // In Arabic mode, TTS is handled async by arabic_tts_complete event
+          // Don't call _handleTtsComplete() now, as Arabic TTS hasn't started yet
+          if (!data.arabic_mode) {
+            _handleTtsComplete();
+          }
+          setTextSubmitLock(false);
+
+        } else if(data.type === 'aiResponse') {
+          if (!wsResponseActive || wsResponseFinalized) {
+            return;
+          }
+          // Fallback: non-streaming full response
+          const finalText = finalizeWsResponse(data.text || '');
+          if(finalText && finalText !== lastAIResponse) {
+            lastAIResponse = finalText;
+            appendMsg('assistant', finalText, detectArabicText(finalText));
+            hideThinking();
+
+            if (_liveCallMode && isRecording) {
+              pauseAudioSending = true;
+            } else if(isRecording) {
+              stopRecording(true);
+            }
+            addToTTSQueue(finalText);
+            setTextSubmitLock(false);
+          }
+
+        } else if(data.type === 'transcript') {
+          if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
+            lastTranscript = data.text;
+            lastUserMsgEl = appendMsg('user', data.text, detectArabicText(data.text));
+          }
+        } else if(data.type === 'transcriptCorrection') {
+          // Backend corrected the garbled Arabic STT — update the 'أنت:' bubble silently
+          if(data.text && data.text.trim() && lastUserMsgEl) {
+            const arabic = detectArabicText(data.text);
+            const label = arabic ? '\u0623\u0646\u062a:' : 'You:';
+            lastUserMsgEl.textContent = `${label} ${data.text}`;
+            if(arabic && !lastUserMsgEl.classList.contains('arabic-msg')) {
+              lastUserMsgEl.classList.add('arabic-msg');
+            }
+            lastTranscript = data.text;  // keep in sync
+          }
+        } else if(data.type === 'kb_updated') {
+          // Knowledge base changed while user is in chat — show sticky banner
+          showKbUpdateBanner(data.message);
+
+        } else if(data.type === 'error') {
+          setTextSubmitLock(false);
+          hideThinking();
+          appendMsg('system', '[Error] ' + (data.message || 'Connection error'));
+        } else if(data.type === 'info') {
+          appendMsg('system', data.message);
+        } else if(data.type === 'control') {
+          console.log('[Control]', data);
+        } else if(data.type === 'arabic_tts_complete') {
+          // Arabic TTS finished — clean up audio state fully
+          if (_wsPendingChunks && _wsPendingChunks.length > 0) {
+            _scheduleAllPending();
+          }
+          const _ctx2 = _getTTSAudioContext();
+          const _rem = Math.max(0, _wsScheduledTime - _ctx2.currentTime);
+          setTimeout(() => {
+            _wsAudioState = 'idle';
+            isTTSPlaying = false;
+            pauseAudioSending = false;
+            hideAISpeaking();
+            for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+            _ttsSources = [];
+            // Resume live call recording if active
+            if (_liveCallMode) {
+              if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+              }
+              if (!isRecording) startRecording(true);
+            }
+          }, _rem * 1000 + 300);
+        }
+      } catch(e) {
+        if(typeof event.data === 'string') {
+          appendMsg('system', '[Error] Invalid message format');
+        }
+      }
+      };
+    }
+
+    // Initialize connection
+    connectWebSocket();
+
+    chatForm.onsubmit = e => {
+      _unlockAudio();
+      e.preventDefault();
+      if (textRequestInFlight) return;
+      const text = chatInput.value.trim();
+      if (!text) return;
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendMsg('system', '[Not connected — please wait a moment and try again]');
+        return;
+      }
+      // Interrupt any ongoing AI response or TTS
+      if (isTTSPlaying || isThinking) {
+        bargeIn(true); // silent barge-in for text input
+      }
+
+      // Determine effective language (auto = detect from text)
+      const effectiveLang = currentLanguage === 'auto'
+        ? (detectArabicText(text) ? 'ar' : 'en')
+        : currentLanguage;
+
+      resetWsResponseBuffer('text_submit');
+      setTextSubmitLock(true);
+      try {
+        ws.send(JSON.stringify({ text, language: effectiveLang }));
+      } catch (err) {
+        setTextSubmitLock(false);
+        appendMsg('system', '[Error] Failed to send message. Please try again.');
+        return;
+      }
+      appendMsg('user', text, effectiveLang === 'ar');
+      chatInput.value = '';
+      lastTranscript = text;
+    };
+
+    // Simple Arabic text detector (checks Unicode Arabic block proportion)
+    function detectArabicText(text) {
+      if (!text) return false;
+      const arabicChars = (text.match(/[\u0600-\u06FF]/g) || []).length;
+      return arabicChars > text.length * 0.2;
+    }
+
+    // For user messages
+    function appendMsg(role, text, isArabic) {
+      const msg = document.createElement('div');
+      const arabic = isArabic || detectArabicText(text);
+      msg.className = `chat-msg ${role}${arabic ? ' arabic-msg' : ''}`;
+      const label = role === 'assistant'
+        ? (arabic ? 'المساعد:' : 'Assistant:')
+        : (role === 'user' ? (arabic ? 'أنت:' : 'You:') : '');
+      msg.textContent = `${label} ${text}`;
+      chatLog.appendChild(msg);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      return msg;  // caller may hold reference for later in-place correction
+    }
+
+    // ---- KB update banner ----
+    let _kbBannerTimer = null;
+    function showKbUpdateBanner(msg) {
+      const banner = document.getElementById('kb-update-banner');
+      if (!banner) return;
+      const msgEl = banner.querySelector('.kb-banner-msg');
+      if (msgEl && msg) msgEl.textContent = msg;
+      banner.classList.add('visible');
+      // Auto-dismiss after 8 seconds
+      clearTimeout(_kbBannerTimer);
+      _kbBannerTimer = setTimeout(dismissKbBanner, 8000);
+    }
+    function dismissKbBanner() {
+      clearTimeout(_kbBannerTimer);
+      const banner = document.getElementById('kb-update-banner');
+      if (banner) banner.classList.remove('visible');
+    }
+
+    // Voice control button handlers
+    let _liveCallMode = false; // true while user is in a live voice session
+
+    btnStart.onclick = async () => {
+      console.log("[DEBUG] btnStart clicked");
+      _unlockAudio();
+      _liveCallMode = true;
+      // Inform the server of the current language for STT + LLM routing
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const effectiveLang = currentLanguage === 'auto' ? 'auto' : currentLanguage;
+        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language: effectiveLang }));
+      }
+      await startRecording();
+    };
+    
+    btnMute.onclick = () => {
+      if(isRecording) {
+        stopRecording(true); // silent stop
+      }
+    };
+    
+    btnStop.onclick = () => {
+      _liveCallMode = false; // end live-call mode — no auto-resume
+      if(isRecording) stopRecording();
+      // Stop WebSocket-streamed audio pipeline
+      _wsAudioState = 'idle';
+      _wsPendingChunks = [];
+      _wsPendingDuration = 0;
+      // Stop any playing TTS and clear queue
+      _stopStreamingAudio();
+      if(_currentTTSAudio) { try { _currentTTSAudio.pause(); } catch(e){} _currentTTSAudio = null; }
+      try { audioPlayer.pause(); audioPlayer.src = ''; audioPlayer.onended = null; audioPlayer.onerror = null; } catch(e){}
+      if (window.speechSynthesis) speechSynthesis.cancel();
+      ttsQueue = [];
+      for (const key of Object.keys(ttsPrefetchCache)) {
+        URL.revokeObjectURL(ttsPrefetchCache[key]);
+      }
+      ttsPrefetchCache = {};
+      isTTSPlaying = false;
+      pauseAudioSending = false;
+      hideThinking();
+      hideAISpeaking();
+      hideWaveform();
+      // Send interrupt in case AI is still generating
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+      }
+      appendMsg('system', '[⏹️ Voice session ended]');
+    };
+
+    // -------- XTTS v2 Text-to-Speech (Queue-based for streaming) --------
+    const audioPlayer = document.getElementById('audioPlayer');
+    let _currentTTSAudio = null; // track active audio so we can stop it
+
+    // ---- Streaming TTS via Web Audio API ----
+    let _ttsAudioCtx = null;
+    let _ttsGainNode = null;
+    let _ttsSources = [];
+    let _ttsStreamAbort = null;
+
+    function _getTTSAudioContext() {
+      if (!_ttsAudioCtx || _ttsAudioCtx.state === 'closed') {
+        _ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+        _ttsGainNode = _ttsAudioCtx.createGain();
+        _ttsGainNode.connect(_ttsAudioCtx.destination);
+      }
+      if (_ttsAudioCtx.state === 'suspended') _ttsAudioCtx.resume();
+      return _ttsAudioCtx;
+    }
+
+    function _stopStreamingAudio() {
+      if (_ttsStreamAbort) { _ttsStreamAbort.abort(); _ttsStreamAbort = null; }
+      for (const src of _ttsSources) {
+        try { src.stop(); src.disconnect(); } catch(e) {}
+      }
+      _ttsSources = [];
+    }
+
+    function _concatUint8(a, b) {
+      const c = new Uint8Array(a.length + b.length);
+      c.set(a); c.set(b, a.length);
+      return c;
+    }
+
+    async function _playStreamingTTS(sentence) {
+      const audioCtx = _getTTSAudioContext();
+      _ttsStreamAbort = new AbortController();
+      _ttsSources = [];
+
+      const t_xtts_start = performance.now() / 1000;
+      const resp = await fetch('/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: sentence }),
+        credentials: 'include',
+        signal: _ttsStreamAbort.signal,
+      });
+
+      if (!resp.ok) throw new Error('XTTS HTTP ' + resp.status + ': ' + (await resp.text().catch(() => '')));
+
+      const reader = resp.body.getReader();
+      let headerBuf = new Uint8Array(0);
+      let headerSkipped = false;
+      let remainder = new Uint8Array(0);
+      let scheduledTime = audioCtx.currentTime + 0.05;
+      let firstChunkPlayed = false;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          let data = value;
+
+          // Skip 44-byte WAV header
+          if (!headerSkipped) {
+            headerBuf = _concatUint8(headerBuf, data);
+            if (headerBuf.length < 44) continue;
+            data = headerBuf.slice(44);
+            headerSkipped = true;
+            headerBuf = new Uint8Array(0);
+            if (data.length === 0) continue;
+          }
+
+          // Prepend leftover byte from previous chunk (PCM = 2 bytes/sample)
+          if (remainder.length > 0) {
+            data = _concatUint8(remainder, data);
+            remainder = new Uint8Array(0);
+          }
+          if (data.length % 2 !== 0) {
+            remainder = data.slice(data.length - 1);
+            data = data.slice(0, data.length - 1);
+          }
+          if (data.length < 2) continue;
+
+          // Copy to aligned buffer then convert int16 → float32
+          const aligned = new Uint8Array(data.length);
+          aligned.set(data);
+          const int16 = new Int16Array(aligned.buffer);
+          const float32 = new Float32Array(int16.length);
+          for (let i = 0; i < int16.length; i++) float32[i] = int16[i] / 32768.0;
+
+          // Schedule audio buffer
+          const audioBuffer = audioCtx.createBuffer(1, float32.length, 24000);
+          audioBuffer.getChannelData(0).set(float32);
+          const source = audioCtx.createBufferSource();
+          source.buffer = audioBuffer;
+          source.connect(_ttsGainNode);
+          if (scheduledTime < audioCtx.currentTime) scheduledTime = audioCtx.currentTime;
+          source.start(scheduledTime);
+          _ttsSources.push(source);
+          scheduledTime += audioBuffer.duration;
+
+          if (!firstChunkPlayed) {
+            firstChunkPlayed = true;
+            _active_timing.audio_playback_start = performance.now() / 1000;
+            _active_timing.xtts_start = t_xtts_start;
+            logLatencyReport(null, true);
+            console.log('[TTS] Streaming: first audio chunk scheduled');
+          }
+        }
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          console.log('[TTS] Stream aborted (barge-in)');
+          return true;
+        }
+        throw e;
+      }
+
+      if (!firstChunkPlayed) return false;
+
+      // Wait for all scheduled audio to finish
+      const remaining = Math.max(0, scheduledTime - audioCtx.currentTime);
+      if (remaining > 0 && _ttsSources.length > 0) {
+        await new Promise(resolve => {
+          const lastSrc = _ttsSources[_ttsSources.length - 1];
+          lastSrc.onended = resolve;
+          setTimeout(resolve, remaining * 1000 + 300);
+        });
+      }
+
+      // Clean up finished sources
+      for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
+      _ttsSources = [];
+      return true;
+    }
+
+    // Unlock autoplay on first user gesture (button click or form submit)
+    // Without this, browsers silently block audio.play() from async/WS contexts.
+    let _audioUnlocked = false;
+    function _unlockAudio() {
+      if (_audioUnlocked) return;
+      _audioUnlocked = true;
+      // Unlock AudioContext (for voice recording / Web Audio API)
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const buf = ctx.createBuffer(1, 1, 22050);
+        const src = ctx.createBufferSource();
+        src.buffer = buf;
+        src.connect(ctx.destination);
+        src.start(0);
+        ctx.close();
+      } catch(e) { /* ignore */ }
+      // Unlock the <audio> element by calling play() right now inside the user gesture.
+      // Chrome / Edge require that play() is called at least once in a user-gesture stack
+      // before it can be called from an async/WS callback later.
+      // We use a 1-sample silent WAV as the source so it completes instantly.
+      // Use blob: URL instead of data: URI to satisfy strict CSP (media-src blob:).
+      try {
+        // Minimal valid WAV: RIFF header + 0 samples
+        const silentWavBytes = new Uint8Array([
+          0x52,0x49,0x46,0x46, 0x24,0x00,0x00,0x00, // "RIFF" + chunk size 36
+          0x57,0x41,0x56,0x45,                       // "WAVE"
+          0x66,0x6d,0x74,0x20, 0x10,0x00,0x00,0x00, // "fmt " + subchunk size 16
+          0x01,0x00,                                 // PCM format
+          0x01,0x00,                                 // 1 channel
+          0x44,0xac,0x00,0x00,                       // 44100 Hz
+          0x88,0x58,0x01,0x00,                       // byte rate
+          0x02,0x00,                                 // block align
+          0x10,0x00,                                 // bits per sample 16
+          0x64,0x61,0x74,0x61, 0x00,0x00,0x00,0x00  // "data" + 0 bytes
+        ]);
+        const silentBlob = new Blob([silentWavBytes], { type: 'audio/wav' });
+        const silentUrl = URL.createObjectURL(silentBlob);
+        audioPlayer.src = silentUrl;
+        audioPlayer.play()
+          .catch(() => {
+            // Expected to "fail" on some browsers but the act of calling play() here
+            // is what unlocks future play() calls from async contexts.
+          })
+          .finally(() => URL.revokeObjectURL(silentUrl));
+      } catch(e) { /* ignore */ }
+      console.log('[Audio] Unlocked autoplay via blob');
+    }
+
+    // ---- UI Feedback Functions ----
+    function showThinking() {
+      isThinking = true;
+      const el = document.getElementById('thinkingIndicator');
+      if (el) el.classList.add('visible');
+    }
+    function hideThinking() {
+      isThinking = false;
+      const el = document.getElementById('thinkingIndicator');
+      if (el) el.classList.remove('visible');
+    }
+    function showWaveform() {
+      const el = document.getElementById('voiceWaveform');
+      if (el) el.classList.add('active');
+    }
+    function hideWaveform() {
+      const el = document.getElementById('voiceWaveform');
+      if (el) el.classList.remove('active');
+    }
+    function showAISpeaking() {
+      const el = document.getElementById('aiSpeakingGlow');
+      if (el) el.classList.add('active');
+    }
+    function hideAISpeaking() {
+      const el = document.getElementById('aiSpeakingGlow');
+      if (el) el.classList.remove('active');
+    }
+
+    // ---- Streaming Response Display ----
+    function handleResponseChunk(text, index) {
+      const arabic = detectArabicText(text);
+      if (index === 0) {
+        _streamingMsgEl = document.createElement('div');
+        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + text;
+        chatLog.appendChild(_streamingMsgEl);
+      } else if (_streamingMsgEl) {
+        const isAr = _streamingMsgEl.classList.contains('arabic-msg') || arabic;
+        _streamingMsgEl.textContent += ' ' + text;
+        if (arabic && !_streamingMsgEl.classList.contains('arabic-msg')) {
+          _streamingMsgEl.classList.add('arabic-msg');
+          _streamingMsgEl.textContent = 'المساعد: ' + _streamingMsgEl.textContent.replace(/^Assistant: /, '');
+        }
+      }
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    function finalizeStreamingDisplay(fullText) {
+      if (_streamingMsgEl) {
+        const arabic = detectArabicText(fullText);
+        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + fullText;
+        _streamingMsgEl = null;
+      }
+      chatLog.scrollTop = chatLog.scrollHeight;
+    }
+
+    // ---- TTS Queue System (sentence-by-sentence playback with prefetch) ----
+    let _xttsAvailable = true;  // optimistic; auto-retries after cooldown
+    let _xttsRetryTimer = null; // handle for cooldown retry
+
+    // Mark XTTS unavailable temporarily — re-enable after cooldown so it is retried
+    function _disableXttsMomentarily() {
+      if (_xttsAvailable) {
+        _xttsAvailable = false;
+        appendMsg('system', '[TTS] XTTS unavailable — using browser voice. Will auto-retry in 20s.');
+        console.warn('[TTS] XTTS failed — retrying in 20s');
+        if (_xttsRetryTimer) clearTimeout(_xttsRetryTimer);
+        _xttsRetryTimer = setTimeout(() => {
+          _xttsAvailable = true;
+          console.log('[TTS] Re-enabling XTTS');
+        }, 20000);
+      }
+    }
+
+    // Browser-native TTS fallback (Web Speech API)
+    function _speakBrowser(text) {
+      return new Promise((resolve) => {
+        if (!window.speechSynthesis) { resolve(); return; }
+        // Cancel any queued browser utterances
+        window.speechSynthesis.cancel();
+        const utt = new SpeechSynthesisUtterance(text);
+        utt.lang = 'en-US';
+        utt.rate = 1.05;
+        utt.pitch = 1.0;
+        // Pick a natural-sounding voice if available
+        const voices = speechSynthesis.getVoices();
+        const preferred = voices.find(v => /zira|david|google us|samantha/i.test(v.name));
+        if (preferred) utt.voice = preferred;
+        utt.onend = resolve;
+        utt.onerror = resolve;
+        speechSynthesis.speak(utt);
+      });
+    }
+
+    function addToTTSQueue(text) {
+      if (!text || text.trim() === '') return;
+      const cleaned = text.replace(/[\u{1F000}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '').trim();
+      if (!cleaned) return;
+
+      ttsQueue.push(cleaned);
+
+      // Only prefetch if this sentence will wait in queue (isTTSPlaying=true).
+      // If isTTSPlaying is false, playNextInQueue() is about to fetch it directly —
+      // prefetching the same sentence simultaneously wastes an XTTS slot and can
+      // cause later sentences to time out, triggering the browser-voice fallback.
+      if (_xttsAvailable && isTTSPlaying) prefetchTTS(cleaned);
+
+      // Start playing if not already
+      if (!isTTSPlaying) {
+        playNextInQueue();
+      }
+    }
+
+    async function playNextInQueue() {
+      if (ttsQueue.length === 0) {
+        isTTSPlaying = false;
+        pauseAudioSending = false;
+        hideAISpeaking();
+
+        // Resume recording after all TTS finishes
+        if (_liveCallMode) {
+          // Clear backend audio buffer to discard stale audio captured during TTS
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+          }
+          if (!isRecording) {
+            startRecording(true);
+          }
+        }
+        return;
+      }
+
+      isTTSPlaying = true;
+      showAISpeaking();
+      const sentence = ttsQueue.shift();
+
+      // Prefetch next sentence while this one plays
+      if (ttsQueue.length > 0 && !ttsPrefetchCache[ttsQueue[0]]) {
+        prefetchTTS(ttsQueue[0]);
+      }
+
+      // ---- Try server TTS (XTTS) — cached sentences play via <audio>,
+      //      non-cached sentences stream via Web Audio API.
+      let serverOK = false;
+      if (_xttsAvailable) {
+        if (ttsPrefetchCache[sentence]) {
+          // Play from prefetch cache via <audio> element (already fully loaded)
+          const url = ttsPrefetchCache[sentence];
+          delete ttsPrefetchCache[sentence];
+          try {
+            audioPlayer.src = url;
+            _currentTTSAudio = audioPlayer;
+            await new Promise((resolve, reject) => {
+              audioPlayer.onended = () => {
+                URL.revokeObjectURL(url);
+                _currentTTSAudio = null;
+                audioPlayer.onended = null;
+                audioPlayer.onerror = null;
+                resolve();
+              };
+              audioPlayer.onerror = (e) => {
+                URL.revokeObjectURL(url);
+                _currentTTSAudio = null;
+                audioPlayer.onended = null;
+                audioPlayer.onerror = null;
+                reject(e);
+              };
+              const p = audioPlayer.play();
+              if (p) {
+                p.then(() => {
+                  _active_timing.audio_playback_start = performance.now() / 1000;
+                  logLatencyReport(null, true);
+                }).catch(reject);
+              }
+            });
+            serverOK = true;
+          } catch (playErr) {
+            console.warn('[TTS] Cached audio play() failed:', playErr.message || playErr);
+            URL.revokeObjectURL(url);
+            _currentTTSAudio = null;
+            audioPlayer.onended = null;
+            audioPlayer.onerror = null;
+          }
+        } else {
+          // Stream via Web Audio API — no full buffering
+          try {
+            serverOK = await _playStreamingTTS(sentence);
+          } catch (err) {
+            if (err.name !== 'AbortError') {
+              console.warn('[TTS] Streaming playback error:', err.message || err);
+              _disableXttsMomentarily();
+            }
+          }
+        }
+      }
+
+      // ---- Browser Speech API fallback (only when XTTS fetch failed or play failed) ----
+      if (!serverOK) {
+        try {
+          await _speakBrowser(sentence);
+        } catch(e) { /* ignore */ }
+      }
+
+      // Continue with next sentence
+      playNextInQueue();
+    }
+
+    async function prefetchTTS(text) {
+      // Prefetch is best-effort — failure here must NEVER disable XTTS.
+      // The real fetch in playNextInQueue() is the authoritative one.
+      if (!_xttsAvailable || ttsPrefetchCache[text]) return;
+      try {
+        const controller = new AbortController();
+        const t = setTimeout(() => controller.abort(), 90000); // generous — XTTS can take 20s+
+        const resp = await fetch('/tts', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text }),
+          credentials: 'include',
+          signal: controller.signal,
+        });
+        clearTimeout(t);
+        if (resp.ok) {
+          const blob = await resp.blob();
+          // Only cache if still relevant (XTTS not disabled while we were fetching)
+          if (_xttsAvailable) {
+            ttsPrefetchCache[text] = URL.createObjectURL(blob);
+          } else {
+            // We already have the blob but XTTS was disabled; discard it cleanly
+            console.log('[TTS prefetch] Discarding result — XTTS disabled during fetch');
+          }
+        } else {
+          // Non-OK from prefetch: log only. The direct fetch in playNextInQueue will
+          // re-try and handle the error properly.
+          console.warn('[TTS prefetch] Non-OK response:', resp.status, '— will retry in playNextInQueue');
+        }
+      } catch (e) {
+        // Timeout or network error on prefetch — silently ignore. playNextInQueue will
+        // do its own authoritative fetch with its own error handling.
+        if (e.name !== 'AbortError') {
+          console.warn('[TTS prefetch] Fetch error (ignored):', e.message || e);
+        }
+      }
+    }
+
+    // Legacy speakText — now routes through the queue
+    async function speakText(text) {
+      if (!text || text.trim() === '') return;
+      const cleaned = text.replace(/[\u{1F000}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '').trim();
+      if (!cleaned) return;
+      addToTTSQueue(cleaned);
+    }
+
+    // ---- Barge-in: Interrupt AI when user starts speaking ----
+    function bargeIn(silent) {
+      console.log('[Barge-in] User speaking — interrupting AI');
+      consecutiveVoiceFrames = 0;
+
+      // Stop WebSocket-streamed audio pipeline
+      _wsAudioState = 'idle';
+      _wsPendingChunks = [];
+      _wsPendingDuration = 0;
+
+      // Stop streaming Web Audio API playback
+      _stopStreamingAudio();
+
+      // Stop current TTS audio
+      if (_currentTTSAudio) {
+        try { _currentTTSAudio.pause(); _currentTTSAudio.currentTime = 0; } catch(e){}
+        _currentTTSAudio = null;
+      }
+      audioPlayer.pause();
+      audioPlayer.src = '';
+      audioPlayer.onended = null;
+      audioPlayer.onerror = null;
+      // Also cancel browser speech synthesis
+      if (window.speechSynthesis) speechSynthesis.cancel();
+
+      // Clear TTS queue and prefetch cache
+      ttsQueue = [];
+      for (const key of Object.keys(ttsPrefetchCache)) {
+        URL.revokeObjectURL(ttsPrefetchCache[key]);
+      }
+      ttsPrefetchCache = {};
+
+      // Send interrupt to backend (cancel LLM streaming)
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+      }
+
+      // Resume audio sending
+      isTTSPlaying = false;
+      pauseAudioSending = false;
+      hideThinking();
+      hideAISpeaking();
+
+      if (!silent) {
+        appendMsg('system', '[🔊 Interrupted — listening...]');
+      }
+    }
+
+    // ---- Energy computation for barge-in detection ----
+    function computeEnergy(buffer) {
+      let sum = 0;
+      for (let i = 0; i < buffer.length; i++) {
+        sum += buffer[i] * buffer[i];
+      }
+      return Math.sqrt(sum / buffer.length);
+    }
+
+    async function startRecording(silent = false) {
+      console.log("[DEBUG] startRecording called");
+      if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        appendMsg('system', 'Voice not supported in this browser.');
+        console.error("[ERROR] getUserMedia not available");
+        return;
+      }
+      
+      try {
+        console.log("[DEBUG] Requesting audio stream...");
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // Echo cancellation + noise suppression to prevent Whisper from capturing AI voice
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true
+          }
+        });
+        console.log("[DEBUG] Audio stream acquired");
+        const source = audioContext.createMediaStreamSource(mediaStream);
+        
+        processor = audioContext.createScriptProcessor(4096, 1, 1);
+        processor.onaudioprocess = (e) => {
+          if(!isRecording) return;
+          if(isMuted) return;
+          
+          const input = e.inputBuffer.getChannelData(0);
+
+          // ---- Barge-in detection during TTS playback ----
+          if (pauseAudioSending && isTTSPlaying) {
+            const energy = computeEnergy(input);
+            if (energy > bargeInThreshold) {
+              consecutiveVoiceFrames++;
+              if (consecutiveVoiceFrames >= bargeInFramesNeeded) {
+                bargeIn(); // Interrupt AI — resume listening
+              }
+            } else {
+              consecutiveVoiceFrames = 0;
+            }
+            return; // Don't send audio to server during TTS
+          }
+
+          // Don't send audio while paused (waiting for TTS queue to complete)
+          if (pauseAudioSending) return;
+          
+          const resampled = resample(input, audioContext.sampleRate, 16000);
+          
+          if(resampled && ws.readyState === WebSocket.OPEN) {
+            const pcm16 = convertToPCM16(resampled);
+            ws.send(pcm16.buffer);
+          }
+        };
+        
+        source.connect(processor);
+        processor.connect(audioContext.destination);
+        
+        isRecording = true;
+        isMuted = false;
+        pauseAudioSending = false;
+        consecutiveVoiceFrames = 0;
+        btnStart.disabled = true;
+        btnMute.disabled = false;
+        btnStop.disabled = false;
+        btnStart.classList.add('recording');
+        btnMute.textContent = '🔇 Stop Recording';
+        showWaveform();
+        if (!silent) appendMsg('system', '[🎤 Recording started - speak now]');
+      } catch(err) {
+        console.error("[ERROR] startRecording failed:", err);
+        appendMsg('system', 'Could not start voice recording: ' + err.message);
+      }
+    }
+
+    function stopRecording(silent = false) {
+      isRecording = false;
+      pauseAudioSending = false;
+      consecutiveVoiceFrames = 0;
+      
+      // Send control message to backend to clear buffers
+      if(ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'stop_recording' }));
+      }
+      
+      // Fully release audio input device
+      if(processor) { processor.disconnect(); processor = null; }
+      if(audioContext) { audioContext.close(); audioContext = null; }
+      if(mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+      
+      btnStart.disabled = false;
+      btnMute.disabled = true;
+      btnStop.disabled = true;
+      btnStart.classList.remove('recording');
+      btnMute.textContent = '🔇 Mute';
+      btnMute.style.background = '#f59e0b';
+      isMuted = false;
+      hideWaveform();
+      if (!silent) appendMsg('system', '[⏸️ Recording stopped]');
+    }
+
+    function convertToPCM16(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      
+      for(let i = 0; i < float32Array.length; i++) {
+        const sample = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      }
+      
+      return new Int16Array(buffer);
+    }
+
+    function resample(buffer, fromRate, toRate) {
+      if(fromRate === toRate) return buffer;
+      if(toRate > fromRate) return null;
+      
+      const ratio = fromRate / toRate;
+      const newLength = Math.round(buffer.length / ratio);
+      const result = new Float32Array(newLength);
+      
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+      
+      while(offsetResult < result.length) {
+        const nextOffset = Math.round((offsetResult + 1) * ratio);
+        let sum = 0, count = 0;
+        
+        for(let i = offsetBuffer; i < nextOffset && i < buffer.length; i++) {
+          sum += buffer[i];
+          count++;
+        }
+        
+        result[offsetResult] = count > 0 ? sum / count : 0;
+        offsetResult++;
+        offsetBuffer = nextOffset;
+      }
+      
+      return result;
+    }
+  </script>
+</body>
+</html>

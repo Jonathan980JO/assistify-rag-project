@@ -1,0 +1,743 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>My Support Tickets - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 0;
+        }
+
+        /* Header and Menu Styles */
+        header {
+            background: var(--sidebar);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 998;
+        }
+        .menu-btn {
+            background: var(--accent);
+            color: var(--light);
+            border: none;
+            font-size: 24px;
+            width: 48px;
+            height: 48px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .menu-btn:hover {
+            background: #0e8c6d;
+        }
+        .header-title {
+            font-size: 1.5rem;
+            margin: 0;
+            color: var(--accent);
+        }
+        .header-spacer {
+            width: 72px;
+        }
+        .nav-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 999;
+        }
+        .nav-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .nav-menu {
+            position: fixed;
+            top: 0;
+            left: -280px;
+            width: 280px;
+            height: 100%;
+            background: var(--sidebar);
+            box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+            transition: left 0.3s;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        .nav-menu.open {
+            left: 0;
+        }
+        .nav-header {
+            padding: 24px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .nav-header h2 {
+            margin: 0;
+            color: var(--accent);
+            font-size: 1.5rem;
+        }
+        .nav-links {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .nav-links li {
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 16px 24px;
+            color: var(--light);
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .nav-link:hover {
+            background: rgba(16,163,127,0.2);
+        }
+        .nav-link svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+
+        .container {
+            max-width: 1200px;
+            padding: 20px;
+            margin: 0 auto;
+        }
+            margin: 0 auto;
+        }
+
+        .header {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 25px;
+            margin-bottom: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .header h1 {
+            color: #667eea;
+            font-size: 28px;
+        }
+
+        .header-buttons {
+            display: flex;
+            gap: 15px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #6c757d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #5a6268;
+        }
+
+        .content {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
+        }
+
+        .tickets-list {
+            margin-top: 20px;
+        }
+
+        .ticket-card {
+            background: white;
+            border: 2px solid #e9ecef;
+            border-radius: 10px;
+            padding: 20px;
+            margin-bottom: 15px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .ticket-card:hover {
+            border-color: #667eea;
+            transform: translateX(5px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.2);
+        }
+
+        .ticket-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+        }
+
+        .ticket-number {
+            font-weight: bold;
+            color: #667eea;
+            font-size: 16px;
+        }
+
+        .ticket-status {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-open {
+            background: #fff3cd;
+            color: #856404;
+        }
+
+        .status-assigned {
+            background: #d1ecf1;
+            color: #0c5460;
+        }
+
+        .status-resolved {
+            background: #d4edda;
+            color: #155724;
+        }
+
+        .ticket-subject {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 8px;
+        }
+
+        .ticket-meta {
+            display: flex;
+            gap: 20px;
+            font-size: 13px;
+            color: #6c757d;
+        }
+
+        .priority-high {
+            color: #dc3545;
+            font-weight: bold;
+        }
+
+        .priority-normal {
+            color: #28a745;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            background: white;
+            margin: 50px auto;
+            padding: 30px;
+            border-radius: 15px;
+            max-width: 800px;
+            max-height: 80vh;
+            overflow-y: auto;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e9ecef;
+        }
+
+        .modal-title {
+            font-size: 24px;
+            color: #667eea;
+        }
+
+        .close {
+            font-size: 28px;
+            cursor: pointer;
+            color: #6c757d;
+            transition: color 0.3s;
+        }
+
+        .close:hover {
+            color: #dc3545;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .form-group input,
+        .form-group textarea,
+        .form-group select {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus,
+        .form-group select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group textarea {
+            min-height: 120px;
+            resize: vertical;
+        }
+
+        .messages-container {
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .message {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 10px;
+            margin-bottom: 15px;
+            border-left: 4px solid #667eea;
+        }
+
+        .message-header {
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+
+        .message-text {
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .message-time {
+            font-size: 12px;
+            color: #6c757d;
+            margin-top: 8px;
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #6c757d;
+        }
+
+        .empty-state i {
+            font-size: 64px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #667eea;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+    </style>
+    <script src="/static/security.js"></script>
+    <script>
+        function openNav() {
+            document.querySelector('.nav-menu').classList.add('open');
+            document.querySelector('.nav-overlay').classList.add('show');
+        }
+        
+        function closeNav() {
+            document.querySelector('.nav-menu').classList.remove('open');
+            document.querySelector('.nav-overlay').classList.remove('show');
+        }
+    </script>
+</head>
+<body>
+    <!-- Navigation Overlay -->
+    <div class="nav-overlay" onclick="closeNav()"></div>
+    
+    <!-- Side Navigation Menu -->
+    <nav class="nav-menu">
+        <div class="nav-header">
+            <h2>Menu</h2>
+        </div>
+        <ul class="nav-links">
+            <li>
+                <a href="/main" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+                    Home
+                </a>
+            </li>
+            <li>
+                <a href="/frontend/index.html" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+                    Chat
+                </a>
+            </li>
+            <li>
+                <a href="/profile" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                    Profile Settings
+                </a>
+            </li>
+            <li>
+                <a href="/logout" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+                    Logout
+                </a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Header with hamburger button -->
+    <header>
+        <button class="menu-btn" onclick="openNav()">☰</button>
+        <h1 class="header-title">Assistify</h1>
+        <div class="header-spacer"></div>
+    </header>
+
+    <div class="container">
+        <div class="header">
+            <h1>📨 My Support Tickets</h1>
+            <div class="header-buttons">
+                <button class="btn btn-primary" onclick="openCreateModal()">+ Create New Ticket</button>
+            </div>
+        </div>
+
+        <div class="content">
+            <div id="ticketsContainer">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading your tickets...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Ticket Modal -->
+    <div id="createModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title">Create New Support Ticket</h2>
+                <span class="close" onclick="closeCreateModal()">&times;</span>
+            </div>
+            <form id="createTicketForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="subject">Subject *</label>
+                    <input type="text" id="subject" name="subject" required placeholder="Brief description of your issue">
+                </div>
+                <div class="form-group">
+                    <label for="description">Description *</label>
+                    <textarea id="description" name="description" required placeholder="Provide detailed information about your issue"></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="priority">Priority</label>
+                    <select id="priority" name="priority">
+                        <option value="normal">Normal</option>
+                        <option value="high">High</option>
+                    </select>
+                </div>
+                <button type="submit" class="btn btn-primary" style="width: 100%;">Submit Ticket</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- View Ticket Modal -->
+    <div id="viewModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title" id="viewTicketNumber"></h2>
+                <span class="close" onclick="closeViewModal()">&times;</span>
+            </div>
+            <div id="ticketDetails"></div>
+            <div class="messages-container" id="messagesContainer"></div>
+            <form id="addMessageForm" style="margin-top: 20px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <div class="form-group">
+                    <label for="newMessage">Add a Message</label>
+                    <textarea id="newMessage" name="newMessage" placeholder="Type your message here..."></textarea>
+                </div>
+                <button type="submit" class="btn btn-primary">Send Message</button>
+            </form>
+        </div>
+    </div>
+
+    <script>
+        let currentTicketId = null;
+
+        // Load tickets on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            loadTickets();
+        });
+
+        async function loadTickets() {
+            try {
+                const response = await fetch('/api/support/tickets');
+                const data = await response.json();
+
+                const container = document.getElementById('ticketsContainer');
+                
+                if (!data.tickets || data.tickets.length === 0) {
+                    Security.safeSetHTML(container, `
+                        <div class="empty-state">
+                            <div style="font-size: 64px; opacity: 0.3;">📭</div>
+                            <h3>No Support Tickets Yet</h3>
+                            <p>When you create a support ticket, it will appear here.</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                let html = '<div class="tickets-list">';
+                data.tickets.forEach(ticket => {
+                    const statusClass = `status-${ticket.status}`;
+                    const priorityClass = ticket.priority === 'high' ? 'priority-high' : 'priority-normal';
+                    const createdDate = new Date(ticket.created_at).toLocaleDateString();
+                    
+                    html += `
+                        <div class="ticket-card" onclick="viewTicket(${ticket.id})">
+                            <div class="ticket-header">
+                                <span class="ticket-number">${ticket.ticket_number}</span>
+                                <span class="ticket-status ${statusClass}">${ticket.status}</span>
+                            </div>
+                            <div class="ticket-subject">${ticket.subject}</div>
+                            <div class="ticket-meta">
+                                <span>Created: ${createdDate}</span>
+                                <span class="${priorityClass}">Priority: ${ticket.priority}</span>
+                                ${ticket.assigned_to ? `<span>Assigned to: ${ticket.assigned_to}</span>` : '<span>Unassigned</span>'}
+                            </div>
+                        </div>
+                    `);
+                });
+                html += '</div>';
+                
+                Security.safeSetHTML(container, html);
+            } catch (error) {
+                console.error('Error loading tickets:', error);
+                Security.safeSetHTML('ticketsContainer', '<p style="color: red;">Error loading tickets. Please refresh the page.</p>');
+            }
+        }
+
+        async function viewTicket(ticketId) {
+            currentTicketId = ticketId;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${ticketId}`);
+                const ticket = await response.json();
+                
+                document.getElementById('viewTicketNumber').textContent = ticket.ticket_number;
+                
+                const statusClass = `status-${ticket.status}`;
+                const priorityClass = ticket.priority === 'high' ? 'priority-high' : 'priority-normal';
+                
+                let detailsHtml = `
+                    <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; margin-bottom: 20px;">
+                        <h3 style="margin-bottom: 15px;">${ticket.subject}</h3>
+                        <p style="margin-bottom: 15px; line-height: 1.6;">${ticket.description}</p>
+                        <div style="display: flex; gap: 20px; font-size: 14px;">
+                            <span><strong>Status:</strong> <span class="ticket-status ${statusClass}">${ticket.status}</span></span>
+                            <span class="${priorityClass}"><strong>Priority:</strong> ${ticket.priority}</span>
+                            ${ticket.assigned_to ? `<span><strong>Assigned to:</strong> ${ticket.assigned_to}</span>` : ''}
+                        </div>
+                        ${ticket.resolution_notes ? `
+                            <div style="margin-top: 15px; padding: 15px; background: #d4edda; border-left: 4px solid #28a745; border-radius: 5px;">
+                                <strong>Resolution:</strong><br>${ticket.resolution_notes}
+                            </div>
+                        ` : ''}
+                    </div>
+                `;
+                
+                Security.safeSetHTML(document.getElementById('ticketDetails'), detailsHtml);
+                
+                let messagesHtml = '<h3 style="margin-bottom: 15px;">Conversation</h3>';
+                if (ticket.messages && ticket.messages.length > 0) {
+                    ticket.messages.forEach(msg => {
+                        const msgDate = new Date(msg.created_at).toLocaleString();
+                        messagesHtml += `
+                            <div class="message">
+                                <div class="message-header">${msg.sender_username} (${msg.sender_role})</div>
+                                <div class="message-text">${msg.message}</div>
+                                <div class="message-time">${msgDate}</div>
+                            </div>
+                        `;
+                    });
+                } else {
+                    messagesHtml += '<p style="color: #6c757d; font-style: italic;">No messages yet.</p>';
+                }
+                
+                Security.safeSetHTML(document.getElementById('messagesContainer'), messagesHtml);
+                
+                // Disable message form if ticket is resolved
+                const form = document.getElementById('addMessageForm');
+                if (ticket.status === 'resolved') {
+                    form.style.display = 'none';
+                } else {
+                    form.style.display = 'block';
+                }
+                
+                document.getElementById('viewModal').style.display = 'block';
+            } catch (error) {
+                console.error('Error loading ticket:', error);
+                alert('Error loading ticket details.');
+            }
+        }
+
+        function openCreateModal() {
+            document.getElementById('createModal').style.display = 'block';
+        }
+
+        function closeCreateModal() {
+            document.getElementById('createModal').style.display = 'none';
+            document.getElementById('createTicketForm').reset();
+        }
+
+        function closeViewModal() {
+            document.getElementById('viewModal').style.display = 'none';
+            currentTicketId = null;
+        }
+
+        document.getElementById('createTicketForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const formData = {
+                subject: document.getElementById('subject').value,
+                description: document.getElementById('description').value,
+                priority: document.getElementById('priority').value
+            };
+            
+            try {
+                const response = await fetch('/api/support/ticket/create', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(formData)
+                });
+                
+                const result = await response.json();
+                
+                if (response.ok) {
+                    alert(`Ticket ${result.ticket_number} created successfully!`);
+                    closeCreateModal();
+                    loadTickets();
+                } else {
+                    alert('Error creating ticket: ' + (result.detail || 'Unknown error'));
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error creating ticket. Please try again.');
+            }
+        });
+
+        document.getElementById('addMessageForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const message = document.getElementById('newMessage').value;
+            if (!message.trim()) return;
+            
+            try {
+                const response = await fetch(`/api/support/ticket/${currentTicketId}/message`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: message })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('newMessage').value = '';
+                    viewTicket(currentTicketId); // Reload ticket details
+                } else {
+                    alert('Error sending message.');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                alert('Error sending message. Please try again.');
+            }
+        });
+
+        // Close modals when clicking outside
+        window.onclick = function(event) {
+            if (event.target.className === 'modal') {
+                event.target.style.display = 'none';
+            }
+        }
+    </script>
+</body>
+</html>

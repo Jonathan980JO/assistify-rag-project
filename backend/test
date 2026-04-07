@@ -1,0 +1,4 @@
+import sqlite3
+conn = sqlite3.connect("analytics.db")
+print(conn.execute("SELECT * FROM usage_stats").fetchall())
+conn.close()

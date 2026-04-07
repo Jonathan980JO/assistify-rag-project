@@ -1,0 +1,83 @@
+[
+  {
+    "q": "What is psychology?",
+    "done": true,
+    "chunks": 48,
+    "sources": 1,
+    "first_chunk_ms": 257.7,
+    "total_ms": 707.7,
+    "answer": "Psychology means the science of soul. It was given a very important place by Aristotle in human life. Life has no meaning without the soul. However, Aristotle couldn’t explain the relationship between the soul and the body. The problem regarding this"
+  },
+  {
+    "q": "Who founded the first psychological laboratory and when?",
+    "done": true,
+    "chunks": 6,
+    "sources": 1,
+    "first_chunk_ms": 225.4,
+    "total_ms": 284.6,
+    "answer": "Not found in the document."
+  },
+  {
+    "q": "What are the main goals of psychology?",
+    "done": true,
+    "chunks": 38,
+    "sources": 1,
+    "first_chunk_ms": 231.9,
+    "total_ms": 590.5,
+    "answer": "The main goals of psychology are: a) Observation, b) Description, c) Understanding, d) Explanation, e) Prediction, and f) Control of human behavior and mental processes."
+  },
+  {
+    "q": "ما هو علم النفس؟",
+    "done": true,
+    "chunks": 27,
+    "sources": 5,
+    "first_chunk_ms": 739.2,
+    "total_ms": 1000.8,
+    "answer": "بناءً على المعلومات المتاحة، علم النفس هو العلم الذي يدرس الروح وال العقلية للإنسان وبين الروح والجسم."
+  },
+  {
+    "q": "اشرح المدرسة السلوكية",
+    "done": true,
+    "chunks": 42,
+    "sources": 5,
+    "first_chunk_ms": 7694.7,
+    "total_ms": 8099.5,
+    "answer": "بناءً على المعلومات المتاحة، المدرسة السلبية تركز على دور التعلم من خلال الخبرات الشخصية والتجارب الحالية في تحديد سلوك الإنسان وليس الظروف البيئية أو العوامل النفسية الداخلية."
+  },
+  {
+    "q": "List ONLY the goals of psychology.",
+    "done": true,
+    "chunks": 29,
+    "sources": 1,
+    "first_chunk_ms": 7186.4,
+    "total_ms": 7463.8,
+    "answer": "a) Observation  \nb) Description  \nc) Understanding  \nd) Explanation  \ne) Prediction  \nf) Control of human behavior and mental processes"
+  },
+  {
+    "q": "Extract the list of psychology branches only.",
+    "done": true,
+    "chunks": 6,
+    "sources": 3,
+    "first_chunk_ms": 7233.9,
+    "total_ms": 7293.2,
+    "answer": "Not found in the document."
+  },
+  {
+    "q": "What is the capital of France?",
+    "done": true,
+    "chunks": 1,
+    "sources": 0,
+    "first_chunk_ms": 65.1,
+    "total_ms": 72.5,
+    "answer": "Not found in the document."
+  },
+  {
+    "q": "Explain psychology AND mention its goals AND give one real-life application.",
+    "done": true,
+    "chunks": 60,
+    "sources": 3,
+    "first_chunk_ms": 293.9,
+    "total_ms": 861.0,
+    "answer": "Psychology aims to observe, describe, understand, explain, predict, and control human behavior and mental processes.\n\nOne real-life application is in understanding depression: therapists use techniques like challenging patients' negative thoughts and attributing them to environmental factors rather than the patient's incompetence, helping them find effective solutions."
+  }
+]

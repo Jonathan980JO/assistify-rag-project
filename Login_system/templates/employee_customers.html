@@ -1,0 +1,570 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Customer Management - Employee Dashboard</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+        }
+        * {box-sizing: border-box; margin: 0; padding: 0;}
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            padding: 0;
+            margin: 0;
+        }
+        /* Header and Menu Styles */
+        header {
+            background: var(--sidebar);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+            padding: 16px 32px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 998;
+        }
+        .menu-btn {
+            background: var(--accent);
+            color: var(--light);
+            border: none;
+            font-size: 24px;
+            width: 48px;
+            height: 48px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        .menu-btn:hover {
+            background: #0e8c6d;
+        }
+        .header-title {
+            font-size: 1.5rem;
+            margin: 0;
+            color: var(--accent);
+        }
+        .header-spacer {
+            width: 72px;
+        }
+        .nav-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 999;
+        }
+        .nav-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .nav-menu {
+            position: fixed;
+            top: 0;
+            left: -280px;
+            width: 280px;
+            height: 100%;
+            background: var(--sidebar);
+            box-shadow: 2px 0 16px rgba(0,0,0,0.5);
+            transition: left 0.3s;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        .nav-menu.open {
+            left: 0;
+        }
+        .nav-header {
+            padding: 24px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .nav-header h2 {
+            margin: 0;
+            color: var(--accent);
+            font-size: 1.5rem;
+        }
+        .nav-links {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .nav-links li {
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 16px 24px;
+            color: var(--light);
+            text-decoration: none;
+            transition: background 0.3s;
+        }
+        .nav-link:hover {
+            background: rgba(16,163,127,0.2);
+        }
+        .nav-link svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+        h1 {
+            color: var(--accent);
+            margin-bottom: 24px;
+        }
+        .back-link {
+            display: inline-block;
+            color: var(--accent);
+            text-decoration: none;
+            margin-bottom: 20px;
+        }
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+        .stat-card {
+            background: var(--sidebar);
+            padding: 20px;
+            border-radius: 12px;
+            border-left: 4px solid var(--accent);
+        }
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: var(--accent);
+        }
+        .stat-label {
+            color: var(--muted);
+            font-size: 0.9em;
+        }
+        .table-container {
+            background: var(--sidebar);
+            border-radius: 12px;
+            padding: 24px;
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            text-align: left;
+            padding: 12px;
+            border-bottom: 1px solid #333;
+        }
+        th {
+            color: var(--accent);
+            font-weight: 600;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .badge-active {background: #10a37f; color: #fff;}
+        .badge-inactive {background: #666; color: #fff;}
+        .btn {
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9em;
+            margin-right: 8px;
+        }
+        .btn:hover {opacity: 0.9;}
+        .btn-danger {background: var(--danger);}
+        .btn-secondary {background: var(--muted);}
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            z-index: 1000;
+        }
+        .modal-content {
+            background: var(--sidebar);
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 32px;
+            border-radius: 12px;
+            max-height: 80vh;
+            overflow-y: auto;
+        }
+        .modal h2 {color: var(--accent); margin-bottom: 16px;}
+        .form-group {
+            margin-bottom: 16px;
+        }
+        .form-group label {
+            display: block;
+            margin-bottom: 6px;
+            font-weight: 600;
+        }
+        .form-group input, .form-group textarea {
+            width: 100%;
+            padding: 10px;
+            background: #171717;
+            border: 1px solid #333;
+            border-radius: 6px;
+            color: var(--light);
+            font-family: inherit;
+        }
+        .form-group textarea {
+            min-height: 100px;
+            resize: vertical;
+        }
+        .notes-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .note-item {
+            background: #171717;
+            padding: 12px;
+            margin-bottom: 12px;
+            border-radius: 6px;
+            border-left: 3px solid var(--accent);
+        }
+        .note-meta {
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-bottom: 8px;
+        }
+        .close-modal {
+            float: right;
+            font-size: 28px;
+            cursor: pointer;
+            color: var(--muted);
+        }
+        .close-modal:hover {color: var(--light);}
+    </style>
+    <script src="/static/security.js"></script>
+    <script>
+        function openNav() {
+            document.querySelector('.nav-menu').classList.add('open');
+            document.querySelector('.nav-overlay').classList.add('show');
+        }
+        
+        function closeNav() {
+            document.querySelector('.nav-menu').classList.remove('open');
+            document.querySelector('.nav-overlay').classList.remove('show');
+        }
+    </script>
+</head>
+<body>
+    <!-- Navigation Overlay -->
+    <div class="nav-overlay" onclick="closeNav()"></div>
+    
+    <!-- Side Navigation Menu -->
+    <nav class="nav-menu">
+        <div class="nav-header">
+            <h2>Menu</h2>
+        </div>
+        <ul class="nav-links">
+            <li>
+                <a href="/employee" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+                    Home
+                </a>
+            </li>
+            <li>
+                <a href="/frontend/index.html" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+                    Chat
+                </a>
+            </li>
+            <li>
+                <a href="/employee/customers" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M9 6a3 3 0 11-6 0 3 3 0 016 0zM17 6a3 3 0 11-6 0 3 3 0 016 0zM12.93 17c.046-.327.07-.66.07-1a6.97 6.97 0 00-1.5-4.33A5 5 0 0119 16v1h-6.07zM6 11a5 5 0 015 5v1H1v-1a5 5 0 015-5z"/></svg>
+                    Customers
+                </a>
+            </li>
+            <li>
+                <a href="/employee" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4z" clip-rule="evenodd"/></svg>
+                    Knowledge Base
+                </a>
+            </li>
+            <li>
+                <a href="/profile" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                    Profile Settings
+                </a>
+            </li>
+            <li>
+                <a href="/logout" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+                    Logout
+                </a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Header with hamburger button -->
+    <header>
+        <button class="menu-btn" onclick="openNav()">☰</button>
+        <h1 class="header-title">Assistify Employee</h1>
+        <div class="header-spacer"></div>
+    </header>
+
+    <div class="container">
+        <h1>👥 Customer Management</h1>        <h1>👥 Customer Management</h1>
+        
+        <div class="stats" id="stats">
+            <div class="stat-card">
+                <div class="stat-value" id="stat-total">-</div>
+                <div class="stat-label">Total Customers</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-active">-</div>
+                <div class="stat-label">Active</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-inactive">-</div>
+                <div class="stat-label">Inactive</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-value" id="stat-recent">-</div>
+                <div class="stat-label">New (30 days)</div>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <h2 style="margin-bottom: 16px;">Customer List</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Username</th>
+                        <th>Email</th>
+                        <th>Full Name</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="customers-table">
+                    <tr><td colspan="5" style="text-align:center; color: var(--muted);">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+    
+    <!-- Edit Profile Modal -->
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal('editModal')">&times;</span>
+            <h2>Edit Customer Profile</h2>
+            <form id="editForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" id="edit-customer-id">
+                <div class="form-group">
+                    <label>Email</label>
+                    <input type="email" id="edit-email" required>
+                </div>
+                <div class="form-group">
+                    <label>Full Name</label>
+                    <input type="text" id="edit-name">
+                </div>
+                <button type="submit" class="btn">Save Changes</button>
+                <button type="button" class="btn btn-secondary" onclick="closeModal('editModal')">Cancel</button>
+            </form>
+        </div>
+    </div>
+    
+    <!-- Customer Notes Modal -->
+    <div id="notesModal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeModal('notesModal')">&times;</span>
+            <h2 id="notes-title">Customer Notes</h2>
+            <input type="hidden" id="notes-customer-id">
+            
+            <div class="form-group">
+                <label>Add New Note</label>
+                <textarea id="new-note" placeholder="Enter support note..."></textarea>
+                <button class="btn" onclick="addNote()" style="margin-top: 8px;">Add Note</button>
+            </div>
+            
+            <h3 style="margin-top: 24px; margin-bottom: 12px; color: var(--muted);">Previous Notes</h3>
+            <div class="notes-list" id="notes-list">
+                <div style="text-align:center; color: var(--muted);">No notes yet</div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        let customers = [];
+        let csrfToken = '';
+        
+        // Get CSRF token
+        fetch('/csrf-token').then(r => r.json()).then(data => {
+            csrfToken = data.csrf_token;
+            loadData();
+        });
+        
+        async function loadData() {
+            // Load analytics
+            const analytics = await fetch('/api/employee/analytics').then(r => r.json());
+            document.getElementById('stat-total').textContent = analytics.total_customers;
+            document.getElementById('stat-active').textContent = analytics.active_customers;
+            document.getElementById('stat-inactive').textContent = analytics.inactive_customers;
+            document.getElementById('stat-recent').textContent = analytics.recent_registrations_30d;
+            
+            // Load customers
+            customers = await fetch('/api/customers').then(r => r.json());
+            renderTable();
+        }
+        
+        function renderTable() {
+            const tbody = document.getElementById('customers-table');
+            if (customers.length === 0) {
+                Security.safeSetHTML(tbody, '<tr><td colspan="5" style="text-align:center;">No customers found</td></tr>';
+                return;
+            }
+            
+            const html = customers.map(c => `
+                <tr>
+                    <td>${c.username}</td>
+                    <td>${c.email || '-'}</td>
+                    <td>${c.full_name || '-'}</td>
+                    <td><span class="badge ${c.active ? 'badge-active' : 'badge-inactive'}">${c.active ? 'Active' : 'Inactive'}</span></td>
+                    <td>
+                        <button class="btn btn-secondary" onclick="editCustomer(${c.id})">Edit</button>
+                        <button class="btn" onclick="showNotes(${c.id}, '${c.username}')">Notes</button>
+                        <button class="btn ${c.active ? 'btn-danger' : ''}" onclick="toggleActive(${c.id}, ${c.active})">
+                            ${c.active ? 'Deactivate' : 'Activate'}
+                        </button>
+                        <button class=\"btn btn-secondary\" onclick=\"triggerPasswordReset(${c.id}, '${c.email || ''}')\">Reset Password</button>
+                    </td>
+                </tr>
+            `).join('');
+            Security.safeSetHTML(tbody, html);
+        }
+        
+        function editCustomer(id) {
+            const customer = customers.find(c => c.id === id);
+            document.getElementById('edit-customer-id').value = id;
+            document.getElementById('edit-email').value = customer.email || '';
+            document.getElementById('edit-name').value = customer.full_name || '';
+            document.getElementById('editModal').style.display = 'block';
+        }
+        
+        document.getElementById('editForm').onsubmit = async (e) => {
+            e.preventDefault();
+            const id = document.getElementById('edit-customer-id').value;
+            const email = document.getElementById('edit-email').value;
+            const full_name = document.getElementById('edit-name').value;
+            
+            await fetch(`/api/users/${id}/update-profile`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+                body: JSON.stringify({email, full_name})
+            });
+            
+            closeModal('editModal');
+            loadData();
+            alert('Profile updated successfully!');
+        };
+        
+        async function toggleActive(id, currentlyActive) {
+            const action = currentlyActive ? 'deactivate' : 'activate';
+            await fetch(`/api/customers/${id}/${action}`, {
+                method: 'POST',
+                headers: {'X-CSRF-Token': csrfToken}
+            });
+            loadData();
+        }
+        
+        async function triggerPasswordReset(id, email) {
+            if (!email) {
+                alert('Customer has no email address.');
+                return;
+            }
+            if (!confirm(`Send password reset email to ${email}?`)) return;
+            
+            const result = await fetch(`/api/customers/${id}/trigger-password-reset`, {
+                method: 'POST',
+                headers: {'X-CSRF-Token': csrfToken}
+            }).then(r => r.json());
+            
+            alert(result.message);
+        }
+        
+        async function showNotes(id, username) {
+            document.getElementById('notes-customer-id').value = id;
+            document.getElementById('notes-title').textContent = `Notes for ${username}`;
+            document.getElementById('new-note').value = '';
+            
+            const notes = await fetch(`/api/customers/${id}/notes`).then(r => r.json());
+            const notesList = document.getElementById('notes-list');
+            
+            if (notes.length === 0) {
+                Security.safeSetHTML(notesList, '<div style="text-align:center; color: var(--muted);">No notes yet</div>');
+            } else {
+                const html = notes.map(n => `
+                    <div class="note-item">
+                        <div class="note-meta">${n.created_by} • ${new Date(n.created_at).toLocaleString()}</div>
+                        <div>${n.note}</div>
+                    </div>
+                `).join('');
+                Security.safeSetHTML(notesList, html);
+            }
+            
+            document.getElementById('notesModal').style.display = 'block';
+        }
+        
+        async function addNote() {
+            const id = document.getElementById('notes-customer-id').value;
+            const note = document.getElementById('new-note').value.trim();
+            
+            if (!note) {
+                alert('Note cannot be empty');
+                return;
+            }
+            
+            await fetch(`/api/customers/${id}/notes`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken},
+                body: JSON.stringify({note})
+            });
+            
+            // Reload notes
+            const customer = customers.find(c => c.id == id);
+            showNotes(id, customer.username);
+        }
+        
+        function closeModal(modalId) {
+            document.getElementById(modalId).style.display = 'none';
+        }
+        
+        // Close modal when clicking outside
+        window.onclick = (e) => {
+            if (e.target.classList.contains('modal')) {
+                e.target.style.display = 'none';
+            }
+        };
+    </script>
+</body>
+</html>

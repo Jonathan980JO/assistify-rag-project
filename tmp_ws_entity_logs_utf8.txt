@@ -1,0 +1,54 @@
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[ENTITY DEF FILTER CHUNKS] [{'idx': 0, 'score': 0.9087, 
+INFO:Assistify:[ENTITY DEF FILTER] entity=operant conditioning kept=5 total=12
+INFO:Assistify:[SORT CHECK] top scores: [0.9087, 0.8961, 0.8933, 0.892, 0.8911]
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is operant conditioning
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[ENTITY DEF FILTER CHUNKS] [{'idx': 0, 'score': 0.8905, 
+INFO:Assistify:[ENTITY DEF FILTER] entity=structuralism kept=5 total=12
+INFO:Assistify:[SORT CHECK] top scores: [0.8905, 0.8759, 0.8743, 0.8742, 
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is structuralism
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[ENTITY DEF FILTER CHUNKS] [{'idx': 0, 'score': 0.899, 'chunk': 
+INFO:Assistify:[ENTITY DEF FILTER] entity=behavior kept=5 total=12
+INFO:Assistify:[SORT CHECK] top scores: [0.899, 0.8989, 0.8988, 0.8978, 0.8964]
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what is behavior in psychology
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[SORT CHECK] top scores: [1.1405, 1.1282, 1.0329, 1.0317, 
+INFO:Assistify:[FLOW] query_before = what are mental processes
+INFO:Assistify:[SORT CHECK] top scores: [0.8439, 0.8247, 0.7807, 0.7733, 

@@ -1,0 +1,242 @@
+
+> async def rag_ws_endpoint(websocket: WebSocket):
+      global _active_voice_task, _active_voice_conn_id
+      global _sessions_blocked, _sessions_blocked_since, 
+_consecutive_gpu_growth, _consecutive_cpu_growth
+      await websocket.accept()
+      connection_id = f"conn_{uuid.uuid4().hex[:8]}"
+      logger.info(f"New websocket connection {connection_id}")
+      # Register for KB broadcast notifications
+      _active_ws_connections[connection_id] = websocket
+  
+      # Create cancel event for barge-in support
+      cancel_event = asyncio.Event()
+      interrupt_events[connection_id] = cancel_event
+      # Per-connection write lock — shared with _tts_arabic_response 
+background tasks
+      _ws_write_locks[connection_id] = asyncio.Lock()
+  
+      user = None
+      try:
+          token = websocket.cookies.get(SESSION_COOKIE)
+          if token:
+              user = serializer.loads(token)
+      except Exception:
+          user = None
+  
+      if not user:
+          logger.debug(f"Websocket {connection_id}: no valid session cookie 
+found; continuing as anonymous")
+  
+      # Buffer for accumulating audio chunks
+      audio_buffer = bytearray()
+      first_audio_arrival = None  # Timestamp of when the first chunk of a 
+speech segment arrived
+      speech_start_time = None    # When VAD (energy) first detected speech
+      silence_counter = 0  # Count consecutive silent chunks
+      # STABILIZATION Part 6: Silence detection tuned via benchmark.
+      # STT is ultra-fast (32ms on CPU) so we can afford to wait a bit longer
+      # for true silence to avoid splitting multi-word phrases.
+      # 10 chunks × ~50ms each = ~500ms — bridges natural inter-word pauses.
+      silence_chunks_needed = 10           # ~500ms true silence before 
+transcription fires
+      silence_threshold_energy = 0.008    # Strict: only truly quiet audio 
+counts as silence
+      # Per-connection language setting (can be updated by set_language 
+control message)
+      session_language = "en"
+  
+      # ========== STABILIZED auto_transcribe ==========
+      # Defined here (not inside the conditional) so it is always in scope when
+      # stop_recording or any other handler calls it.
+      async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None, 
+lang="en"):
+          nonlocal user
+          global _active_voice_task, _active_voice_conn_id
+          global _pipeline_run_count, _last_gpu_reserved_mb
+          global _consecutive_gpu_growth, _consecutive_cpu_growth, 
+_sessions_blocked, _sessions_blocked_since
+          import time as _time
+  
+          # ---- Memory-leak gate ----
+          if _sessions_blocked:
+              current_mem = _get_memory_snapshot()
+              # Auto-recover if memory returned to safe levels after cleanup.
+              if (
+                  current_mem["cpu_rss_mb"] <= SAFE_UNBLOCK_CPU_MB
+                  and (
+                      not torch.cuda.is_available()
+                      or current_mem["gpu_reserved_mb"] <= SAFE_UNBLOCK_GPU_MB
+                  )
+              ):
+                  _sessions_blocked = False
+                  _sessions_blocked_since = 0.0
+                  _consecutive_gpu_growth = 0
+                  _consecutive_cpu_growth = 0
+                  logger.warning(
+                      f"MEMORY GUARD AUTO-RECOVERED — re-enabling voice 
+sessions "
+                      f"[{conn_id}] | 
+GPU={current_mem['gpu_reserved_mb']:.0f}MB 
+CPU={current_mem['cpu_rss_mb']:.0f}MB"
+                  )
+  
+          if _sessions_blocked:
+              logger.error(f"MEMORY LEAK SUSPECTED — refusing new voice 
+session [{conn_id}]")
+              try:
+                  await ws.send_json({"type": "aiResponse", "text": "System is 
+stabilizing memory. Please try again in a few seconds.", "sources": 0})
+              except Exception:
+                  pass
+              return
+  
+          session_start = _time.perf_counter()
+          mem_before = _get_memory_snapshot()
+          logger.info(f"===== VOICE SESSION START  [{conn_id}] =====")
+          logger.info(f"  GPU before: 
+reserved={mem_before['gpu_reserved_mb']:.0f}MB  
+alloc={mem_before['gpu_allocated_mb']:.0f}MB  |  CPU 
+RSS={mem_before['cpu_rss_mb']:.0f}MB")
+  
+          # Cancel any previously-active voice task (Part 1 — only 1 at a 
+time)
+          if _active_voice_task and not _active_voice_task.done():
+              logger.warning(f"Cancelling previous voice session 
+[{_active_voice_conn_id}]")
+              _active_voice_task.cancel()
+              try:
+                  await _active_voice_task
+              except (asyncio.CancelledError, Exception):
+                  pass
+          _active_voice_conn_id = conn_id
+  
+          try:
+              # Part 2 — only 1 pipeline at a time
+              async with voice_semaphore:
+                  t_stt_start = _time.perf_counter()
+  
+                  if t_meta and "speech_end" in t_meta:
+                      latency_vad_to_stt = t_stt_start - t_meta["speech_end"]
+                      logger.info(f"VOICE LATENCY [Speech End -> STT Start]: 
+{latency_vad_to_stt*1000:.2f}ms")
+  
+                  pcm16 = np.frombuffer(data_bytes, 
+dtype=np.int16).astype(np.float32) / 32768.0
+  
+                  if len(pcm16) < 8000:
+                      logger.debug(f"{conn_id} Audio too short ({len(pcm16)} 
+samples), skipping")
+                      return
+  
+                  vram_stt_before = 0
+                  if torch.cuda.is_available():
+                      vram_stt_before = torch.cuda.memory_reserved(0) / 1024**2
+  
+                  # Part 3 — STT timeout
+                  def _run_stt(audio_data):
+                      """Run faster-whisper transcribe in a thread. Returns 
+(segments_list, info)."""
+                      # Pass language explicitly — never use None 
+(auto-detect) to avoid per-call detection overhead
+                      stt_lang = "ar" if lang == "ar" else "en"
+                      # Pick the best available model for the language
+                      _model = whisper_model_multilingual if (
+                          lang == "ar" and whisper_model_multilingual is not 
+None
+                      ) else whisper_model
+                      # Arabic on GPU: beam_size=5 for accuracy; English: 
+greedy (beam=1)
+                      _beam = 5 if lang == "ar" else WHISPER_BEAM_SIZE
+                      # Arabic: initial_prompt primes decoder with domain 
+vocabulary
+                      # (prevents "أبيع"→"أبي", "يجب"→"أجب", 
+etc.)
+                      _initial_prompt = _ARABIC_STT_INITIAL_PROMPT if lang == 
+"ar" else None
+                      segs_gen, info = _model.transcribe(
+                          audio_data,
+                          language=stt_lang,
+                          beam_size=_beam,
+                          temperature=0.0,
+                          vad_filter=WHISPER_VAD_FILTER,
+                          vad_parameters=dict(min_silence_duration_ms=300, 
+threshold=0.3),
+                          condition_on_previous_text=False,
+                          compression_ratio_threshold=2.4,
+                          log_prob_threshold=-1.0,
+                          no_speech_threshold=0.8,
+                          word_timestamps=False,
+                          without_timestamps=True,
+                          initial_prompt=_initial_prompt,
+                      )
+                      return list(segs_gen), info
+  
+                  # Timeout: small model on GPU ~0.3s, on CPU ~2s — 10s is 
+safe headroom for both
+                  _stt_timeout = 10.0
+                  try:
+                      loop = asyncio.get_event_loop()
+                      segments_list, _stt_info = await asyncio.wait_for(
+                          loop.run_in_executor(None, _run_stt, pcm16),
+                          timeout=_stt_timeout,
+                      )
+                  except asyncio.TimeoutError:
+                      logger.error(f"{conn_id} STT TIMEOUT 
+(>{_stt_timeout:.0f} s) — dropping audio")
+                      return
+  
+                  full_text = " ".join([seg.text.strip() for seg in 
+segments_list]).strip()
+                  t_stt_end = _time.perf_counter()
+                  stt_duration = t_stt_end - t_stt_start
+  
+                  vram_stt_after = 0
+                  if torch.cuda.is_available():
+                      vram_stt_after = torch.cuda.memory_reserved(0) / 1024**2
+  
+                  if not full_text or len(full_text) <= 2:
+                      logger.debug(f"{conn_id} whisper returned empty text, 
+skipping")
+                      return
+  
+                  audio_len = len(data_bytes) / (SAMPLE_RATE * 2)  # seconds
+                  logger.info(f"{conn_id} WHISPER RESULT: '{full_text}' 
+({len(segments_list)} segments, {audio_len:.2f}s audio, STT took 
+{stt_duration*1000:.0f}ms)")
+  
+                  t_meta = t_meta or {}
+                  t_meta.update({
+                      "stt_start": t_stt_start,
+                      "stt_end": t_stt_end,
+                      "vram_stt_before": vram_stt_before,
+                      "vram_stt_after": vram_stt_after,
+                  })
+  
+                  try:
+                      await ws.send_json({
+                          "type": "transcript",
+                          "text": full_text,
+                          "final": True,
+                          "timing": t_meta,
+                      })
+  
+                      cancel_evt = interrupt_events.get(conn_id)
+                      if cancel_evt:
+                          cancel_evt.clear()
+  
+                      await call_llm_streaming(
+                          ws, full_text, conn_id,
+                          user or {"username": "anon", "role": "user"},
+                          cancel_evt,
+                          t_meta,
+                          language=lang,
+                      )
+                  except RuntimeError as re:
+                      logger.debug(f"{conn_id} WebSocket closed: {re}")
+          except asyncio.CancelledError:
+              logger.warning(f"{conn_id} Voice pipeline cancelled 
+(superseded)")
+
+
+

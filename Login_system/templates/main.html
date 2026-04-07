@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assistify - Main Dashboard</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            min-height: 100vh;
+            padding: 0;
+        }
+
+        /* Navigation Menu Styles */
+        header {
+            background: var(--sidebar);
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        .menu-btn {
+            background: var(--accent);
+            border: none;
+            font-size: 24px;
+            color: var(--light);
+            cursor: pointer;
+            padding: 8px 16px;
+            border-radius: 8px;
+            transition: background 0.3s;
+        }
+        .menu-btn:hover {
+            background: #0d8658;
+        }
+        .header-title {
+            flex: 1;
+            text-align: center;
+            font-size: 1.8rem;
+            font-weight: 700;
+            color: var(--accent);
+            margin: 0;
+        }
+        .header-spacer {
+            width: 72px;
+        }
+        .nav-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.7);
+            opacity: 0;
+            visibility: hidden;
+            transition: opacity 0.3s, visibility 0.3s;
+            z-index: 999;
+        }
+        .nav-overlay.show {
+            opacity: 1;
+            visibility: visible;
+        }
+        .nav-menu {
+            position: fixed;
+            top: 0;
+            left: -280px;
+            width: 280px;
+            height: 100%;
+            background: var(--sidebar);
+            box-shadow: 2px 0 12px rgba(0,0,0,0.5);
+            transition: left 0.3s;
+            z-index: 1000;
+            overflow-y: auto;
+        }
+        .nav-menu.open {
+            left: 0;
+        }
+        .nav-header {
+            padding: 24px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+        .nav-header h2 {
+            margin: 0;
+            color: var(--accent);
+            font-size: 1.5rem;
+        }
+        .nav-links {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .nav-link {
+            display: flex;
+            align-items: center;
+            padding: 16px 24px;
+            color: var(--light);
+            text-decoration: none;
+            transition: background 0.3s;
+            border-left: 4px solid transparent;
+        }
+        .nav-link:hover {
+            background: #3a3a3a;
+            border-left-color: var(--accent);
+        }
+        .nav-link svg {
+            width: 20px;
+            height: 20px;
+            margin-right: 12px;
+        }
+
+        .panel {
+            background: var(--sidebar);
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 600px;
+            width: 100%;
+            box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+            margin: 60px auto;
+        }
+        h2 {
+            text-align: center;
+            color: var(--accent);
+            font-size: 2.5rem;
+            margin-bottom: 1em;
+        }
+        .welcome {
+            font-size: 1.2em;
+            text-align: center;
+            margin-bottom: 2em;
+            line-height: 1.8;
+        }
+        .welcome b {
+            color: var(--accent);
+        }
+        .user-badge {
+            display: inline-block;
+            background: var(--accent);
+            color: var(--light);
+            padding: 6px 16px;
+            border-radius: 20px;
+            font-weight: 600;
+            margin: 10px 0;
+        }
+        .actions {
+            display: grid;
+            gap: 16px;
+            margin-top: 32px;
+        }
+        .btn {
+            display: block;
+            text-align: center;
+            background: var(--accent);
+            color: var(--light);
+            text-decoration: none;
+            padding: 16px 32px;
+            border-radius: 8px;
+            font-weight: 600;
+            font-size: 1.1em;
+            transition: background 0.22s;
+            border: none;
+            cursor: pointer;
+        }
+        .btn:hover {
+            background: #0d8658;
+        }
+        .btn-secondary {
+            background: var(--muted);
+        }
+        .btn-secondary:hover {
+            background: #6b7280;
+        }
+        hr {
+            border: none;
+            border-top: 1px solid #444;
+            margin: 24px 0;
+        }
+        .icon {
+            margin-right: 8px;
+        }
+    </style>
+    <script>
+        function openNav() {
+            document.querySelector('.nav-menu').classList.add('open');
+            document.querySelector('.nav-overlay').classList.add('show');
+        }
+        
+        function closeNav() {
+            document.querySelector('.nav-menu').classList.remove('open');
+            document.querySelector('.nav-overlay').classList.remove('show');
+        }
+    </script>
+    <script src="/static/security.js"></script>
+</head>
+<body>
+    <!-- Navigation Overlay -->
+    <div class="nav-overlay" onclick="closeNav()"></div>
+    
+    <!-- Side Navigation Menu -->
+    <nav class="nav-menu">
+        <div class="nav-header">
+            <h2>Menu</h2>
+        </div>
+        <ul class="nav-links">
+            <li>
+                <a href="/main" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path d="M10.707 2.293a1 1 0 00-1.414 0l-7 7a1 1 0 001.414 1.414L4 10.414V17a1 1 0 001 1h2a1 1 0 001-1v-2a1 1 0 011-1h2a1 1 0 011 1v2a1 1 0 001 1h2a1 1 0 001-1v-6.586l.293.293a1 1 0 001.414-1.414l-7-7z"/></svg>
+                    Home
+                </a>
+            </li>
+            <li>
+                <a href="/frontend/index.html" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M18 10c0 3.866-3.582 7-8 7a8.841 8.841 0 01-4.083-.98L2 17l1.338-3.123C2.493 12.767 2 11.434 2 10c0-3.866 3.582-7 8-7s8 3.134 8 7zM7 9H5v2h2V9zm8 0h-2v2h2V9zM9 9h2v2H9V9z" clip-rule="evenodd"/></svg>
+                    Chat
+                </a>
+            </li>
+            <li>
+                <a href="/profile" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
+                    Profile Settings
+                </a>
+            </li>
+            <li>
+                <a href="/logout" class="nav-link">
+                    <svg fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M3 3a1 1 0 00-1 1v12a1 1 0 102 0V4a1 1 0 00-1-1zm10.293 9.293a1 1 0 001.414 1.414l3-3a1 1 0 000-1.414l-3-3a1 1 0 10-1.414 1.414L14.586 9H7a1 1 0 100 2h7.586l-1.293 1.293z" clip-rule="evenodd"/></svg>
+                    Logout
+                </a>
+            </li>
+        </ul>
+    </nav>
+
+    <!-- Header with hamburger button -->
+    <header>
+        <button class="menu-btn" onclick="openNav()">☰</button>
+        <h1 class="header-title">Assistify</h1>
+        <div class="header-spacer"></div>
+    </header>
+
+    <div class="panel">
+        <h2>💬 Assistify Help Desk</h2>
+        <div class="welcome">
+            Welcome back, <b>{{ user['username'] }}</b>!
+            <br>
+            <span class="user-badge">{{ user['role'].upper() }}</span>
+        </div>
+        
+        <hr>
+        
+        <div class="actions">
+            <a href="/frontend/index.html" class="btn">
+                <span class="icon">🚀</span>
+                Launch Voice Chat Assistant
+            </a>
+            <a href="/logout" class="btn btn-secondary">
+                <span class="icon">🚪</span>
+                Logout
+            </a>
+        </div>
+    </div>
+</body>
+</html>

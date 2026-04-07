@@ -1,0 +1,70 @@
+﻿Login: 200
+Waiting 20s for servers to start...
+
+Uploading Principles_of_Management.pdf...
+  Status: 200, Indexed: 233
+
+Waiting 10s for indexing to complete...
+
+============================================================
+DEEP-SECTION QUERIES (expecting matches)
+============================================================
+
+  Q: Who is Peter Drucker?
+  Chunks found: 2
+    [1] sim=0.7730860638618469 | subordinates, evaluating the performance of his subordinates and the organization, taking risk, appraising different pro...
+    [2] sim=0.7374527382850646 | F Durcker is credited with making management a formal discipline through his book The Practice of Management published i...
+  => PASS
+
+  Q: What is Management by Objectives?
+  Chunks found: 2
+    [1] sim=0.8790475952625274 | a methodical and scientific forecasting technique. 2.5.1 Objectives : Objectives are the vital ingredients for the survi...
+    [2] sim=0.8788695561885833 | are usually confined itself less than 5 years but more than 1 year. These are of medium nature and comparatively smaller...
+  => PASS
+
+  Q: What are the functions of management?
+  Chunks found: 2
+    [1] sim=0.8927637565135955 | of organization whether it is a profit -making entity or non -profit making entity. The main things is presence of coord...
+    [2] sim=0.8876614499092101 | the public the best possible service," argues John F. Mee, who claims that management is the ul timate goal of any organ...
+  => PASS
+
+  Q: What is planning in management?
+  Chunks found: 3
+    [1] sim=0.8971948850154876 | goal setting are crucial; the absence of either renders the action futile. The formulation of a goal is an essential sta...
+    [2] sim=0.8951411175727844 | is reported and appropriate corrective actions are taken to bring the deviated activities back on track or align them wi...
+  => PASS
+
+  Q: What is organizing in management?
+  Chunks found: 2
+    [1] sim=0.9248891401290893 | do it. Planning bridges the gap from where we are to where we want to go. It makes it possible for things to occur which...
+    [2] sim=0.9018256592750549 | refers to the systematic arrangement and categorization of the activities within a business, as well as the establishmen...
+  => PASS
+
+============================================================
+OUT-OF-SCOPE QUERIES (expecting no matches)
+============================================================
+
+  Q: What is quantum physics?
+  Chunks found: 2
+    [1] sim=0.7268091773986816 | orkers to earn higher wages. Ultimately, this leads to an improvement in their standard of living. ΓÇó 3.From a societal p...
+    [2] sim=0.7245844340324401 | workers or employees work not only for money but for other non-monetary motives. So, non-financial incentives are als o ...
+  => ACCEPTABLE (retrieval found something; downstream gates may still reject)
+
+  Q: Tell me about the French Revolution
+  Chunks found: 3
+    [1] sim=0.7484262216091155 | system was common from the 12th century to the 14th. It eventually fell apart as capital grew and people made new finds ...
+    [2] sim=0.7118817198276519 | orkers to earn higher wages. Ultimately, this leads to an improvement in their standard of living. ΓÇó 3.From a societal p...
+  => ACCEPTABLE (retrieval found something; downstream gates may still reject)
+
+  Q: What is machine learning?
+  Chunks found: 2
+    [1] sim=0.7788259422779082 | and dismissal of the employee, selection of a supplier etc. On the other hand, non - programmed decisions are taken for ...
+    [2] sim=0.7675939834117889 | Break even analysis. 8.Linear programming. 2. Game theory. 9. Sampling analysis. 3. Cash benefit analysis. 10. Ratio ana...
+  => ACCEPTABLE (retrieval found something; downstream gates may still reject)
+
+============================================================
+RESULTS SUMMARY
+============================================================
+Deep-section: 5/5 passed, 0 failed
+Out-of-scope: 0/3 correctly rejected
+Overall: 5/8

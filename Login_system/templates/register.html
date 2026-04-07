@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    
+    <meta name="csrf-token" content="{{ csrf_token() }}">
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self';">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register - Assistify</title>
+    <style>
+        :root {
+            --accent: #10a37f;
+            --bg: #232323;
+            --sidebar: #2b2b2b;
+            --light: #fff;
+            --muted: #9ca3af;
+            --danger: #ff7979;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Segoe UI', Arial, sans-serif;
+            background: var(--bg);
+            color: var(--light);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .box {
+            background: var(--sidebar);
+            border-radius: 16px;
+            padding: 48px;
+            max-width: 480px;
+            width: 100%;
+            box-shadow: 0 0 24px rgba(0, 0, 0, 0.5);
+        }
+        h2 {
+            text-align: center;
+            color: var(--accent);
+            font-size: 2.2rem;
+            margin-bottom: 0.5em;
+        }
+        .subtitle {
+            text-align: center;
+            color: var(--muted);
+            margin-bottom: 2em;
+            font-size: 0.95em;
+        }
+        .error {
+            background: rgba(255, 121, 121, 0.2);
+            border-left: 4px solid var(--danger);
+            color: var(--danger);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-weight: 600;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: var(--light);
+        }
+        input[type=text],
+        input[type=email],
+        input[type=password] {
+            width: 100%;
+            padding: 12px;
+            margin-bottom: 20px;
+            border-radius: 6px;
+            border: 1px solid #444;
+            background: #171717;
+            color: var(--light);
+            font-size: 1em;
+            transition: border-color 0.22s;
+        }
+        input[type=text]:focus,
+        input[type=email]:focus,
+        input[type=password]:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        input[type=submit] {
+            width: 100%;
+            background: var(--accent);
+            color: var(--light);
+            padding: 14px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            font-size: 1.1em;
+            transition: background 0.22s;
+            margin-top: 10px;
+        }
+        input[type=submit]:hover {
+            background: #0d8658;
+        }
+        .form-group {
+            margin-bottom: 8px;
+        }
+        .helper-text {
+            font-size: 0.85em;
+            color: var(--muted);
+            margin-top: -15px;
+            margin-bottom: 15px;
+        }
+        .back-link {
+            text-align: center;
+            margin-top: 20px;
+        }
+        .back-link a {
+            color: var(--accent);
+            text-decoration: none;
+            transition: opacity 0.22s;
+        }
+        .back-link a:hover {
+            opacity: 0.8;
+        }
+        .info-box {
+            background: rgba(16, 163, 127, 0.1);
+            border-left: 4px solid var(--accent);
+            padding: 12px;
+            border-radius: 6px;
+            margin-bottom: 20px;
+            font-size: 0.9em;
+        }
+    </style>
+    <script>
+        function validateForm(event) {
+            const password = document.getElementById('password').value;
+            const confirmPassword = document.getElementById('confirm_password').value;
+            
+            if (password.length < 8) {
+                alert('Password must be at least 8 characters long');
+                event.preventDefault();
+                return false;
+            }
+            
+            if (password !== confirmPassword) {
+                alert('Passwords do not match!');
+                event.preventDefault();
+                return false;
+            }
+            
+            return true;
+        }
+    </script>
+    <script src="/static/security.js"></script>
+</head>
+<body>
+    <div class="box">
+        <h2>📝 Create Account</h2>
+        <p class="subtitle">Join Assistify today</p>
+        
+        <div class="info-box">
+            ℹ️ You'll receive a verification code via email to confirm your account
+        </div>
+        
+        {% if error %}
+        <div class="error">
+            {% if error == "passwords_dont_match" %}
+                ⚠️ Passwords do not match!
+            {% elif error == "username_exists" %}
+                ⚠️ Username already taken. Please choose another.
+            {% elif error == "email_exists" %}
+                ⚠️ Email already registered. Please <a href="/" style="color: var(--light);">login</a>.
+            {% elif error == "email_send_failed" %}
+                ⚠️ Failed to send verification email. Please try again.
+            {% else %}
+                ⚠️ {{ error }}
+            {% endif %}
+        </div>
+        {% endif %}
+        
+        <form method="post" action="/register" onsubmit="return validateForm(event)">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="form-group">
+                <label for="full_name">Full Name</label>
+                <input type="text" id="full_name" name="full_name" required autofocus>
+            </div>
+            
+            <div class="form-group">
+                <label for="email">Email Address</label>
+                <input type="email" id="email" name="email" required>
+                <div class="helper-text">We'll send you a verification code</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" required pattern="[a-zA-Z0-9_]{3,20}" title="3-20 characters, letters, numbers and underscore only">
+                <div class="helper-text">3-20 characters, no special characters</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
+                <div class="helper-text">Minimum 8 characters</div>
+            </div>
+            
+            <div class="form-group">
+                <label for="confirm_password">Confirm Password</label>
+                <input type="password" id="confirm_password" name="confirm_password" required minlength="8" autocomplete="new-password">
+            </div>
+            
+            <input type="submit" value="Create Account">
+        </form>
+        
+        <div class="back-link">
+            Already have an account? <a href="/">Sign In</a>
+        </div>
+    </div>
+</body>
+</html>

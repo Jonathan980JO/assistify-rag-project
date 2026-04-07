@@ -1,0 +1,152 @@
+# =========================
+
+# Environment variables
+
+# =========================
+
+.env
+.env.local
+.env.production
+
+# =========================
+
+# Python
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =========================
+
+# Database
+
+# =========================
+
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+chroma_db_v3/
+chroma_db_reindex/
+
+# =========================
+
+# IDE / OS
+
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =========================
+
+# Logs
+
+# =========================
+
+logs/
+*.log
+
+# =========================
+
+# Secrets and credentials
+
+# =========================
+
+secrets/
+credentials/
+*.pem
+*.key
+*.cert
+
+# =========================
+
+# Testing
+
+# =========================
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+
+# Models (VERY LARGE)
+
+# =========================
+
+backend/Models/
+*.gguf
+*.bin
+*.safetensors
+*.pth
+*.pt
+Qwen2.5-7B-GGUF/
+
+# =========================
+
+# Assets (local PDFs only)
+
+# =========================
+
+backend/assets/*.pdf
+
+# =========================
+
+# TEMP / DEBUG FILES (IMPORTANT)
+
+# =========================
+
+tmp/
+tmp_*
+tmp_*.txt
+*.diff
+
+# =========================
+
+# RAG Evaluation / Outputs
+
+# =========================
+
+run_queries_results_*
+phase_eval_*
+ws_*
+**results**
+**patchcheck**
+**diagnostic**
+**debug**
+
+# =========================
+
+# Large backups
+
+# =========================
+
+*.zip

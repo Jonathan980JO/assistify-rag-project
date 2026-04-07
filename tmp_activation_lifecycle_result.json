@@ -1,0 +1,185 @@
+{
+  "steps": [
+    {
+      "step": "set_single_empty",
+      "result": {
+        "mode": "single",
+        "active_sources": []
+      }
+    },
+    {
+      "step": "delete_all",
+      "files_before": [
+        {
+          "filename": "6ef9b981_psychology_test.pdf",
+          "chunks": 2,
+          "doc_id": "upload_6aee0b81_6ef9b981_psychology_test.pdf"
+        }
+      ],
+      "deletions": [
+        {
+          "filename": "6ef9b981_psychology_test.pdf",
+          "delete": {
+            "deleted": 2,
+            "files_removed": [
+              "6ef9b981_psychology_test.pdf"
+            ],
+            "removed_filename": "6ef9b981_psychology_test.pdf",
+            "removed_from_active_sources": false,
+            "active_sources": []
+          }
+        }
+      ],
+      "files_after": []
+    },
+    {
+      "step": "upload_management",
+      "upload": {
+        "message": "✓ File '2bc5c742_management_test.pdf' uploaded and indexed as 2 chunk(s). Size: 0.0MB",
+        "filename": "2bc5c742_management_test.pdf",
+        "chunks_indexed": 2,
+        "chunks_generated": 2,
+        "extracted_char_count": 3483,
+        "extracted_page_count": 1,
+        "non_empty_pages": 1,
+        "extraction_errors": 0,
+        "file_size_mb": 0.004161834716796875,
+        "doc_mode": "single",
+        "deleted_for_overwrite": 0,
+        "removed_assets": [],
+        "dedup_deleted": 0,
+        "dedup_removed_assets": [],
+        "active_collection": "support_docs_v3_latest",
+        "active_sources": [
+          "management_test.pdf"
+        ],
+        "ready_state": {
+          "state": "ready",
+          "message": "Document indexed and active for retrieval",
+          "filename": "2bc5c742_management_test.pdf",
+          "updated_at": 1775438420.952873
+        }
+      },
+      "ready": {
+        "ready": true,
+        "reason": "ready",
+        "state": {
+          "state": "ready",
+          "message": "Document indexed and active for retrieval",
+          "filename": "2bc5c742_management_test.pdf",
+          "updated_at": 1775438420.952873
+        },
+        "doc_mode": "single",
+        "active_sources": [
+          "management_test.pdf"
+        ],
+        "active_collection": "support_docs_v3_latest",
+        "active_collection_chunks": 2
+      },
+      "doc_mode": {
+        "mode": "single",
+        "active_sources": [
+          "management_test.pdf"
+        ]
+      }
+    },
+    {
+      "step": "query_mgmt_sm",
+      "answer": "Scientific management is a management theory proposed by Frederick Taylor."
+    },
+    {
+      "step": "delete_management",
+      "delete": {
+        "deleted": 2,
+        "files_removed": [
+          "2bc5c742_management_test.pdf"
+        ],
+        "removed_filename": "2bc5c742_management_test.pdf",
+        "removed_from_active_sources": true,
+        "active_sources": []
+      },
+      "doc_mode": {
+        "mode": "single",
+        "active_sources": []
+      }
+    },
+    {
+      "step": "upload_psychology",
+      "upload": {
+        "message": "✓ File 'eb7343ba_psychology_test.pdf' uploaded and indexed as 2 chunk(s). Size: 0.0MB",
+        "filename": "eb7343ba_psychology_test.pdf",
+        "chunks_indexed": 2,
+        "chunks_generated": 2,
+        "extracted_char_count": 3424,
+        "extracted_page_count": 1,
+        "non_empty_pages": 1,
+        "extraction_errors": 0,
+        "file_size_mb": 0.004105567932128906,
+        "doc_mode": "single",
+        "deleted_for_overwrite": 0,
+        "removed_assets": [],
+        "dedup_deleted": 0,
+        "dedup_removed_assets": [],
+        "active_collection": "support_docs_v3_latest",
+        "active_sources": [
+          "psychology_test.pdf"
+        ],
+        "ready_state": {
+          "state": "ready",
+          "message": "Document indexed and active for retrieval",
+          "filename": "eb7343ba_psychology_test.pdf",
+          "updated_at": 1775438421.268548
+        }
+      },
+      "ready": {
+        "ready": true,
+        "reason": "ready",
+        "state": {
+          "state": "ready",
+          "message": "Document indexed and active for retrieval",
+          "filename": "eb7343ba_psychology_test.pdf",
+          "updated_at": 1775438421.268548
+        },
+        "doc_mode": "single",
+        "active_sources": [
+          "psychology_test.pdf"
+        ],
+        "active_collection": "support_docs_v3_latest",
+        "active_collection_chunks": 2
+      },
+      "doc_mode": {
+        "mode": "single",
+        "active_sources": [
+          "psychology_test.pdf"
+        ]
+      }
+    },
+    {
+      "step": "query_psych",
+      "answer": "Psychology is the scientific study of mind and behavior."
+    },
+    {
+      "step": "query_old_topic_after_switch",
+      "answer": "Not found in the document.",
+      "is_not_found": true
+    },
+    {
+      "step": "set_single_empty_again",
+      "result": {
+        "mode": "single",
+        "active_sources": []
+      },
+      "doc_mode": {
+        "mode": "single",
+        "active_sources": []
+      }
+    },
+    {
+      "step": "query_with_no_active_source",
+      "answer": "Not found in the document.",
+      "is_not_found": true
+    }
+  ],
+  "pass_step8": true,
+  "pass_step10": true
+}

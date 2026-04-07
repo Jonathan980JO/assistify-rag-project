@@ -1,0 +1,244 @@
+
+> async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: 
+str, user, cancel_event: asyncio.Event = None, t_meta=None, language: str = 
+"en"):
+      """Stream LLM response with overlapping TTS via producer-consumer 
+pipeline.
+  
+      Architecture:
+      - LLM Producer: Streams tokens from Ollama, detects sentence boundaries,
+        sends text chunks to browser for display, pushes sentences to TTS 
+queue.
+      - TTS Consumer: Reads sentences from queue, sends to XTTS microservice,
+        streams PCM audio chunks back to browser via WebSocket binary frames.
+      - Both run concurrently via asyncio.gather for maximum overlap.
+  
+      This eliminates the delay by starting TTS generation as soon as
+      the first sentence is ready, while LLM continues generating more text.
+      """
+      import time
+      start_time = time.time()
+      perf_start = time.perf_counter()
+      vram_llm_before = 0
+      if torch.cuda.is_available():
+          vram_llm_before = torch.cuda.memory_reserved(0) / 1024**2
+      
+      t_meta = t_meta or {}
+      t_meta["llm_send"] = perf_start
+      t_meta["vram_llm_before"] = vram_llm_before
+      if not text or len(text.strip()) < 2:
+          try:
+              await websocket.send_json({"type": "aiResponse", "text": "I 
+didn't catch that. Could you repeat?", "sources": 0})
+          except Exception:
+              pass
+          return
+      
+      # Update conversation timestamp
+      conversation_timestamps[connection_id] = time.time()
+      if len(conversation_history) % 100 == 0:
+          cleanup_old_conversations()
+      
+      history = conversation_history[connection_id]
+  
+      # ===== ARABIC LANGUAGE HANDLING =====
+      # Auto-detect if caller passed "auto"
+      if language == "auto":
+          language = _detect_language(text)
+  
+      arabic_mode = (language == "ar")
+      xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
+      original_arabic_text = text  # preserve for later use
+      query_style = _analyze_query_style(original_arabic_text if arabic_mode 
+else text)
+      retrieval_top_k = 6 if query_style.get("is_compare") else (5 if 
+query_style.get("is_list") else 4)
+      _prefetched_rag_docs = None  # cached from Arabic guard check to avoid 
+double RAG search
+  
+      # Track translation time separately so it does not inflate LLM latency
+      t_translate_done: float | None = None
+      _translate_was_cached: bool = False
+  
+      if arabic_mode:
+          # Register the per-connection ws-write lock early (before any 
+concurrent
+          # task can race on the socket).
+          if connection_id not in _ws_write_locks:
+              _ws_write_locks[connection_id] = asyncio.Lock()
+          _ack_lock = _ws_write_locks[connection_id]
+  
+          # 1. Allow small talk in Arabic (greetings, thanks, etc.)
+          if _is_arabic_small_talk(text):
+              logger.info(f"{connection_id} Arabic small-talk detected — 
+routing through normally")
+              text_for_rag = text  # will be handled as greeting below
+              arabic_small_talk = True
+  
+              # For small-talk just fire the ack and continue (no translation 
+needed)
+              if _arabic_ack_pcm:
+                  try:
+                      async with _ack_lock:
+                          await websocket.send_json({"type": "ttsAudioStart", 
+"sampleRate": 24000})
+                          await websocket.send_bytes(_arabic_ack_pcm)
+                          await websocket.send_json({"type": "ttsAudioEnd"})
+                      t_meta["first_ack_sent"] = time.perf_counter()
+                  except Exception:
+                      pass
+          else:
+              arabic_small_talk = False
+  
+              # Prefer multilingual retrieval directly on Arabic query; 
+translation is fallback only.
+              logger.info(f"{connection_id} Arabic mode: trying direct Arabic 
+semantic retrieval first")
+  
+              async def _send_ack_coro():
+                  if _arabic_ack_pcm:
+                      try:
+                          async with _ack_lock:
+                              await websocket.send_json({"type": 
+"ttsAudioStart", "sampleRate": 24000})
+                              await websocket.send_bytes(_arabic_ack_pcm)
+                              await websocket.send_json({"type": 
+"ttsAudioEnd"})
+                          t_meta["first_ack_sent"] = time.perf_counter()
+                      except Exception:
+                          pass
+  
+              async def _translate_coro():
+                  nonlocal _translate_was_cached
+                  import re
+  
+                  def _is_usable_en(candidate: str, source_text: str) -> bool:
+                      c = (candidate or "").strip()
+                      if not c:
+                          return False
+                      if c == (source_text or "").strip():
+                          return False
+                      latin_chars = sum(1 for ch in c if ('a' <= ch.lower() <= 
+'z'))
+                      arabic_chars = sum(1 for ch in c if '\u0600' <= ch <= 
+'\u06FF')
+                      return latin_chars >= 3 and latin_chars >= arabic_chars
+  
+                  # --- Cache check: skip Google API for repeated/identical 
+queries ---
+                  cached = _translation_cache_get(text)
+                  if cached and _is_usable_en(cached, text):
+                      if "التنظيم" in text and 
+re.search(r"\bregulation\b", cached, flags=re.IGNORECASE):
+                          cached = re.sub(r"\bregulation\b", "organization", 
+cached, flags=re.IGNORECASE)
+                      logger.info(f"Translation (cache hit): '{text[:60]}' → 
+'{cached[:60]}'")
+                      _translate_was_cached = True
+                      return cached
+                  # --- Live translation via deep_translator (Google) ---
+                  try:
+                      result = await asyncio.get_event_loop().run_in_executor(
+                          None,
+                          lambda: __import__('deep_translator', 
+fromlist=['GoogleTranslator'])
+                                     .GoogleTranslator(source='ar', 
+target='en').translate(text)
+                      )
+                      translated = result if result else text
+                      if not _is_usable_en(translated, text):
+                          raise RuntimeError("deep_translator returned 
+unusable EN output")
+                      if "التنظيم" in text and 
+re.search(r"\bregulation\b", translated, flags=re.IGNORECASE):
+                          translated = re.sub(r"\bregulation\b", 
+"organization", translated, flags=re.IGNORECASE)
+                      _translation_cache_put(text, translated)
+                      return translated
+                  except Exception as _te:
+                      logger.warning(f"deep_translator AR→EN failed ({_te}) 
+— falling back to LLM translation")
+                      try:
+                          fallback = await asyncio.wait_for(
+                              translate_with_llm(text, "ar", "en"), 
+timeout=20.0
+                          )
+                          if not _is_usable_en(fallback, text):
+                              return text
+                          if "التنظيم" in text and 
+re.search(r"\bregulation\b", fallback, flags=re.IGNORECASE):
+                              fallback = re.sub(r"\bregulation\b", 
+"organization", fallback, flags=re.IGNORECASE)
+                          _translation_cache_put(text, fallback)
+                          return fallback
+                      except Exception:
+                          return text
+  
+              await _send_ack_coro()
+              rag_docs_check = await _async_rag_search(
+                  original_arabic_text,
+                  top_k=retrieval_top_k,
+                  distance_threshold=RAG_STRICT_DISTANCE_THRESHOLD,
+                  return_dicts=True,
+              )
+  
+              if not rag_docs_check:
+                  text_for_rag = await _translate_coro()
+                  t_translate_done = time.perf_counter()
+                  t_meta["translate_done"] = t_translate_done
+                  logger.info(f"Translated helper query (Arabic→English): 
+'{text[:60]}' → '{text_for_rag[:60]}'")
+                  rag_docs_check = await _async_rag_search(
+                      text_for_rag,
+                      top_k=retrieval_top_k,
+                      distance_threshold=RAG_STRICT_DISTANCE_THRESHOLD,
+                      return_dicts=True,
+                  )
+  
+              _prefetched_rag_docs = rag_docs_check  # reuse in the main RAG 
+block
+              if not rag_docs_check:
+                  logger.info(f"{connection_id} RAG strict guard triggered — 
+no RAG docs found for Arabic query/fallback")
+                  try:
+                      fallback_text = RAG_NO_MATCH_RESPONSE
+                      await websocket.send_json({
+                          "type": "aiResponseChunk", "text": fallback_text,
+                          "index": 0, "done": True
+                      })
+                      await _tts_single_response(fallback_text, websocket, 
+connection_id, language="ar")
+  
+                      await websocket.send_json({
+                          "type": "aiResponseDone",
+                          "fullText": fallback_text,
+                          "sources": 0,
+                          "arabic_mode": True,
+                          "timing": t_meta,
+                      })
+                  except Exception:
+                      pass
+                  return
+              # Keep original Arabic query semantically intact for downstream 
+behavior.
+              text = original_arabic_text
+      else:
+          arabic_small_talk = False
+  
+      # RAG search (same as non-streaming)
+      greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good 
+morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
+      # In Arabic small-talk mode, treat as greeting
+      is_greeting = arabic_small_talk or (len(text.strip().split()) <= 3 and 
+any(pattern in text.lower() for pattern in greeting_patterns))
+  
+      if is_greeting:
+          relevant_docs = []
+      elif _prefetched_rag_docs is not None:
+          # Arabic path: reuse result from guard check — avoids a second 
+identical RAG search
+          relevant_docs = _prefetched_rag_docs
+      else:
+
+
+

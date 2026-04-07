@@ -1,0 +1,186 @@
+Assistify Final RAG Evaluation - 2026-04-02 19:26:53
+Route used: HTTP http://127.0.0.1:7000/query
+Raw total summary: PASS=19 PARTIAL=1 FAIL=12 TOTAL=32
+
+RAG QUALITY SUMMARY
+- Raw total: PASS=19 PARTIAL=1 FAIL=12 TOTAL=32
+- In-scope accuracy: 19/27 = 70.37%
+- Out-of-scope refusal accuracy: 0/5 = 0.00%
+- Weighted overall score: 56.30%
+
+[PASS] What is scientific management?
+  Answer: He is known as the "father of scientific management" because he helped make the field of mana gement a science field.
+  Reason: clean definition/biography sentence
+
+[PASS] Define management.
+  Answer: Management is an ethereal endeavor: it is a conceptual idea that cannot be observed or physically interacted with, while its effects can be perceived by the outcomes achieved, which can be either favorable or unfavorable. Management involves decision, which is not always possible for every situation, sometimes manager has to take decision on the ba
+  Reason: clean definition/biography sentence
+
+[PASS] What is planning?
+  Answer: If an organization fails to achieves its results then it is the planning which is defective.
+  Reason: clean definition/biography sentence
+
+[PASS] What is decision-making?
+  Answer: Terry, “Decision making is the selection of one behaviour alternative from two or more possible alternatives.”
+  Reason: clean definition/biography sentence
+
+[PASS] What is administrative management?
+  Answer: Limited administrative hierarchy: Whenever feasible, it is advisable to establish a minimal number of management levels.
+  Reason: clean definition/biography sentence
+
+[PARTIAL] What is bureaucracy?
+  Answer: Introduction Concepts, Objectives, Nature Scope and Significance of Management Evolution … 17 Criticism of Bureaucracy Theory: The bureaucratic idea is subject to significant criticism for its sluggish work culture, which can be attributed to various inherent factors such as red tape, excessive paperwork, and superfluous and convoluted rules and re
+  Reason: definition signal present but quality contamination detected
+  Flags: criticism_as_definition
+
+[PASS] Who is Frederick Taylor?
+  Answer: Frederick Winslow Taylor was a management thinker mentioned in the document.
+  Reason: clean definition/biography sentence
+
+[PASS] Who is Henry Fayol?
+  Answer: The contemporary significance of these principles is evident, therefore establishing Henry Fayol as the esteemed 'Father of Modern Management'.
+  Reason: clean definition/biography sentence
+
+[PASS] Who is Max Weber?
+  Answer: Max Weber was German sociologist and the author of "The Protestant Ethic and the Spirit of Capitalism." He advocated for the use of certa in norms and a formal structure in organizational management, emphasizing the importance of maintaining an impersonal relationship between employers and employees.
+  Reason: clean definition/biography sentence
+
+[FAIL] Who is considered the father of scientific management?
+  Answer: He is known as the "father of scientific management" because he helped make the field of mana gement a science field.
+  Reason: person-entity question answered without a clear person name
+  Flags: missing_person_name
+
+[PASS] Who introduced administrative theory?
+  Answer: Henry Fayol Bureaucratic introduced administrative theory.
+  Reason: clean definition/biography sentence
+
+[FAIL] Steps in planning process
+  Answer: I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.
+  Reason: list/structure answer not clearly structured
+
+[PASS] Advantages of scientific management
+  Answer: - 3: Types of Functional Foreman
+- Speed boss Maintains planned speed of production
+- Inspector Matching work done according to the standard set
+- Maintenance Foreman Maintenance of machines and equipment
+- Route Clerk Determine the process of job
+- Instruction Card Clerk Laying down the instructions for the workers
+- 2: Works of F.W. Taylor
+- Scie
+  Reason: structured list/sectional answer
+
+[PASS] Disadvantages of scientific management
+  Answer: - 2: Works of F.W. Taylor
+- Scientific Management Frederick Winslow Taylor
+- Administrative Theory Henry Fayol
+  Reason: structured list/sectional answer
+
+[PASS] Types of management approaches
+  Answer: - There are four distinct types of management activities: interpersonal
+- goal -oriented
+- decision -making
+- information exchange
+- both receiving
+- Management as Group : Collectively
+- management consists of the people
+- groups responsible for the day -to-day operations of an organization
+  Reason: structured list/sectional answer
+
+[FAIL] Phases of management process
+  Answer: I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.
+  Reason: list/structure answer not clearly structured
+
+[PASS] Levels of management
+  Answer: - The scientific management ideas put forward by
+- W. Taylor
+- which are part of the classical approach
+- we need to look at
+- including individual
+- sorting books
+- other resources
+- setting goals
+  Reason: structured list/sectional answer
+
+[PASS] Functions of management
+  Answer: - Controlling. But Harold Koontz
+- figures of past
+- setting premises
+- finding different alternative solutions or steps
+- evaluation of these alternatives
+- selecting the best alternatives taking into consideration the cost
+- men and women
+- market MANAGEMENT FUNCTIONS
+  Reason: structured list/sectional answer
+
+[FAIL] What are the disadvantages of bureaucracy?
+  Answer: I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.
+  Reason: list/structure answer not clearly structured
+
+[PASS] What are the advantages of administrative management?
+  Answer: - As a result of technological developments
+- top managers can not make all decisions alone
+- the movement towards decentralisation. Organizing: Concept
+- Nature of Organizing
+- Most speedy
+- need for decentralisation
+- relieves them of the anxiety of details
+- allows them to concentrate on other important tasks of planning
+  Reason: structured list/sectional answer
+
+[FAIL] What happens in planning?
+  Answer: I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.
+  Reason: list/structure answer not clearly structured
+
+[PASS] Explain planning process
+  Answer: - Development of planning premises
+- Identification of different alternatives
+- Evaluation and selection of best alternative
+- Formulation of detailed or derivative plan
+- Setting of sequence and scheduling of operations
+  Reason: structured list/sectional answer
+
+[PASS] What topics are covered in Chapter 2?
+  Answer: Chapter 2 discusses:
+- Chapter 2
+  Reason: structured overview/chapter/compare answer
+
+[FAIL] What is discussed in Chapter 1?
+  Answer: I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.
+  Reason: overview/chapter/compare answer not clearly structured
+
+[PASS] What are the main sections in this document?
+  Answer: Main topics/sections:
+- Chapter 5
+- 2
+- Section 5.7.2
+- Chapter 2
+  Reason: structured overview/chapter/compare answer
+
+[FAIL] What does this document talk about?
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: overview/chapter/compare answer not clearly structured
+
+[PASS] What is the difference between scientific management and administrative management?
+  Answer: - Scientific Management summary: From a social perspective, it is necessary for an entity to offer attractive goods and services while efficiently and Introduction Concepts, Objectives, Nature Scope and Significance of Management Evolution … 5 effectively utilizing the resources of society through proper management procedures.
+- Administrative Mana
+  Reason: structured overview/chapter/compare answer
+
+[FAIL] What is machine learning?
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: out-of-scope did not return strict not-found
+
+[FAIL] What is blockchain?
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: out-of-scope did not return strict not-found
+
+[FAIL] Who is Elon Musk?
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: out-of-scope did not return strict not-found
+
+[FAIL] Explain artificial intelligence
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: out-of-scope did not return strict not-found
+
+[FAIL] What is cybersecurity?
+  Answer: That topic doesn’t appear to be covered in the current documents.
+  Reason: out-of-scope did not return strict not-found

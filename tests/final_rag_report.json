@@ -1,0 +1,382 @@
+{
+  "timestamp": "2026-04-02 19:26:53",
+  "login_base": "http://127.0.0.1:7001",
+  "rag_base": "http://127.0.0.1:7000",
+  "auth": {
+    "get_login": {
+      "status": 200,
+      "url": "http://127.0.0.1:7001/login"
+    },
+    "attempts": [
+      {
+        "username": "admin",
+        "status": 302,
+        "location": "/admin",
+        "has_session_cookie": true
+      }
+    ],
+    "post_login": {
+      "status": 302,
+      "location": "/admin"
+    },
+    "cookies_after": {
+      "csrf_token": "875401817cd345308734de4584d2cd56",
+      "session": ".eJxtyzsPgjAYheH_0hkNVEmF0UsCygYYdGk-2kabFKq9EIzxv9vRwfE8Oe8beSvMCINAOQI-yBFFyGj1O8G7O30YPUkuTHClGajgVlgr9UglD3hY3Mqsb0zblXrvT_ZyrrKm3xXd8VkXM762s5NVXW8ZtiFlRoATnIJDeUJImqQxWcfLTUxWGJMIKbCOAnNyku717_L5AizIOew.unn5Q1KSKWdX_6TcJ-c-uMwjs6U"
+    },
+    "chosen_username": "admin"
+  },
+  "route_choice": {
+    "kind": "http",
+    "base": "http://127.0.0.1:7000",
+    "path": "/query",
+    "evidence": [
+      "backend_post_routes=['/analytics/feedback', '/arabic/download', '/query', '/rag/clear-cache', '/rag/delete', '/rag/doc-mode', '/rag/reindex-all', '/rag/reindex-file', '/rag/update', '/tts', '/upload_rag']",
+      "login_post_routes=['/api/customers/{customer_id}/activate', '/api/customers/{customer_id}/deactivate', '/api/customers/{customer_id}/notes', '/api/customers/{customer_id}/trigger-password-reset', '/api/feedback/thumbs', '/api/knowledge/clear-cache', '/api/notifications/mark-all-read', '/api/notifications/{notification_id}/read', '/api/support/ticket/create', '/api/support/ticket/{ticket_id}/assign', '/api/support/ticket/{ticket_id}/escalate', '/api/support/ticket/{ticket_id}/message', '/api/support/ticket/{ticket_id}/resolve', '/api/users/create', '/api/users/{user_id}/activate', '/api/users/{user_id}/change-role', '/api/users/{user_id}/deactivate', '/api/users/{user_id}/update-profile', '/arabic/download', '/change-username', '/feedback', '/forgot-password', '/login', '/profile/change-email', '/profile/change-password', '/profile/verify-email-change', '/profile/verify-password-change', '/proxy/upload_rag', '/register', '/reset-password', '/tts', '/users', '/users/{user_id}/mfa-enable', '/verify-otp']",
+      "http_probe_success={'base': 'http://127.0.0.1:7000', 'route': '/query', 'status': 200, 'latency_ms': 12529, 'body_preview': \"{'answer': 'Management is also considered as a social process as it involves interaction with numerous persons or members of the society such as employees, investors, supplier, government, creditors, debtors, customers etc.'}\"}",
+      "probes=[{'base': 'http://127.0.0.1:7000', 'route': '/query', 'status': 200, 'latency_ms': 12529, 'body_preview': \"{'answer': 'Management is also considered as a social process as it involves interaction with numerous persons or members of the society such as employees, investors, supplier, government, creditors, debtors, customers etc.'}\"}]"
+    ]
+  },
+  "raw_total_summary": {
+    "total": 32,
+    "pass": 19,
+    "partial": 1,
+    "fail": 12
+  },
+  "rag_quality_summary": {
+    "in_scope_total": 27,
+    "in_scope_pass": 19,
+    "in_scope_fail": 8,
+    "in_scope_accuracy": 0.7037,
+    "out_of_scope_total": 5,
+    "out_of_scope_pass": 0,
+    "out_of_scope_fail": 5,
+    "out_of_scope_accuracy": 0.0,
+    "weighted_score": 0.563
+  },
+  "results": [
+    {
+      "category": "in_scope_definition_entity",
+      "question": "What is scientific management?",
+      "answer": "He is known as the \"father of scientific management\" because he helped make the field of mana gement a science field.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 9822,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Define management.",
+      "answer": "Management is an ethereal endeavor: it is a conceptual idea that cannot be observed or physically interacted with, while its effects can be perceived by the outcomes achieved, which can be either favorable or unfavorable. Management involves decision, which is not always possible for every situation, sometimes manager has to take decision on the basis of his/her past experience and knowledge. Hence it can be concluded that decision making is only a part of the management and therefore cannot be called as equal or synonymous to management.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 1782,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "What is planning?",
+      "answer": "If an organization fails to achieves its results then it is the planning which is defective.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 894,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "What is decision-making?",
+      "answer": "Terry, “Decision making is the selection of one behaviour alternative from two or more possible alternatives.”",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 887,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "What is administrative management?",
+      "answer": "Limited administrative hierarchy: Whenever feasible, it is advisable to establish a minimal number of management levels.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 2007,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "What is bureaucracy?",
+      "answer": "Introduction Concepts, Objectives, Nature Scope and Significance of Management Evolution … 17 Criticism of Bureaucracy Theory: The bureaucratic idea is subject to significant criticism for its sluggish work culture, which can be attributed to various inherent factors such as red tape, excessive paperwork, and superfluous and convoluted rules and regulations.",
+      "status": "PARTIAL",
+      "reason": "definition signal present but quality contamination detected",
+      "quality_flags": [
+        "criticism_as_definition"
+      ],
+      "latency_ms": 1022,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Who is Frederick Taylor?",
+      "answer": "Frederick Winslow Taylor was a management thinker mentioned in the document.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 1952,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Who is Henry Fayol?",
+      "answer": "The contemporary significance of these principles is evident, therefore establishing Henry Fayol as the esteemed 'Father of Modern Management'.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 832,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Who is Max Weber?",
+      "answer": "Max Weber was German sociologist and the author of \"The Protestant Ethic and the Spirit of Capitalism.\" He advocated for the use of certa in norms and a formal structure in organizational management, emphasizing the importance of maintaining an impersonal relationship between employers and employees.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 815,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Who is considered the father of scientific management?",
+      "answer": "He is known as the \"father of scientific management\" because he helped make the field of mana gement a science field.",
+      "status": "FAIL",
+      "reason": "person-entity question answered without a clear person name",
+      "quality_flags": [
+        "missing_person_name"
+      ],
+      "latency_ms": 843,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_definition_entity",
+      "question": "Who introduced administrative theory?",
+      "answer": "Henry Fayol Bureaucratic introduced administrative theory.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "quality_flags": [],
+      "latency_ms": 1693,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Steps in planning process",
+      "answer": "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.",
+      "status": "FAIL",
+      "reason": "list/structure answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 379,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Advantages of scientific management",
+      "answer": "- 3: Types of Functional Foreman\n- Speed boss Maintains planned speed of production\n- Inspector Matching work done according to the standard set\n- Maintenance Foreman Maintenance of machines and equipment\n- Route Clerk Determine the process of job\n- Instruction Card Clerk Laying down the instructions for the workers\n- 2: Works of F.W. Taylor\n- Scientific Management Frederick Winslow Taylor\n- Administrative Theory Henry Fayol",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 362,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Disadvantages of scientific management",
+      "answer": "- 2: Works of F.W. Taylor\n- Scientific Management Frederick Winslow Taylor\n- Administrative Theory Henry Fayol",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 378,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Types of management approaches",
+      "answer": "- There are four distinct types of management activities: interpersonal\n- goal -oriented\n- decision -making\n- information exchange\n- both receiving\n- Management as Group : Collectively\n- management consists of the people\n- groups responsible for the day -to-day operations of an organization",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 368,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Phases of management process",
+      "answer": "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.",
+      "status": "FAIL",
+      "reason": "list/structure answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 350,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Levels of management",
+      "answer": "- The scientific management ideas put forward by\n- W. Taylor\n- which are part of the classical approach\n- we need to look at\n- including individual\n- sorting books\n- other resources\n- setting goals",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 350,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Functions of management",
+      "answer": "- Controlling. But Harold Koontz\n- figures of past\n- setting premises\n- finding different alternative solutions or steps\n- evaluation of these alternatives\n- selecting the best alternatives taking into consideration the cost\n- men and women\n- market MANAGEMENT FUNCTIONS",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 335,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "What are the disadvantages of bureaucracy?",
+      "answer": "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.",
+      "status": "FAIL",
+      "reason": "list/structure answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 596,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "What are the advantages of administrative management?",
+      "answer": "- As a result of technological developments\n- top managers can not make all decisions alone\n- the movement towards decentralisation. Organizing: Concept\n- Nature of Organizing\n- Most speedy\n- need for decentralisation\n- relieves them of the anxiety of details\n- allows them to concentrate on other important tasks of planning",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 625,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "What happens in planning?",
+      "answer": "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.",
+      "status": "FAIL",
+      "reason": "list/structure answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 11473,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_list_structure",
+      "question": "Explain planning process",
+      "answer": "- Development of planning premises\n- Identification of different alternatives\n- Evaluation and selection of best alternative\n- Formulation of detailed or derivative plan\n- Setting of sequence and scheduling of operations",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "quality_flags": [],
+      "latency_ms": 335,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_overview_compare",
+      "question": "What topics are covered in Chapter 2?",
+      "answer": "Chapter 2 discusses:\n- Chapter 2",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "quality_flags": [],
+      "latency_ms": 1158,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_overview_compare",
+      "question": "What is discussed in Chapter 1?",
+      "answer": "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question.",
+      "status": "FAIL",
+      "reason": "overview/chapter/compare answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 4640,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_overview_compare",
+      "question": "What are the main sections in this document?",
+      "answer": "Main topics/sections:\n- Chapter 5\n- 2\n- Section 5.7.2\n- Chapter 2",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "quality_flags": [],
+      "latency_ms": 621,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_overview_compare",
+      "question": "What does this document talk about?",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "overview/chapter/compare answer not clearly structured",
+      "quality_flags": [],
+      "latency_ms": 383,
+      "http_status": 200
+    },
+    {
+      "category": "in_scope_overview_compare",
+      "question": "What is the difference between scientific management and administrative management?",
+      "answer": "- Scientific Management summary: From a social perspective, it is necessary for an entity to offer attractive goods and services while efficiently and Introduction Concepts, Objectives, Nature Scope and Significance of Management Evolution … 5 effectively utilizing the resources of society through proper management procedures.\n- Administrative Management summary: From a social perspective, it is necessary for an entity to offer attractive goods and services while efficiently and Introduction Concepts, Objectives, Nature Scope and Significance of Management Evolution … 5 effectively utilizing the resources of society through proper management procedures.\n- Key difference: Scientific Management and Administrative Management differ in their main focus and approach to management.",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "quality_flags": [],
+      "latency_ms": 2945,
+      "http_status": 200
+    },
+    {
+      "category": "out_of_scope",
+      "question": "What is machine learning?",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "quality_flags": [],
+      "latency_ms": 2396,
+      "http_status": 200
+    },
+    {
+      "category": "out_of_scope",
+      "question": "What is blockchain?",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "quality_flags": [],
+      "latency_ms": 2691,
+      "http_status": 200
+    },
+    {
+      "category": "out_of_scope",
+      "question": "Who is Elon Musk?",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "quality_flags": [],
+      "latency_ms": 3084,
+      "http_status": 200
+    },
+    {
+      "category": "out_of_scope",
+      "question": "Explain artificial intelligence",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "quality_flags": [],
+      "latency_ms": 516,
+      "http_status": 200
+    },
+    {
+      "category": "out_of_scope",
+      "question": "What is cybersecurity?",
+      "answer": "That topic doesn’t appear to be covered in the current documents.",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "quality_flags": [],
+      "latency_ms": 3273,
+      "http_status": 200
+    }
+  ]
+}

@@ -1,0 +1,314 @@
+"""
+Adaptive TTS Chunk Manager
+===========================
+Dynamically adjusts the number of words per TTS chunk based on real-time
+system performance, ensuring minimal latency and natural speech output.
+
+Performance Tiers:
+  - Fast   (< 4 s first-chunk):  12–15 words per chunk
+  - Medium (4–6 s first-chunk):  10–12 words per chunk
+  - Slow   (> 6 s first-chunk):   8–10 words per chunk
+
+The manager also recommends inter-chunk buffer delays (0.2–0.5 s) for
+slow systems so audio transitions stay smooth.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import time
+import threading
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Optional
+
+logger = logging.getLogger("adaptive_chunk")
+
+# ---------------------------------------------------------------------------
+# Performance tier definitions
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Tier:
+    name: str
+    min_words: int
+    max_words: int
+    buffer_delay: float  # seconds between TTS chunks (0 = no delay)
+
+
+TIER_FAST   = _Tier("fast",   12, 15, 0.0)
+TIER_MEDIUM = _Tier("medium", 10, 12, 0.1)  # Tuned: buffer 0.1s (benchmark RTF < 1.0)
+TIER_SLOW   = _Tier("slow",    6,  8, 0.3)  # Tuned: reduced words for faster synthesis
+
+# Thresholds (seconds) for the first TTS chunk latency
+_FAST_THRESHOLD   = 4.0
+_MEDIUM_THRESHOLD = 6.0
+
+# How many recent measurements to keep for rolling average
+_HISTORY_SIZE = 20
+
+
+# ---------------------------------------------------------------------------
+# Per-query snapshot returned after each query
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChunkPerformanceSnapshot:
+    """Immutable record of how one query performed."""
+    first_chunk_latency_s: float
+    tier: _Tier
+    words_per_chunk: int
+    buffer_delay_s: float
+    total_chunks: int = 0
+    total_tts_time_s: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# Adaptive Chunk Manager (singleton-friendly, thread-safe)
+# ---------------------------------------------------------------------------
+
+class AdaptiveChunkManager:
+    """Decides how many words each TTS chunk should contain and what
+    inter-chunk delay to apply, based on measured first-chunk latency.
+
+    Usage:
+        mgr = AdaptiveChunkManager()
+
+        # Before a new query — get current recommendation
+        words, buf = mgr.recommended_chunk_size()
+
+        # After the first TTS chunk arrives — record the latency
+        mgr.record_first_chunk_latency(latency_s)
+
+        # The manager may update its recommendation mid-query:
+        words, buf = mgr.current_chunk_size()
+
+        # After the query is done — finalise stats
+        mgr.finish_query(total_chunks, total_tts_time)
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+        # Rolling history of first-chunk latencies (seconds)
+        self._latency_history: deque[float] = deque(maxlen=_HISTORY_SIZE)
+
+        # Current tier (start optimistic)
+        self._tier: _Tier = TIER_FAST
+
+        # The exact word count chosen for the *current* query
+        self._words_per_chunk: int = TIER_FAST.max_words
+        self._buffer_delay: float = TIER_FAST.buffer_delay
+
+        # Stats
+        self._total_queries: int = 0
+        self._snapshots: deque[ChunkPerformanceSnapshot] = deque(maxlen=50)
+
+        # Flag: has the first chunk of the *current* query been recorded?
+        self._first_chunk_recorded: bool = False
+
+        logger.info(
+            "AdaptiveChunkManager initialised | tier=%s words=%d buf=%.2fs",
+            self._tier.name, self._words_per_chunk, self._buffer_delay,
+        )
+
+    # ----- public API -------------------------------------------------------
+
+    def begin_query(self) -> tuple[int, float]:
+        """Call at the start of each query.
+
+        Returns ``(words_per_chunk, buffer_delay_seconds)`` based on the
+        rolling average of previous queries.
+        """
+        with self._lock:
+            self._first_chunk_recorded = False
+            self._total_queries += 1
+
+            # Every 3 queries, re-evaluate the tier from rolling average
+            if self._total_queries > 1 and self._latency_history:
+                self._reevaluate_tier()
+
+            return self._words_per_chunk, self._buffer_delay
+
+    def record_first_chunk_latency(self, latency_s: float) -> tuple[int, float]:
+        """Call when the *first* TTS audio chunk is received for the
+        current query.
+
+        Returns the (potentially updated) ``(words_per_chunk, buffer_delay)``
+        that should be used for the *remaining* chunks of this query.
+        """
+        with self._lock:
+            if self._first_chunk_recorded:
+                return self._words_per_chunk, self._buffer_delay
+
+            self._first_chunk_recorded = True
+            self._latency_history.append(latency_s)
+
+            # Immediately re-tier based on this measurement so the rest of
+            # the current query benefits from the adjustment.
+            old_tier = self._tier
+            self._tier = self._classify_tier(latency_s)
+            self._words_per_chunk = self._pick_word_count(self._tier)
+            self._buffer_delay = self._tier.buffer_delay
+
+            if self._tier != old_tier:
+                logger.info(
+                    "Tier changed mid-query: %s → %s  (latency=%.2fs)  words=%d  buf=%.2fs",
+                    old_tier.name, self._tier.name, latency_s,
+                    self._words_per_chunk, self._buffer_delay,
+                )
+
+            logger.info(
+                "First-chunk latency=%.2fs | tier=%s | words=%d | buf=%.2fs",
+                latency_s, self._tier.name, self._words_per_chunk, self._buffer_delay,
+            )
+            return self._words_per_chunk, self._buffer_delay
+
+    def current_chunk_size(self) -> tuple[int, float]:
+        """Return the current ``(words_per_chunk, buffer_delay)``."""
+        with self._lock:
+            return self._words_per_chunk, self._buffer_delay
+
+    def finish_query(self, total_chunks: int = 0, total_tts_time_s: float = 0.0):
+        """Record end-of-query stats for monitoring."""
+        with self._lock:
+            latency = self._latency_history[-1] if self._latency_history else 0.0
+            snap = ChunkPerformanceSnapshot(
+                first_chunk_latency_s=latency,
+                tier=self._tier,
+                words_per_chunk=self._words_per_chunk,
+                buffer_delay_s=self._buffer_delay,
+                total_chunks=total_chunks,
+                total_tts_time_s=total_tts_time_s,
+            )
+            self._snapshots.append(snap)
+
+    def get_stats(self) -> dict:
+        """Return a JSON-serialisable summary for the monitoring endpoint."""
+        with self._lock:
+            avg_latency = (
+                sum(self._latency_history) / len(self._latency_history)
+                if self._latency_history else 0.0
+            )
+            return {
+                "current_tier": self._tier.name,
+                "words_per_chunk": self._words_per_chunk,
+                "buffer_delay_s": self._buffer_delay,
+                "total_queries": self._total_queries,
+                "rolling_avg_latency_s": round(avg_latency, 3),
+                "latency_history": [round(l, 3) for l in self._latency_history],
+                "recent_snapshots": [
+                    {
+                        "first_chunk_latency_s": round(s.first_chunk_latency_s, 3),
+                        "tier": s.tier.name,
+                        "words_per_chunk": s.words_per_chunk,
+                        "buffer_delay_s": s.buffer_delay_s,
+                        "total_chunks": s.total_chunks,
+                        "total_tts_time_s": round(s.total_tts_time_s, 3),
+                    }
+                    for s in list(self._snapshots)[-10:]
+                ],
+            }
+
+    # ----- internal helpers -------------------------------------------------
+
+    @staticmethod
+    def _classify_tier(latency_s: float) -> _Tier:
+        if latency_s < _FAST_THRESHOLD:
+            return TIER_FAST
+        elif latency_s < _MEDIUM_THRESHOLD:
+            return TIER_MEDIUM
+        else:
+            return TIER_SLOW
+
+    @staticmethod
+    def _pick_word_count(tier: _Tier) -> int:
+        """Choose a word count in the middle of the tier's range."""
+        return (tier.min_words + tier.max_words) // 2
+
+    def _reevaluate_tier(self):
+        """Re-classify the tier based on the rolling average latency and
+        apply the result for upcoming queries."""
+        avg = sum(self._latency_history) / len(self._latency_history)
+        new_tier = self._classify_tier(avg)
+        if new_tier != self._tier:
+            logger.info(
+                "Tier adjusted (rolling avg %.2fs): %s → %s | words=%d buf=%.2fs",
+                avg, self._tier.name, new_tier.name,
+                self._pick_word_count(new_tier), new_tier.buffer_delay,
+            )
+        self._tier = new_tier
+        self._words_per_chunk = self._pick_word_count(new_tier)
+        self._buffer_delay = new_tier.buffer_delay
+
+
+# ---------------------------------------------------------------------------
+# Word-aware text chunker used by the LLM streaming pipeline
+# ---------------------------------------------------------------------------
+
+_SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s')
+
+
+def chunk_text_by_words(
+    text: str,
+    target_words: int,
+    *,
+    hard_max_words: int | None = None,
+) -> list[str]:
+    """Split *text* into chunks of approximately *target_words* words,
+    preferring to break at sentence boundaries when possible.
+
+    This is used by the LLM producer to size each TTS request adaptively.
+
+    Parameters
+    ----------
+    text : str
+        Full text to split.
+    target_words : int
+        Ideal number of words per chunk.
+    hard_max_words : int, optional
+        Absolute upper bound. Defaults to ``target_words + 5``.
+
+    Returns
+    -------
+    list[str]
+        Non-empty chunks ready for TTS synthesis.
+    """
+    if hard_max_words is None:
+        hard_max_words = target_words + 5
+
+    words = text.split()
+    if not words:
+        return []
+
+    chunks: list[str] = []
+    buf: list[str] = []
+
+    for word in words:
+        buf.append(word)
+
+        at_sentence_end = bool(re.search(r'[.!?]$', word))
+        reached_target = len(buf) >= target_words
+        reached_hard_max = len(buf) >= hard_max_words
+
+        # Flush when we hit a sentence end near/above the target,
+        # or when we hit the hard max regardless.
+        if (at_sentence_end and reached_target) or reached_hard_max:
+            chunks.append(" ".join(buf))
+            buf = []
+
+    # Flush remainder
+    if buf:
+        # If the remainder is very short (≤ 3 words) and we already have
+        # chunks, append it to the last chunk for more natural speech.
+        if chunks and len(buf) <= 3:
+            chunks[-1] += " " + " ".join(buf)
+        else:
+            chunks.append(" ".join(buf))
+
+    return [c.strip() for c in chunks if c.strip()]
+
+
+# Module-level singleton so every part of the app shares the same state.
+adaptive_manager = AdaptiveChunkManager()

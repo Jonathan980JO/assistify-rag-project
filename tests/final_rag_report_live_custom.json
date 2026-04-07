@@ -1,0 +1,339 @@
+{
+  "route": {
+    "kind": "http",
+    "base": "http://127.0.0.1:7000",
+    "path": "/query"
+  },
+  "results": [
+    {
+      "i": 1,
+      "category": "in_scope_definition_entity",
+      "question": "What is scientific management?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 205,
+      "answer": "Scientific Management refers to Before starting the work, there should be a set of rules and processes based on scientific principles. The standards for inputs and outputs should be set ahead of time using scientific principles instead of trial and error."
+    },
+    {
+      "i": 2,
+      "category": "in_scope_definition_entity",
+      "question": "Define management.",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 77,
+      "answer": "Mee, who claims that management is the ul timate goal of any organization."
+    },
+    {
+      "i": 3,
+      "category": "in_scope_definition_entity",
+      "question": "What is planning?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 200,
+      "answer": "If an organization fails to achieves its results then it is the planning which is defective."
+    },
+    {
+      "i": 4,
+      "category": "in_scope_definition_entity",
+      "question": "What is decision-making?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 194,
+      "answer": "Terry, “Decision making is the selection of one behaviour alternative from two or more possible alternatives.”"
+    },
+    {
+      "i": 5,
+      "category": "in_scope_definition_entity",
+      "question": "What is administrative management?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 223,
+      "answer": "Figure 3.3: Line and Staff Organization In a line and staff structure, the administration of business units is separated into two main divisions: the staff, which is responsible for planning, and the line, which is responsible for executing the task. Limited administrative hierarchy: Whenever feasible, it is advisable to establish a minimal number of management levels."
+    },
+    {
+      "i": 6,
+      "category": "in_scope_definition_entity",
+      "question": "What is bureaucracy?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 209,
+      "answer": "He claimed that for an org anization to be productive and efficient, it should adhere to the principles of bureaucracy. labor division: With in a bureaucratic organization, the entire task or labor is partitioned into uncomplicated and repetitive operations, which are then assigned to the appropriate employee based on their level of knowledge and skill."
+    },
+    {
+      "i": 7,
+      "category": "in_scope_definition_entity",
+      "question": "Who is Frederick Taylor?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 156,
+      "answer": "Frederick Taylor was born in the United States."
+    },
+    {
+      "i": 8,
+      "category": "in_scope_definition_entity",
+      "question": "Who is Henry Fayol?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 151,
+      "answer": "The contemporary significance of these principles is evident, therefore establishing Henry Fayol as the esteemed 'Father of Modern Management'."
+    },
+    {
+      "i": 9,
+      "category": "in_scope_definition_entity",
+      "question": "Who is Max Weber?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 161,
+      "answer": "Max Weber was German sociologist and the author of \"The Protestant Ethic and the Spirit of Capitalism.\" He advocated for the use of certa in norms and a formal structure in organizational management, emphasizing the importance of maintaining an impersonal relationship between employers and employees."
+    },
+    {
+      "i": 10,
+      "category": "in_scope_definition_entity",
+      "question": "Who is considered the father of scientific management?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 145,
+      "answer": "Winslow Taylor is considered the father of Scientific Management."
+    },
+    {
+      "i": 11,
+      "category": "in_scope_definition_entity",
+      "question": "Who introduced administrative theory?",
+      "status": "PASS",
+      "reason": "clean definition/biography sentence",
+      "latency_ms": 76,
+      "answer": "Administrative Theory Concept: This concept was developed by American economist and management professor William Ouchi."
+    },
+    {
+      "i": 12,
+      "category": "in_scope_list_structure",
+      "question": "Steps in planning process",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 68,
+      "answer": "- should be formulated in the above sequence.\n- Formulation of the objectives.\n- Development of planning premises.\n- Identification of different alternatives.\n- Evaluation and selection of best alternative."
+    },
+    {
+      "i": 13,
+      "category": "in_scope_list_structure",
+      "question": "Advantages of scientific management",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 76,
+      "answer": "- work done as planned.\n- For the production department\n- he suggested eight type s of foremen\n- such as a speed boss\n- an inspector"
+    },
+    {
+      "i": 14,
+      "category": "in_scope_list_structure",
+      "question": "Disadvantages of scientific management",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 74,
+      "answer": "- orkers to earn higher wages.\n- this leads to an improvement in their standard of living.\n- 3.From a societal perspective\n- the increased productivity and efficiency of labor\n- along with reduced production costs"
+    },
+    {
+      "i": 15,
+      "category": "in_scope_list_structure",
+      "question": "Types of management approaches",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 59,
+      "answer": "- put to good use so that the company may accomplish its goals\n- which may in clude increasing sales and profits\n- expanding into new markets\n- developing and releasing innovative goods\n- Principles of Business Management 2 A."
+    },
+    {
+      "i": 16,
+      "category": "in_scope_list_structure",
+      "question": "Phases of management process",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 69,
+      "answer": "- in a prescribed time for the achievement of the objectives.\n- customers etc.\n- Manager has to deal with human resources while performing these 5 basic functions of management.\n- Manager guides\n- in organi sing"
+    },
+    {
+      "i": 17,
+      "category": "in_scope_list_structure",
+      "question": "Levels of management",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 65,
+      "answer": "- to specific circumstances and adjust s them as needed.\n- From a social perspective\n- Business interacts directly with several social groups\n- including customers\n- Management is an interdisciplinary field that incorporates principles"
+    },
+    {
+      "i": 18,
+      "category": "in_scope_list_structure",
+      "question": "Functions of management",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 63,
+      "answer": "- in a prescribed time for the achievement of the objectives.\n- customers etc.\n- Manager has to deal with human resources while performing these 5 basic functions of management.\n- Manager guides\n- non-financial motivations which are recognition"
+    },
+    {
+      "i": 19,
+      "category": "in_scope_list_structure",
+      "question": "What are the disadvantages of bureaucracy?",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 68,
+      "answer": "- Assist in preparing future managers: When authority is decentralised\n- the subordinates get the opportunity of exercising their own judgement.\n- They learn how to decide and develop managerial skills.\n- decentralisation provides a better means of developing future manag ers and executives.\n- Principles of Business Management 120 This is probably the most important benefit"
+    },
+    {
+      "i": 20,
+      "category": "in_scope_list_structure",
+      "question": "What are the advantages of administrative management?",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 72,
+      "answer": "- are spread over wide geographical areas\n- top executives cannot make decisions with respect to all the functional areas and\n- there is tendency to decentralise.\n- Complexity in the technology: As a result of technological developments\n- top managers can not make all decisions alone and"
+    },
+    {
+      "i": 21,
+      "category": "in_scope_list_structure",
+      "question": "What happens in planning?",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 77,
+      "answer": "- is a costly process due to the involvement of multiple processes.\n- The task demands a significant investment of time\n- who must dedicate a substantial amount of time to gather information on past\n- Following the gathering process\n- it is necessary to Principles of Business Management 58 conduct analysis and evaluation"
+    },
+    {
+      "i": 22,
+      "category": "in_scope_list_structure",
+      "question": "Explain planning process",
+      "status": "PASS",
+      "reason": "structured list/sectional answer",
+      "latency_ms": 66,
+      "answer": "- should be formulated in the above sequence.\n- Formulation of the objectives.\n- Development of planning premises.\n- Identification of different alternatives.\n- Evaluation and selection of best alternative."
+    },
+    {
+      "i": 23,
+      "category": "in_scope_overview_compare",
+      "question": "What topics are covered in Chapter 2?",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "latency_ms": 79,
+      "answer": "This document mainly covers Page 4, Chapter 2, Chapter 5."
+    },
+    {
+      "i": 24,
+      "category": "in_scope_overview_compare",
+      "question": "What is discussed in Chapter 1?",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "latency_ms": 202,
+      "answer": "This document mainly covers Chapter 5, Section 5.7.2, Chapter 2."
+    },
+    {
+      "i": 25,
+      "category": "in_scope_overview_compare",
+      "question": "What are the main sections in this document?",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "latency_ms": 78,
+      "answer": "This document mainly covers Chapter 5, Section 5.7.2."
+    },
+    {
+      "i": 26,
+      "category": "in_scope_overview_compare",
+      "question": "What does this document talk about?",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "latency_ms": 88,
+      "answer": "This document mainly covers Chapter 5, Section 5.7.2."
+    },
+    {
+      "i": 27,
+      "category": "in_scope_overview_compare",
+      "question": "What is the difference between scientific management and administrative management?",
+      "status": "PASS",
+      "reason": "structured overview/chapter/compare answer",
+      "latency_ms": 78,
+      "answer": "This document mainly covers Chapter 5, Section 5.7.2, Chapter 1."
+    },
+    {
+      "i": 28,
+      "category": "out_of_scope",
+      "question": "What is machine learning?",
+      "status": "PASS",
+      "reason": "correct strict out-of-scope response",
+      "latency_ms": 231,
+      "answer": "Not found in the document."
+    },
+    {
+      "i": 29,
+      "category": "out_of_scope",
+      "question": "What is blockchain?",
+      "status": "PASS",
+      "reason": "correct strict out-of-scope response",
+      "latency_ms": 232,
+      "answer": "Not found in the document."
+    },
+    {
+      "i": 30,
+      "category": "out_of_scope",
+      "question": "Who is Elon Musk?",
+      "status": "FAIL",
+      "reason": "out-of-scope did not return strict not-found",
+      "latency_ms": 152,
+      "answer": "That topic doesn’t appear to be covered in the current documents."
+    },
+    {
+      "i": 31,
+      "category": "out_of_scope",
+      "question": "Explain artificial intelligence",
+      "status": "PASS",
+      "reason": "correct strict out-of-scope response",
+      "latency_ms": 80,
+      "answer": "Not found in the document."
+    },
+    {
+      "i": 32,
+      "category": "out_of_scope",
+      "question": "What is cybersecurity?",
+      "status": "PASS",
+      "reason": "correct strict out-of-scope response",
+      "latency_ms": 222,
+      "answer": "Not found in the document."
+    }
+  ],
+  "summary": {
+    "total": 32,
+    "pass": 31,
+    "partial": 0,
+    "fail": 1,
+    "triplet": [
+      {
+        "i": 6,
+        "category": "in_scope_definition_entity",
+        "question": "What is bureaucracy?",
+        "status": "PASS",
+        "reason": "clean definition/biography sentence",
+        "latency_ms": 209,
+        "answer": "He claimed that for an org anization to be productive and efficient, it should adhere to the principles of bureaucracy. labor division: With in a bureaucratic organization, the entire task or labor is partitioned into uncomplicated and repetitive operations, which are then assigned to the appropriate employee based on their level of knowledge and skill."
+      },
+      {
+        "i": 7,
+        "category": "in_scope_definition_entity",
+        "question": "Who is Frederick Taylor?",
+        "status": "PASS",
+        "reason": "clean definition/biography sentence",
+        "latency_ms": 156,
+        "answer": "Frederick Taylor was born in the United States."
+      },
+      {
+        "i": 12,
+        "category": "in_scope_list_structure",
+        "question": "Steps in planning process",
+        "status": "PASS",
+        "reason": "structured list/sectional answer",
+        "latency_ms": 68,
+        "answer": "- should be formulated in the above sequence.\n- Formulation of the objectives.\n- Development of planning premises.\n- Identification of different alternatives.\n- Evaluation and selection of best alternative."
+      }
+    ],
+    "fails": [
+      {
+        "question": "Who is Elon Musk?",
+        "reason": "out-of-scope did not return strict not-found",
+        "category": "out_of_scope"
+      }
+    ]
+  }
+}
