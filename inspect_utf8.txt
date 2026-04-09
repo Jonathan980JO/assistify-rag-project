@@ -1,4 +1,0 @@
-﻿--- Chroma Status Check ---
-Collection: support_docs_v3_production_latest | Count: 69
-  Sample Meta: {'base_doc_id': 'upload_1ddc829c_TheMerchantOfVenice.pdf', 'chapter': '', 'chunk_index': 0, 'chunk_role': 'content', 'chunk_total': 69, 'document_id': 'upload_1ddc829c_TheMerchantOfVenice.pdf', 'file_size_mb': 0.4564037322998047, 'filename': 'TheMerchantOfVenice.pdf', 'kb_version': 0, 'page': -1, 'section': 'Document', 'source': 'TheMerchantOfVenice.pdf', 'source_filename': 'TheMerchantOfVenice.pdf', 'title': 'An Electronic Classics Series Publication', 'unit': '', 'updated_at': '2026-03-28T01:46:41Z'}
-  Sample Text: An Electronic Classics Series Publication The Merchant of Ve...

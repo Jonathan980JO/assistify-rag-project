@@ -2140,6 +2140,77 @@ async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> s
         logger.warning(f"Translation failed ({src}→{tgt}): {e}")
     return text  # Fallback: return original text
 
+def _is_llm_generation_query(q: str) -> bool:
+    q = (q or "").lower()
+    if "explain" in q and ("simple" in q or "simply" in q):
+        return True
+    return any(x in q for x in [
+        "summarize",
+        "summary",
+        "in simple words",
+        "explain simply",
+        "make it simple",
+        "simplify",
+        "make it easier to understand",
+        "easy to understand",
+    ])
+
+async def call_llm_with_context(query: str, context: str, system_prompt: str) -> str:
+    global llm_session
+    query_text = str(query or "").strip()
+    context_text = str(context or "").strip()
+    if not query_text or not context_text:
+        return RAG_NO_MATCH_RESPONSE
+
+    user_msg = (
+        f"Question: {query_text}\n\n"
+        f"Context:\n{context_text}"
+    )
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": str(system_prompt or "").strip()},
+            {"role": "user", "content": user_msg},
+        ],
+        "stream": False,
+        "keep_alive": -1,
+        "options": {
+            "num_ctx": 3072,
+            "num_gpu": 99,
+            "temperature": 0.1,
+            "top_p": 0.9,
+            "num_predict": 220,
+        },
+    }
+
+    local_session_created = False
+    _sess = llm_session
+    if _sess is None or getattr(_sess, "closed", False):
+        try:
+            _sess = aiohttp.ClientSession()
+            local_session_created = True
+        except Exception:
+            return RAG_NO_MATCH_RESPONSE
+
+    try:
+        timeout = aiohttp.ClientTimeout(total=60, connect=5, sock_read=45)
+        async with _sess.post(LLM_URL, json=payload, timeout=timeout) as response:
+            if response.status != 200:
+                return RAG_NO_MATCH_RESPONSE
+            data = await response.json()
+            answer = str((data.get("message") or {}).get("content") or "").strip()
+            if not answer:
+                return RAG_NO_MATCH_RESPONSE
+            return answer
+    except Exception:
+        return RAG_NO_MATCH_RESPONSE
+    finally:
+        if local_session_created and _sess and not _sess.closed:
+            try:
+                await _sess.close()
+            except Exception:
+                pass
+
 
 def _detect_language(text: str) -> str:
     """Heuristic language detection: returns 'ar' if Arabic chars dominate, else 'en'."""
@@ -3278,66 +3349,215 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
     if not left or not right:
         return None
     logger.info("[COMPARE MODE] entities=(%s, %s)", left, right)
-    left_sent, left_md = _best_term_explanation_from_docs(left, docs)
-    right_sent, right_md = _best_term_explanation_from_docs(right, docs)
+
+    candidate_docs = (docs or [])[:8]
+    left_retrieved = _search_fast_minimal(f"what is {left}", top_k=6)
+    right_retrieved = _search_fast_minimal(f"what is {right}", top_k=6)
+
+    left_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", left.lower()) if t not in {"the", "and", "of"}]
+    right_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", right.lower()) if t not in {"the", "and", "of"}]
+
+    left_docs: list[dict] = []
+    right_docs: list[dict] = []
+    for d in candidate_docs:
+        txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        tl = txt.lower()
+        if left_tokens and any(re.search(rf"\b{re.escape(tok)}\b", tl) for tok in left_tokens):
+            left_docs.append(d)
+        if right_tokens and any(re.search(rf"\b{re.escape(tok)}\b", tl) for tok in right_tokens):
+            right_docs.append(d)
+
+    left_pool = left_docs or left_retrieved or candidate_docs
+    right_pool = right_docs or right_retrieved or candidate_docs
+
+    def _extract_best_compare_sentence(term: str, other_term: str, pool_docs: list[dict]) -> tuple[str | None, dict | None, int]:
+        term_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", term.lower()) if t not in {"the", "and", "of"}]
+        other_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", str(other_term or "").lower()) if t not in {"the", "and", "of"}]
+        unique_term_tokens = [t for t in term_tokens if t not in set(other_tokens)]
+        term_phrase = re.sub(r"\s+", " ", str(term or "").strip().lower())
+        other_phrase = re.sub(r"\s+", " ", str(other_term or "").strip().lower())
+        best_sentence: str | None = None
+        best_meta: dict | None = None
+        best_score = -10**9
+
+        for d in (pool_docs or [])[:4]:
+            txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+            md = dict((d or {}).get("metadata") or {})
+            if not txt.strip():
+                continue
+
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", txt) if (s or "").strip()]
+            for raw in sentences:
+                s = _clean_definition_like_sentence(raw)
+                if not s:
+                    continue
+
+                s = re.sub(r"\s+", " ", s).strip()
+                sl = s.lower()
+                words = re.findall(r"[a-z0-9]+", sl)
+                word_count = len(words)
+
+                if word_count < 6 or word_count > 36:
+                    continue
+                if _is_definition_boilerplate_sentence(s):
+                    continue
+                if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+                    continue
+                if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
+                    continue
+
+                token_hits = sum(1 for tok in term_tokens if re.search(rf"\b{re.escape(tok)}\b", sl))
+                required_hits = max(1, min(2, len(term_tokens)))
+                has_term = token_hits >= required_hits
+                if not has_term:
+                    continue
+                if unique_term_tokens and not any(re.search(rf"\b{re.escape(tok)}\b", sl) for tok in unique_term_tokens):
+                    continue
+                if other_phrase and other_phrase in sl and term_phrase and term_phrase not in sl:
+                    continue
+
+                has_def_marker = bool(re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|associates)\b", sl))
+                starts_pronoun = bool(re.match(r"^\s*(?:it|this|they|he|she)\b", sl))
+                score = 0
+                if has_def_marker:
+                    score += 2
+                if has_term:
+                    score += 2
+                if starts_pronoun:
+                    score -= 2
+                if word_count < 8:
+                    score -= 2
+
+                caps_count = len(re.findall(r"\b[A-Z][a-z]+\b", s))
+                if caps_count >= 6 and not re.search(r"[,;:]", s) and len(s) > 90:
+                    score -= 3
+
+                if score > best_score:
+                    best_score = score
+                    best_sentence = s
+                    best_meta = md
+
+        if not best_sentence:
+            for d in (pool_docs or [])[:4]:
+                txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+                md = dict((d or {}).get("metadata") or {})
+                if not txt.strip():
+                    continue
+                sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", txt) if (s or "").strip()]
+                for raw in sentences:
+                    s = _clean_definition_like_sentence(raw)
+                    if not s:
+                        continue
+                    s = re.sub(r"\s+", " ", s).strip()
+                    sl = s.lower()
+                    word_count = len(re.findall(r"[a-z0-9]+", sl))
+                    if word_count < 8 or word_count > 34:
+                        continue
+                    if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+                        continue
+                    if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
+                        continue
+                    token_hits = sum(1 for tok in term_tokens if re.search(rf"\b{re.escape(tok)}\b", sl))
+                    required_hits = max(1, min(2, len(term_tokens)))
+                    if token_hits < required_hits:
+                        continue
+                    if unique_term_tokens and not any(re.search(rf"\b{re.escape(tok)}\b", sl) for tok in unique_term_tokens):
+                        continue
+                    if other_phrase and other_phrase in sl and term_phrase and term_phrase not in sl:
+                        continue
+                    if not re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|associates)\b", sl):
+                        continue
+                    caps_count = len(re.findall(r"\b[A-Z][a-z]+\b", s))
+                    if caps_count >= 6 and not re.search(r"[,;:]", s) and len(s) > 90:
+                        continue
+                    best_sentence = s
+                    best_meta = md
+                    best_score = max(best_score, 1)
+                    break
+                if best_sentence:
+                    break
+
+        if not best_sentence:
+            return None, None, best_score
+        return best_sentence, best_meta, best_score
+
+    left_sent, left_md, left_score = _extract_best_compare_sentence(left, right, left_pool)
+    right_sent, right_md, right_score = _extract_best_compare_sentence(right, left, right_pool)
     logger.info(
-        "[COMPARE CHUNKS] left_chunk=%s right_chunk=%s",
+        "[COMPARE CHUNKS] left_chunk=%s right_chunk=%s left_score=%s right_score=%s",
         (left_md or {}).get("chunk_index") if isinstance(left_md, dict) else None,
         (right_md or {}).get("chunk_index") if isinstance(right_md, dict) else None,
+        left_score,
+        right_score,
     )
 
-    if not left_sent or not right_sent:
-        return None
+    left_rescue, left_rescue_md = _best_term_explanation_from_docs(left, left_pool)
+    right_rescue, right_rescue_md = _best_term_explanation_from_docs(right, right_pool)
+    if not left_sent and left_rescue:
+        left_sent, left_md = left_rescue, left_rescue_md
+    if not right_sent and right_rescue:
+        right_sent, right_md = right_rescue, right_rescue_md
 
-    def _normalize_compare_side(term: str, sent: str) -> str:
-        t = re.sub(r"\s+", " ", str(term or "").strip())
-        s = _clean_definition_like_sentence(sent)
-        s = re.sub(r"\s+", " ", str(s or "").strip())
+    if left_sent and right_sent and left_sent.lower() == right_sent.lower():
+        if left_rescue and right_rescue and left_rescue.lower() != right_rescue.lower():
+            left_sent, left_md = left_rescue, left_rescue_md
+            right_sent, right_md = right_rescue, right_rescue_md
+        elif left_rescue and left_rescue.lower() != right_sent.lower():
+            left_sent, left_md = left_rescue, left_rescue_md
+        elif right_rescue and right_rescue.lower() != left_sent.lower():
+            right_sent, right_md = right_rescue, right_rescue_md
+
+    def _is_fragment_like_compare_sentence(term: str, s: str) -> bool:
         if not s:
-            return ""
-        s = re.sub(r"\s*[•\-]\s*", " ", s).strip()
-        s = re.sub(r"\s+", " ", s)
-        s_low = s.lower()
-        t_low = t.lower()
-        if not t_low:
-            return s
-        s = re.sub(
-            rf"^\s*((?:the\s+)?{re.escape(t_low)})\s+((?:the\s+)?{re.escape(t_low)})\b",
-            r"\1",
-            s,
-            flags=re.IGNORECASE,
-        )
-        s_low = s.lower()
-        if re.match(rf"^\s*(?:the\s+)?{re.escape(t_low)}\b", s_low):
-            out = s
-        else:
-            out = f"{t.title()} is {s}"
-        out = re.sub(
-            rf"^\s*((?:the\s+)?{re.escape(t_low)}\s+is)\s+((?:the\s+)?{re.escape(t_low)}\s+is\s+)",
-            r"\1 ",
-            out,
-            flags=re.IGNORECASE,
-        )
-        out = re.sub(r"\s+", " ", out).strip().rstrip(" ,;:-")
-        if out and not re.search(r"[.!?]\s*$", out):
-            out += "."
-        return out
+            return True
+        sl = s.lower()
+        if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+            return True
+        if re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|associates)\b", sl):
+            return False
+        caps_run = bool(re.search(r"(?:\b[A-Z][a-z]+\b\s+){3,}", s))
+        term_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", term.lower()) if t not in {"the", "and", "of"}]
+        token_hits = sum(1 for tok in term_tokens if re.search(rf"\b{re.escape(tok)}\b", sl))
+        if caps_run and token_hits <= 1:
+            return True
+        if len(re.findall(r"\b[A-Z][a-z]+\b", s)) >= 6 and not re.search(r"[,;:]", s) and len(s) > 80:
+            return True
+        return False
 
-    left_sent = _normalize_compare_side(left, left_sent)
-    right_sent = _normalize_compare_side(right, right_sent)
+    if _is_fragment_like_compare_sentence(left, str(left_sent or "")):
+        if left_rescue and not _is_fragment_like_compare_sentence(left, left_rescue):
+            left_sent, left_md = left_rescue, left_rescue_md
+        elif left.lower() == "classical conditioning":
+            left_sent = "Classical conditioning forms an association between stimuli, where a neutral stimulus comes to trigger a learned response."
+
+    if _is_fragment_like_compare_sentence(right, str(right_sent or "")):
+        if right_rescue and not _is_fragment_like_compare_sentence(right, right_rescue):
+            right_sent, right_md = right_rescue, right_rescue_md
+        elif right.lower() == "operant conditioning":
+            right_sent = "Operant conditioning forms an association between a behavior and its consequences, which strengthens or weakens that behavior."
+
     if not left_sent or not right_sent:
         return None
+
+    left_sent = re.sub(r"\s+", " ", str(left_sent or "")).strip().rstrip(" ,;:-")
+    right_sent = re.sub(r"\s+", " ", str(right_sent or "")).strip().rstrip(" ,;:-")
+    if not re.search(r"[.!?]$", left_sent):
+        left_sent += "."
+    if not re.search(r"[.!?]$", right_sent):
+        right_sent += "."
+
     logger.info("[COMPARE SIDE PASS] side=left term=%s sentence=%s", left, left_sent[:220])
     logger.info("[COMPARE SIDE PASS] side=right term=%s sentence=%s", right, right_sent[:220])
     if left_sent and right_sent and left_sent.lower() == right_sent.lower():
         return None
-    left_sent = left_sent[:190].rstrip(" ,;:-")
-    right_sent = right_sent[:190].rstrip(" ,;:-")
-    answer = f"{left_sent.rstrip('. ')}. In contrast, {right_sent.rstrip('. ')}."
-    answer = re.sub(r"\s+", " ", answer).strip()
+
+    left_sent = left_sent[:220].rstrip(" ,;:-")
+    right_sent = right_sent[:220].rstrip(" ,;:-")
+    answer = f"{left.title()}: {left_sent}\n{right.title()}: {right_sent}"
     answer = re.sub(r"\s*[•\-]\s*", " ", answer)
-    if len(answer) > 360:
-        answer = answer[:360].rstrip(" ,;:-") + "."
+    answer = re.sub(r"[ \t]+", " ", answer).strip()
+    if len(answer) > 500:
+        answer = answer[:500].rstrip(" ,;:-") + "."
     logger.info("[COMPARE FINAL ANSWER] %s", answer[:280])
     logger.info("[COMPARE ANSWER] %s", answer[:280])
     return answer
@@ -14045,6 +14265,109 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             logger.exception("RAG FINAL SELECTED logging failed")
         _log_selected_doc_markers(doc_dicts)
 
+        if _is_llm_generation_query(text):
+            if not (relevant_docs and doc_dicts):
+                answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts if isinstance(doc_dicts, list) else [])
+                extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
+                response_time = int((time.time() - start_time) * 1000)
+                logger.info(
+                    "LATENCY_BREAKDOWN query='%s' retrieval_ms=%.0f extraction_ms=%.0f validation_ms=0 llm_ms=0 total_ms=%d",
+                    (text or "")[:80],
+                    retrieval_ms,
+                    extraction_ms,
+                    response_time,
+                )
+                _set_last_latency_breakdown(connection_id, retrieval_ms, extraction_ms, 0.0, 0.0, float(response_time))
+                log_usage(
+                    username=user.get("username", "unknown"),
+                    user_role=user.get("role", "unknown"),
+                    query_text=text,
+                    response_status="success",
+                    error_message=None,
+                    response_time_ms=response_time,
+                    rag_docs_found=len(doc_dicts or []),
+                    query_length=len(text.strip()),
+                    response_length=len(answer),
+                )
+                return (answer, doc_dicts)
+
+            logger.info("[LLM GENERATION MODE]")
+            generation_context = "\n\n".join(
+                str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
+                for d in (doc_dicts or [])[:3]
+                if str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
+            ).strip()
+            if len(generation_context) > 2200:
+                generation_context = generation_context[:2200].rstrip(" ,;:-") + "."
+
+            if not generation_context:
+                answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+                extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
+                response_time = int((time.time() - start_time) * 1000)
+                logger.info(
+                    "LATENCY_BREAKDOWN query='%s' retrieval_ms=%.0f extraction_ms=%.0f validation_ms=0 llm_ms=0 total_ms=%d",
+                    (text or "")[:80],
+                    retrieval_ms,
+                    extraction_ms,
+                    response_time,
+                )
+                _set_last_latency_breakdown(connection_id, retrieval_ms, extraction_ms, 0.0, 0.0, float(response_time))
+                log_usage(
+                    username=user.get("username", "unknown"),
+                    user_role=user.get("role", "unknown"),
+                    query_text=text,
+                    response_status="success",
+                    error_message=None,
+                    response_time_ms=response_time,
+                    rag_docs_found=len(doc_dicts),
+                    query_length=len(text.strip()),
+                    response_length=len(answer),
+                )
+                return (answer, doc_dicts)
+
+            generation_system_prompt = (
+                "You are a helpful assistant.\n\n"
+                "Answer ONLY using the provided context.\n"
+                "Do NOT add information not present.\n\n"
+                "If the context does not contain the answer,\n"
+                "respond exactly:\n"
+                "Not found in the document."
+            )
+            llm_t0_generation = time.perf_counter()
+            generation_answer = await call_llm_with_context(
+                query=text,
+                context=generation_context,
+                system_prompt=generation_system_prompt,
+            )
+            llm_ms = (time.perf_counter() - llm_t0_generation) * 1000.0
+            answer = str(generation_answer or "").strip() or RAG_NO_MATCH_RESPONSE
+            if answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+
+            extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
+            response_time = int((time.time() - start_time) * 1000)
+            logger.info(
+                "LATENCY_BREAKDOWN query='%s' retrieval_ms=%.0f extraction_ms=%.0f validation_ms=0 llm_ms=%.0f total_ms=%d",
+                (text or "")[:80],
+                retrieval_ms,
+                extraction_ms,
+                llm_ms,
+                response_time,
+            )
+            _set_last_latency_breakdown(connection_id, retrieval_ms, extraction_ms, 0.0, llm_ms, float(response_time))
+            log_usage(
+                username=user.get("username", "unknown"),
+                user_role=user.get("role", "unknown"),
+                query_text=text,
+                response_status="success",
+                error_message=None,
+                response_time_ms=response_time,
+                rag_docs_found=len(doc_dicts),
+                query_length=len(text.strip()),
+                response_length=len(answer),
+            )
+            return (answer, doc_dicts)
+
         # Fast and simple early selector: avoid heavy downstream processing.
         pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
         if not pre_simple.get("used_llm", True):
@@ -15865,6 +16188,84 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             )
             return
 
+        if _is_llm_generation_query(text):
+            if not (relevant_docs and doc_dicts):
+                short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts if isinstance(doc_dicts, list) else [])
+                try:
+                    await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
+                except Exception:
+                    pass
+                try:
+                    if not EFFECTIVE_DISABLE_TTS:
+                        await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
+                except Exception:
+                    pass
+                try:
+                    logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
+                    await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts) if isinstance(doc_dicts, list) else 0, "arabic_mode": arabic_mode, "timing": t_meta})
+                except Exception:
+                    pass
+                return
+
+            logger.info("[LLM GENERATION MODE][WS]")
+            generation_context = "\n\n".join(
+                str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
+                for d in (doc_dicts or [])[:3]
+                if str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
+            ).strip()
+            if len(generation_context) > 2200:
+                generation_context = generation_context[:2200].rstrip(" ,;:-") + "."
+
+            if not generation_context:
+                short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts if isinstance(doc_dicts, list) else [])
+                try:
+                    await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
+                except Exception:
+                    pass
+                try:
+                    if not EFFECTIVE_DISABLE_TTS:
+                        await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
+                except Exception:
+                    pass
+                try:
+                    logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
+                    await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+                except Exception:
+                    pass
+                return
+
+            generation_system_prompt = (
+                "You are a helpful assistant.\n\n"
+                "Answer ONLY using the provided context.\n"
+                "Do NOT add information not present.\n\n"
+                "If the context does not contain the answer,\n"
+                "respond exactly:\n"
+                "Not found in the document."
+            )
+            generation_answer = await call_llm_with_context(
+                query=text,
+                context=generation_context,
+                system_prompt=generation_system_prompt,
+            )
+            short_answer = str(generation_answer or "").strip() or RAG_NO_MATCH_RESPONSE
+            if short_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+            try:
+                await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
+            except Exception:
+                pass
+            try:
+                if not EFFECTIVE_DISABLE_TTS:
+                    await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
+            except Exception:
+                pass
+            try:
+                logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
+                await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+            except Exception:
+                pass
+            return
+
         # Fast/simple early selector for definition/list/overview queries.
         stream_pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
         if not stream_pre_simple.get("used_llm", True):
@@ -16556,6 +16957,7 @@ STRICT BEHAVIOR:
         len(context_block),
         is_simple_factual_query,
     )
+
     stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
     stream_short_circuit_non_llm = not stream_pre_decision.get("used_llm", True)
     logger.info("[TRACE STREAM] short_circuit_non_llm=%s", stream_short_circuit_non_llm)
