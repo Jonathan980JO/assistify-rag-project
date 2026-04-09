@@ -555,6 +555,8 @@ class VectorStore:
         normalized_query = self._normalize_query_text(query)
         query_for_embedding = self._to_e5_query(normalized_query)
         query_profile = self._query_profile(normalized_query)
+        if enable_rerank:
+            logger.info("[RERANK ACTIVE]")
         
         logger.info(f"[RAG] Search: '{normalized_query}' | top_k={top_k}")
 
@@ -562,7 +564,7 @@ class VectorStore:
         
         # Lower candidate pool for faster retrieval latency while keeping
         # enough recall for downstream ranking.
-        candidate_pool = max(20, top_k * 2)
+        candidate_pool = max(40, top_k * 4)
 
         results = None
         last_query_exception = None
@@ -753,10 +755,19 @@ class VectorStore:
                 is_structured = False
 
             # Decide which semantic score to use: reranker if available, else raw similarity
-            semantic_score = float(c.get("rerank_score", c.get("similarity", 0.0)))
+            if c.get("reranker_score") is not None:
+                semantic_score = float(c.get("reranker_score"))
+            elif c.get("rerank_score") is not None:
+                semantic_score = float(c.get("rerank_score"))
+            else:
+                semantic_score = float(c.get("similarity", 0.0))
 
-            # Hybrid final score (preserve original weighting)
-            final_score = 0.7 * semantic_score + 0.3 * keyword_score
+            # Hybrid final score
+            final_score = 0.8 * semantic_score + 0.2 * keyword_score
+
+            rerank_signal = c.get("reranker_score", c.get("rerank_score"))
+            if rerank_signal is not None and float(rerank_signal) > 0.75:
+                final_score += 0.10
 
             # Detect list intent generically from query keywords
             list_keywords = ["list", "what are", "types", "steps", "levels", "phases", "functions", "elements"]

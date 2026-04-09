@@ -1615,7 +1615,9 @@ async def _reindex_file_auto(filename: str):
 
         # ---- STEP 4: verify the new content is searchable ----
         snippet = _pick_verification_snippet(text)
-        verify = live_rag.search(snippet, top_k=3, distance_threshold=1.5) if snippet else []
+        verify = live_rag.search(snippet, top_k=3, distance_threshold=1.5, enable_rerank=True) if snippet else []
+        if snippet:
+            logger.info("[RERANK ACTIVE]")
         if verify:
             logger.info(f"Assets watcher [{filename}]: ✓ verification OK — search returns: {verify[0][:60]}...")
         else:
@@ -2372,6 +2374,8 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
             cand_low = cand.lower()
             if not cand:
                 continue
+            if re.match(r"^\s*(it|this|that|these|those|they)\b", cand_low) and (not e or not re.search(rf"\b{re.escape(e)}\b", cand_low)):
+                continue
             if _is_definition_boilerplate_sentence(cand):
                 continue
             if re.search(r"\b(?:one\s+has\s+no\s+control\s+over\s+the\s+environment|one\s+of\s+the\s+components?)\b", cand_low):
@@ -2391,6 +2395,8 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
                 selected.append(next_sent)
         answer, _ = _build_indirect_definition_answer(e or "the concept", selected)
         answer = _clean_definition_like_sentence(answer or "")
+        if re.search(r"\bis\s+it\b", str(answer or "").lower()):
+            continue
         if answer:
             logger.info("[DEF FALLBACK CHUNK] entity=%s chunk_index=%s", e, chunk_idx)
             logger.info("[DEF FALLBACK ANSWER] %s", answer[:260])
@@ -2410,6 +2416,8 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
             cand = _clean_definition_like_sentence(sent)
             cand_low = cand.lower()
             if not cand or len(cand.split()) < 6 or len(cand.split()) > 36:
+                continue
+            if re.match(r"^\s*(it|this|that|these|those|they)\b", cand_low) and (not e or not re.search(rf"\b{re.escape(e)}\b", cand_low)):
                 continue
             if _is_definition_boilerplate_sentence(cand):
                 continue
@@ -2432,9 +2440,14 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
         else:
             soft_answer = f"{(e or 'The concept').title()} is {soft.rstrip('. ')}."
         soft_answer = re.sub(r"\s+", " ", soft_answer).strip()
-        logger.info("[DEF FALLBACK CHUNK] entity=%s chunk_index=%s", e, best_soft[2])
-        logger.info("[DEF FALLBACK ANSWER] %s", soft_answer[:260])
-        return soft_answer
+        if re.search(r"\bis\s+it\b", soft_answer.lower()):
+            soft_answer = ""
+        if not soft_answer:
+            best_soft = None
+        else:
+            logger.info("[DEF FALLBACK CHUNK] entity=%s chunk_index=%s", e, best_soft[2])
+            logger.info("[DEF FALLBACK ANSWER] %s", soft_answer[:260])
+            return soft_answer
 
     best_grounded: tuple[float, str, str | int | None] | None = None
     etoks_soft = [t for t in re.findall(r"[a-z0-9]{3,}", e) if t not in {"the", "and", "of"}]
@@ -2451,6 +2464,8 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
                 continue
             cand_low = cand.lower()
             if len(cand.split()) < 6 or len(cand.split()) > 44:
+                continue
+            if re.match(r"^\s*(it|this|that|these|those|they)\b", cand_low) and (not e or not re.search(rf"\b{re.escape(e)}\b", cand_low)):
                 continue
             if _is_definition_boilerplate_sentence(cand):
                 continue
@@ -4672,6 +4687,8 @@ def _search_with_query_expansion(query_text: str, top_k: int, distance_threshold
 
     requested_top_k = int(top_k or 1)
     per_query_k = max(3, requested_top_k)
+    enable_rerank = True
+    logger.info("[RERANK ACTIVE]")
     logger.info("[TOPK TRACE] requested=%s actual=%s function=_search_with_query_expansion", requested_top_k, per_query_k)
     all_results: List[dict] = []
 
@@ -4762,8 +4779,9 @@ def _search_fast_minimal(query_text: str, top_k: int) -> list[dict]:
             top_k=actual_top_k,
             distance_threshold=_distance_threshold_for_query(query_text),
             return_dicts=True,
-            enable_rerank=False,
+            enable_rerank=True,
         ) or []
+        logger.info("[RERANK ACTIVE]")
         logger.info("[DOC COUNT TRACE] stage=_search_fast_minimal.return count=%s", len(out))
         return out
     except Exception:
@@ -5637,7 +5655,9 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
                     top_k=3,
                     distance_threshold=max(_distance_threshold_for_query(query_text), 1.25),
                     return_dicts=True,
+                    enable_rerank=True,
                 )
+                logger.info("[RERANK ACTIVE]")
             except Exception:
                 extra = []
             if not extra:
@@ -12169,6 +12189,135 @@ def _shared_rag_final_answer_decision(
         if cmp_answer:
             return _result(cmp_answer, used_llm=False, answer_type="compare_explanation_fallback", items_count=0)
 
+    def _extract_primary_simple_answer_from_top_docs(query_text: str, docs: List[Dict[str, Any]], family_name: str) -> Optional[str]:
+        if not docs:
+            return None
+        if family_name in {"list_entity", "overview_chapter_compare", "explanatory_compare", "toc_structure", "lesson_lookup", "sequence_lookup"}:
+            return None
+
+        ql = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+        stop = {"what", "is", "are", "the", "a", "an", "of", "in", "to", "for", "and", "or", "define", "explain", "who", "was", "compare"}
+        key_terms = [t for t in re.findall(r"[a-z0-9]{3,}", ql) if t not in stop]
+        query_keywords = key_terms or [t for t in re.findall(r"[a-z0-9]{3,}", ql)]
+        is_definition_like = bool(re.match(r"^(what\s+is|define|who\s+is|who\s+was)\b", ql))
+
+        def _clean_candidate_sentence(raw: str) -> str:
+            s = _clean_definition_like_sentence(raw)
+            if not s:
+                return ""
+            ocr_no_join_heads = {
+                "for", "and", "the", "with", "from", "that", "this", "into", "over", "under",
+                "when", "then", "than", "while", "where", "which", "who", "whom", "whose", "because",
+            }
+
+            def _join_ocr_split(m: re.Match) -> str:
+                h = str(m.group(1) or "")
+                mid = str(m.group(2) or "")
+                tail = str(m.group(3) or "")
+                if h.lower() in ocr_no_join_heads:
+                    return f"{h} {mid} {tail}"
+                return f"{h}{mid} {tail}"
+
+            s = re.sub(r"\b([a-z]{2,})\s+([a-z])\s+([a-z]{2,})\b", _join_ocr_split, s, flags=re.IGNORECASE)
+            s = re.sub(r"\b(is)\s+(it)\b", r"\1", s, flags=re.IGNORECASE)
+            s = re.sub(r"\b(\w+)\s+\1\b", r"\1", s, flags=re.IGNORECASE)
+            s = re.sub(r"\s+", " ", s).strip()
+            s = re.sub(r"\b(?:and|or|but|because|which|that|who|whom|whose|where|when|while|with|of|to|for|in|on|by|as|than|if)\s*$", "", s, flags=re.IGNORECASE).strip()
+            return s
+
+        def _score_sentence(sent: str) -> tuple[int, int, bool, bool, bool]:
+            low = sent.lower()
+            words = re.findall(r"[a-z0-9]+", low)
+            word_count = len(words)
+            has_def_marker = bool(re.search(r"\b(?:is|refers\s+to|defined\s+as|means)\b", low))
+            has_query_keyword = bool(query_keywords and any(re.search(rf"\b{re.escape(t)}\b", low) for t in query_keywords))
+            starts_pronoun = bool(re.match(r"^\s*(?:it|this|they|he|she)\b", low))
+            too_short = word_count < 6
+            score = 0
+            if has_def_marker:
+                score += 2
+            if has_query_keyword:
+                score += 2
+            if starts_pronoun:
+                score -= 2
+            if too_short:
+                score -= 2
+            return score, word_count, has_def_marker, has_query_keyword, starts_pronoun
+
+        best_sent = None
+        best_score = -10**9
+        best_meta = None
+        has_ent, ent = _extract_entity_from_definition_query(query_text)
+        ent_l = re.sub(r"\s+", " ", str(ent or "").strip().lower()) if has_ent else ""
+        entity_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", ent_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
+        bad_markers = re.compile(r"\b(procedure|experiment|known as|founded|founder|criticism|table of contents|learning objectives|chapter\s+\d+)\b", re.IGNORECASE)
+
+        for d in (docs or [])[:2]:
+            txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+            if not txt:
+                continue
+            sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", txt) if (s or "").strip()]
+            for sent in sentences:
+                if len(sent) > 320:
+                    continue
+                low = sent.lower()
+                if re.search(r"\b(table of contents|contents|figure|fig\.?|caption|copyright)\b", low):
+                    continue
+                if bad_markers.search(sent):
+                    continue
+
+                if family_name == "definition_entity" and ent_l:
+                    has_entity_phrase = bool(re.search(rf"\b{re.escape(ent_l)}\b", low))
+                    has_entity_tokens = bool(entity_tokens) and all(re.search(rf"\b{re.escape(t)}\b", low) for t in entity_tokens[:2])
+                    if not (has_entity_phrase or has_entity_tokens):
+                        continue
+                    if ent_l == "reinforcement":
+                        if re.search(r"\bpunishment\b", low):
+                            continue
+                        if not re.search(r"\b(reinforcement\b.*\b(strengthens|increases)\b|\b(strengthens|increases)\b.*\breinforcement\b)", low):
+                            continue
+
+                score, word_count, has_def_marker, has_query_keyword, starts_pronoun = _score_sentence(sent)
+                if is_definition_like and (not has_def_marker):
+                    score -= 1
+
+                if score > best_score:
+                    best_score = score
+                    best_sent = _clean_candidate_sentence(sent)
+                    best_meta = {
+                        "words": word_count,
+                        "has_def": has_def_marker,
+                        "has_kw": has_query_keyword,
+                        "starts_pronoun": starts_pronoun,
+                        "raw": sent,
+                    }
+
+        if not best_sent:
+            return None
+        if best_score < 1:
+            logger.info("[PRIMARY SIMPLE SCORE] no_good_sentence score=%s sentence=%s", best_score, ((best_meta or {}).get("raw", ""))[:200])
+            return None
+
+        if family_name == "definition_entity" and (not _passes_strict_definition_relevance_guard(query_text, best_sent)):
+            logger.info("[PRIMARY SIMPLE SCORE] rejected_by_strict_guard score=%s sentence=%s", best_score, best_sent[:200])
+            return None
+
+        logger.info(
+            "[PRIMARY SIMPLE SCORE] selected score=%s words=%s has_def=%s has_kw=%s starts_pronoun=%s sentence=%s",
+            best_score,
+            (best_meta or {}).get("words", 0),
+            (best_meta or {}).get("has_def", False),
+            (best_meta or {}).get("has_kw", False),
+            (best_meta or {}).get("starts_pronoun", False),
+            best_sent[:220],
+        )
+        return best_sent
+
+    simple_top_answer = _extract_primary_simple_answer_from_top_docs(query, routed_docs or doc_dicts or [], family_v2)
+    if simple_top_answer:
+        logger.info("[PRIMARY SIMPLE ANSWER] from_top_docs=true answer=%s", str(simple_top_answer)[:220])
+        return _result(simple_top_answer, used_llm=False, answer_type="primary_simple_top_chunks", items_count=1)
+
     def _specific_concept_not_found_rescue(query_text: str, docs: List[Dict[str, Any]]) -> str | None:
         q_local = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
         if not (q_local.startswith("what is") or q_local.startswith("define")):
@@ -12231,18 +12380,9 @@ def _shared_rag_final_answer_decision(
     broad_conditioning_q = bool(re.match(r"^(?:what\s+is|explain)\s+conditioning\??$", q_low))
     broad_conditioning_types_q = bool(re.match(r"^(?:types\s+of\s+conditioning|what\s+are\s+the\s+types\s+of\s+conditioning)\??$", q_low))
     if broad_conditioning_q or broad_conditioning_types_q:
-        merged_cond_ctx = "\n".join(
-            str((d or {}).get("page_content") or (d or {}).get("text") or "")
-            for d in (routed_docs or doc_dicts or [])[:6]
-        ).lower()
-        has_classical = "classical conditioning" in merged_cond_ctx
-        has_operant = "operant conditioning" in merged_cond_ctx
-        if has_classical and has_operant:
-            if broad_conditioning_types_q:
-                types_ans = "- Classical conditioning\n- Operant conditioning"
-                return _result(types_ans, used_llm=False, answer_type="conditioning_types_forced", items_count=2)
-            cond_ans = "Conditioning is a learning process in which behavior changes through experience, with two main types: classical conditioning and operant conditioning."
-            return _result(cond_ans, used_llm=False, answer_type="conditioning_broad_forced", items_count=0)
+        cond_simple = _extract_primary_simple_answer_from_top_docs(query, routed_docs or doc_dicts or [], family_v2)
+        if cond_simple:
+            return _result(cond_simple, used_llm=False, answer_type="conditioning_broad_from_chunks", items_count=1)
 
     if family == "definition_entity" and is_who_identity_query and (not is_who_attribution_query):
         if not _has_exact_who_person_evidence(query, routed_docs or doc_dicts or []):
@@ -12260,9 +12400,11 @@ def _shared_rag_final_answer_decision(
             return _result(sm_ans, used_llm=False, answer_type="definition_scientific_method_forced", items_count=0)
 
         if re.search(r"\bwhen\s+was\s+the\s+first\s+psychology\s+lab\s+established\b", q_low_def):
-            year_ans = "The first psychology laboratory was established in 1879 by Wilhelm Wundt."
-            logger.info("[DEFINITION WINNER] mode=lab_year_forced answer=%s", year_ans[:220])
-            return _result(year_ans, used_llm=False, answer_type="definition_lab_year_forced", items_count=0)
+            year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
+            if year_match_ctx:
+                year_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "."
+                logger.info("[DEFINITION WINNER] mode=lab_year_from_context answer=%s", year_ans[:220])
+                return _result(year_ans, used_llm=False, answer_type="definition_lab_year_from_context", items_count=0)
 
         if q_low_def.startswith("what is psychology"):
             m_psy = re.search(r"(psychology\s+is\s+the\s+scientific\s+study\s+of\s+behavior\s+and\s+mental\s+processes)", merged_def_ctx, flags=re.IGNORECASE)
@@ -12270,11 +12412,6 @@ def _shared_rag_final_answer_decision(
                 psy_ans = m_psy.group(1).strip().rstrip(".") + "."
                 logger.info("[DEFINITION WINNER] mode=canonical_psychology answer=%s", psy_ans[:220])
                 return _result(psy_ans, used_llm=False, answer_type="definition_canonical_psychology", items_count=0)
-            low_ctx = merged_def_ctx.lower()
-            if all(k in low_ctx for k in ["scientific", "behavior", "mental", "process"]):
-                psy_ans = "Psychology is the scientific study of behavior and mental processes."
-                logger.info("[DEFINITION WINNER] mode=canonical_psychology_fallback answer=%s", psy_ans[:220])
-                return _result(psy_ans, used_llm=False, answer_type="definition_canonical_psychology_fallback", items_count=0)
 
         if "tabula rasa" in q_low_def:
             if re.search(r"\btabula\s*rasa\b", merged_def_ctx, flags=re.IGNORECASE):
@@ -12290,9 +12427,11 @@ def _shared_rag_final_answer_decision(
 
         if re.search(r"\bwhen\s+was\s+the\s+first\s+psychology\s+lab\s+established\b", q_low_def):
             if re.search(r"\b1879\b", merged_def_ctx) and re.search(r"\bwundt\b", merged_def_ctx, flags=re.IGNORECASE):
-                year_ans = "The first psychology laboratory was established in 1879 by Wilhelm Wundt."
+                year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
+                year_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "." if year_match_ctx else None
                 logger.info("[DEFINITION WINNER] mode=lab_year answer=%s", year_ans[:220])
-                return _result(year_ans, used_llm=False, answer_type="definition_lab_year", items_count=0)
+                if year_ans:
+                    return _result(year_ans, used_llm=False, answer_type="definition_lab_year", items_count=0)
 
         if re.search(r"\b(who\s+founded\s+modern\s+psychology|who\s+is\s+wilhelm\s+wundt|first\s+psychology\s+lab|first\s+psychological\s+laboratory|when\s+was\s+the\s+first\s+psychology\s+lab)\b", q_low_def):
             founder_match = re.search(r"(Wilhelm\s+Wundt[^.\n]{0,180}(?:1879|founded[^.\n]{0,80}laboratory[^.\n]{0,120}))", merged_def_ctx, flags=re.IGNORECASE)
@@ -12301,14 +12440,12 @@ def _shared_rag_final_answer_decision(
                 founder_ans = re.sub(r"\s+", " ", founder_match.group(1)).strip(" .") + "."
                 logger.info("[DEFINITION WINNER] mode=founder_fast answer=%s", founder_ans[:220])
                 return _result(founder_ans, used_llm=False, answer_type="definition_founder_fast", items_count=0)
-            if "who is wilhelm wundt" in q_low_def and re.search(r"\bwundt\b", merged_def_ctx, flags=re.IGNORECASE):
-                founder_ans = "Wilhelm Wundt founded the first psychology laboratory in 1879 and is considered a founder of modern psychology."
-                logger.info("[DEFINITION WINNER] mode=wundt_identity_fallback answer=%s", founder_ans[:220])
-                return _result(founder_ans, used_llm=False, answer_type="definition_wundt_identity_fallback", items_count=0)
             if year_match and re.search(r"\bwundt\b", merged_def_ctx, flags=re.IGNORECASE):
-                founder_ans = "Wilhelm Wundt founded the first psychology laboratory in 1879."
-                logger.info("[DEFINITION WINNER] mode=founder_year_fallback answer=%s", founder_ans[:220])
-                return _result(founder_ans, used_llm=False, answer_type="definition_founder_year_fallback", items_count=0)
+                year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
+                if year_match_ctx:
+                    founder_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "."
+                    logger.info("[DEFINITION WINNER] mode=founder_year_from_context answer=%s", founder_ans[:220])
+                    return _result(founder_ans, used_llm=False, answer_type="definition_founder_year_from_context", items_count=0)
 
         indirect_doc = None
         for d in (routed_docs or doc_dicts or []):
@@ -13529,7 +13666,9 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     top_k=6,
                     distance_threshold=max(_distance_threshold_for_query(text), 1.8),
                     return_dicts=True,
+                    enable_rerank=True,
                 )
+                logger.info("[RERANK ACTIVE]")
             if rescue_docs:
                 rescue_docs = _rerank_docs_for_query_intent(text, rescue_docs)
                 relevant_docs = _retrieve_with_section_bias(text, rescue_docs, top_k=8)
@@ -15227,7 +15366,9 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     top_k=5,
                     distance_threshold=max(_distance_threshold_for_query(text_for_rag), 1.50),
                     return_dicts=True,
+                    enable_rerank=True,
                 )
+                logger.info("[RERANK ACTIVE]")
                 logger.info("%s Arabic overview fallback retrieval used | docs=%s", connection_id, len(rag_docs_check))
             _prefetched_rag_docs = rag_docs_check  # reuse in the main RAG block
             if not rag_docs_check:
@@ -15300,9 +15441,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 top_k=5,
                 distance_threshold=max(_distance_threshold_for_query(text), 1.50),
                 return_dicts=True,
+                enable_rerank=True,
             )
+            logger.info("[RERANK ACTIVE]")
             logger.info("%s overview fallback retrieval used | docs=%s query='%s'", connection_id, len(relevant_docs), text[:80])
-        # Reranker is OFF by design for now
+        # Reranker is active in retrieval path
         retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
         logger.info(
             "%s retrieval_done | fast_path=%s top_k=%s docs=%s retrieval_ms=%.0f",
@@ -17496,7 +17639,9 @@ def rag_retrieve_debug(query: str, top_k: int = 7, user=Depends(require_login("a
             top_k=max(1, min(int(top_k or 1), 10)),
             distance_threshold=RAG_STRICT_DISTANCE_THRESHOLD,
             return_dicts=True,
+            enable_rerank=True,
         )
+        logger.info("[RERANK ACTIVE]")
         rows = []
         for d in docs:
             md = (d or {}).get("metadata") or {}
@@ -17623,7 +17768,8 @@ def debug_runtime_rag(user=Depends(require_login("admin"))):
 
         # Execute retrieval probe via live_rag
         try:
-            docs = live_rag.search(rewritten, top_k=top_k_used, distance_threshold=dist, return_dicts=True)
+            docs = live_rag.search(rewritten, top_k=top_k_used, distance_threshold=dist, return_dicts=True, enable_rerank=True)
+            logger.info("[RERANK ACTIVE]")
         except Exception as e:
             docs = {'error': f'retrieval failed: {e}'}
 
