@@ -1,0 +1,27 @@
+$Host.UI.RawUI.WindowTitle = 'RAG Server - Assistify'
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+chcp 65001 > $null
+Set-Location -LiteralPath 'G:\Grad_Project\assistify-rag-project-main'
+$env:PYTHONIOENCODING = 'utf-8'
+$env:PYTHONPATH = 'G:\Grad_Project\assistify-rag-project-main'
+$env:HF_HUB_DISABLE_SYMLINKS_WARNING = '1'
+$env:CUDA_VISIBLE_DEVICES = '0'
+$env:ASSISTIFY_SAFE_MODE = '1'
+$env:ASSISTIFY_DISABLE_TTS = '1'
+$env:ASSISTIFY_DISABLE_RERANKER = '1'
+$env:ASSISTIFY_DISABLE_WHISPER = '1'
+$env:ASSISTIFY_DISABLE_WARMUP = '0'
+$env:ASSISTIFY_DOC_MODE = 'single'
+$env:ASSISTIFY_ENABLE_DOMAIN_SPECIFIC_HEURISTICS = '0'
+$env:ASSISTIFY_EMBED_DEVICE = 'cuda'
+
+Write-Host '============================================================'
+Write-Host 'Assistify RAG Server Starting...'
+Write-Host 'Logging to: C:\Users\MK\Desktop\assistify_rag_live.log'
+Write-Host '============================================================'
+Write-Host ''
+& 'C:\Users\MK\miniconda3\envs\assistify_main\python.exe' -X utf8 -u -m uvicorn backend.assistify_rag_server:app --host 127.0.0.1 --port 7000 --log-level info --timeout-keep-alive 120 | Tee-Object -LiteralPath 'C:\Users\MK\Desktop\assistify_rag_live.log'
+Write-Host ''
+Write-Host 'RAG server exited. Log saved to: C:\Users\MK\Desktop\assistify_rag_live.log'
+Write-Host 'Press Enter to continue...'
+$null = Read-Host

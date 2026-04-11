@@ -449,6 +449,127 @@ class VectorStore:
         return False
 
     @staticmethod
+    def _tokenize_words(text: str) -> List[str]:
+        return re.findall(r"[A-Za-z\u0600-\u06FF0-9]+", str(text or ""))
+
+    @staticmethod
+    def _ocr_garbage_ratio(text: str) -> float:
+        tokens = VectorStore._tokenize_words(text)
+        if not tokens:
+            return 1.0
+        short_tokens = sum(1 for tok in tokens if len(tok) <= 2)
+        weird_tokens = sum(1 for tok in tokens if re.search(r"[^A-Za-z\u0600-\u06FF0-9]", tok))
+        non_alpha = sum(1 for tok in tokens if not re.search(r"[A-Za-z\u0600-\u06FF]", tok))
+        return (short_tokens + weird_tokens + non_alpha) / float(3 * max(1, len(tokens)))
+
+    @staticmethod
+    def _heading_dominance_ratio(text: str) -> float:
+        lines = [ln.strip() for ln in re.split(r"\n+", str(text or "")) if ln.strip()]
+        if not lines:
+            return 0.0
+
+        heading_like = 0
+        for line in lines:
+            line_tokens = re.findall(r"[A-Za-z\u0600-\u06FF0-9]+", line)
+            if not line_tokens:
+                continue
+            if len(line_tokens) <= 6 and not re.search(r"[.!?؟:;]", line):
+                heading_like += 1
+                continue
+            if re.match(r"^\s*(?:lesson|chapter|unit|section)\b", line, flags=re.IGNORECASE):
+                heading_like += 1
+                continue
+            if re.match(r"^\s*\d+(?:\.\d+)*\s+[A-Za-z\u0600-\u06FF]", line):
+                heading_like += 1
+
+        return heading_like / float(max(1, len(lines)))
+
+    @staticmethod
+    def _low_quality_reason(text: str, metadata: Dict[str, Any]) -> Optional[str]:
+        raw_text = str(text or "")
+        lowered = raw_text.lower()
+        tokens = VectorStore._tokenize_words(raw_text)
+        word_count = sum(1 for tok in tokens if re.search(r"[A-Za-z\u0600-\u06FF]", tok))
+
+        if re.search(r"\b(table\s+of\s+contents|brief\s+contents|contents)\b", lowered):
+            return "toc_like"
+
+        numeric_tokens = sum(1 for tok in tokens if tok.isdigit())
+        numeric_ratio = numeric_tokens / float(max(1, len(tokens)))
+        if len(tokens) >= 16 and numeric_ratio >= 0.35:
+            return "number_heavy"
+
+        if word_count < 40:
+            return "too_short"
+
+        heading_ratio = VectorStore._heading_dominance_ratio(raw_text)
+        if heading_ratio >= 0.60:
+            return "heading_dominated"
+
+        if VectorStore._ocr_garbage_ratio(raw_text) >= 0.45:
+            return "ocr_garbage"
+
+        if VectorStore._is_toc_like(raw_text, metadata or {}):
+            return "toc_index_like"
+
+        return None
+
+    @staticmethod
+    def _content_density_score(text: str) -> float:
+        raw_text = str(text or "")
+        tokens = VectorStore._tokenize_words(raw_text)
+        if not tokens:
+            return 0.0
+
+        alpha_tokens = [tok for tok in tokens if re.search(r"[A-Za-z\u0600-\u06FF]", tok)]
+        if not alpha_tokens:
+            return 0.0
+
+        meaningful = sum(1 for tok in alpha_tokens if len(tok) > 4)
+        meaningful_ratio = meaningful / float(max(1, len(alpha_tokens)))
+
+        sentence_markers = len(re.findall(r"[\.:]", raw_text))
+        sentence_signal = min(1.0, sentence_markers / 3.0)
+
+        score = (0.7 * meaningful_ratio) + (0.3 * sentence_signal)
+        return float(max(0.0, min(1.0, score)))
+
+    @staticmethod
+    def _has_real_sentence_structure(text: str) -> bool:
+        raw_text = str(text or "")
+        if raw_text.count(".") < 2:
+            return False
+        words = [tok for tok in VectorStore._tokenize_words(raw_text) if re.search(r"[A-Za-z\u0600-\u06FF]", tok)]
+        if len(words) < 40:
+            return False
+        if VectorStore._heading_dominance_ratio(raw_text) >= 0.55:
+            return False
+        return True
+
+    @staticmethod
+    def _dedup_key(text: str) -> str:
+        return re.sub(r"\s+", " ", str(text or "").strip().lower())
+
+    @staticmethod
+    def _select_top_high_quality(candidates: List[Dict[str, Any]], max_items: int = 3) -> List[Dict[str, Any]]:
+        selected: List[Dict[str, Any]] = []
+        seen = set()
+
+        for cand in candidates:
+            text = str(cand.get("text") or cand.get("page_content") or "")
+            key = VectorStore._dedup_key(text)
+            if not key or key in seen:
+                continue
+            if not VectorStore._has_real_sentence_structure(text):
+                continue
+            seen.add(key)
+            selected.append(cand)
+            if len(selected) >= max_items:
+                break
+
+        return selected
+
+    @staticmethod
     def _chunk_role_bonus(chunk_role: str, profile: Dict[str, bool]) -> float:
         role = str(chunk_role or "").strip().lower()
         if not role:
@@ -550,7 +671,7 @@ class VectorStore:
     def search(self, query: str, top_k: int = 5, distance_threshold: float = 1.0, filter_meta: Dict[str, Any] = None, return_dicts: bool = False, enable_rerank: bool = True):
         """Perform semantic search with structural boosting and optional reranking."""
         requested_top_k = int(top_k or 1)
-        top_k = max(1, min(requested_top_k, 50))
+        top_k = max(1, min(requested_top_k, 120))
         logger.info("[TOPK TRACE] requested=%s actual=%s function=VectorStore.search", requested_top_k, top_k)
         normalized_query = self._normalize_query_text(query)
         query_for_embedding = self._to_e5_query(normalized_query)
@@ -564,7 +685,7 @@ class VectorStore:
         
         # Lower candidate pool for faster retrieval latency while keeping
         # enough recall for downstream ranking.
-        candidate_pool = max(40, top_k * 4)
+        candidate_pool = max(40, min(240, top_k * 4))
 
         results = None
         last_query_exception = None
@@ -665,12 +786,6 @@ class VectorStore:
                 if not chunk_text or not str(chunk_text).strip():
                     chunk_text = str(doc_item)
 
-                # Debug print for vectorstore extraction
-                try:
-                    print(f"[VECTORSTORE FIX] idx={i} id={cid} len={len(chunk_text)} preview={chunk_text[:100]}")
-                except Exception:
-                    pass
-
                 candidates.append({
                     "text": chunk_text,
                     "page_content": chunk_text,
@@ -700,144 +815,116 @@ class VectorStore:
                 # keep similarity separately; use rerank_score as semantic refinement
                 candidates[i]["score"] = float(score)
 
-        # --- STEP: HYBRID LEXICAL BOOST & FINAL SCORING ---
-        # Build meaningful token set for keyword matching (remove stopwords)
-        STOPWORDS = {"who", "what", "are", "is", "the", "a", "an", "in", "of", "to", "and", "or"}
-        raw_tokens = [t for t in re.findall(r"\w+", normalized_query.lower()) if t]
-        meaningful_tokens = [t for t in raw_tokens if t not in STOPWORDS]
-        unique_tokens = list(dict.fromkeys(meaningful_tokens))
-        n_tokens = max(1, len(unique_tokens))
+        before_filter_candidates = list(candidates)
+        dropped_chunks: List[Dict[str, Any]] = []
 
-        # Precompute normalized phrase to detect exact phrase matches (e.g., "six ms")
-        query_phrase = " ".join(unique_tokens)
-
-        for c in candidates:
-            raw_doc = (c.get("text") or "")
-            # normalize doc text: lowercase, remove punctuation, collapse whitespace
-            doc_norm = re.sub(r"[^\w\s]", " ", raw_doc.lower())
-            doc_norm = re.sub(r"\s+", " ", doc_norm).strip()
-
-            matched_tokens = []
-            for t in unique_tokens:
-                if re.search(r"\b" + re.escape(t) + r"\b", doc_norm):
-                    matched_tokens.append(t)
-
-            # Coverage: fraction of meaningful query tokens found
-            coverage = float(len(matched_tokens)) / float(n_tokens)
-
-            # Exact phrase bonus (strong) if normalized query phrase appears
-            exact_phrase_matched = False
-            if query_phrase:
-                if re.search(r"\b" + re.escape(query_phrase) + r"\b", doc_norm):
-                    exact_phrase_matched = True
-
-            # Generic keyword scoring: coverage is the base; exact phrase forces high score
-            keyword_score = coverage
-            if exact_phrase_matched:
-                keyword_score = max(keyword_score, 0.85)
-
-            # Clamp to [0,1]
-            keyword_score = max(0.0, min(1.0, float(keyword_score)))
-
-            # Structured detection (generic heuristics)
-            is_structured = False
-            try:
-                bullet_hits = len(re.findall(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", raw_doc))
-                comma_enum_hits = len(re.findall(r"\b\w+\s*,\s*\w+\s*,\s*\w+", raw_doc))
-                heading_hits = sum(1 for tok in ("figure", "table", "steps", "phases", "levels", "types", "functions", "elements") if tok in doc_norm)
-
-                is_structured = (
-                    bullet_hits > 0
-                    or comma_enum_hits > 0
-                    or heading_hits > 0
+        quality_filtered: List[Dict[str, Any]] = []
+        for cand in candidates:
+            text = str(cand.get("text") or cand.get("page_content") or "")
+            metadata = dict(cand.get("metadata") or {})
+            reason = self._low_quality_reason(text, metadata)
+            if reason:
+                dropped_chunks.append(
+                    {
+                        "reason": reason,
+                        "score": float(cand.get("score", 0.0) or 0.0),
+                        "text": text,
+                        "id": cand.get("id"),
+                    }
                 )
-            except Exception:
-                is_structured = False
+                continue
+            quality_filtered.append(cand)
 
-            # Decide which semantic score to use: reranker if available, else raw similarity
-            if c.get("reranker_score") is not None:
-                semantic_score = float(c.get("reranker_score"))
-            elif c.get("rerank_score") is not None:
-                semantic_score = float(c.get("rerank_score"))
+        if quality_filtered:
+            candidates = quality_filtered
+        else:
+            logger.info("[RAG QUALITY FILTER] all candidates filtered; falling back to original list")
+            candidates = before_filter_candidates
+
+        for cand in candidates:
+            if cand.get("reranker_score") is not None:
+                semantic_score = float(cand.get("reranker_score"))
+            elif cand.get("rerank_score") is not None:
+                semantic_score = float(cand.get("rerank_score"))
             else:
-                semantic_score = float(c.get("similarity", 0.0))
+                semantic_score = float(cand.get("similarity", 0.0) or 0.0)
 
-            # Hybrid final score
-            final_score = 0.8 * semantic_score + 0.2 * keyword_score
+            content_density = self._content_density_score(cand.get("text") or cand.get("page_content") or "")
+            final_score = (semantic_score * 0.7) + (content_density * 0.3)
 
-            rerank_signal = c.get("reranker_score", c.get("rerank_score"))
-            if rerank_signal is not None and float(rerank_signal) > 0.75:
-                final_score += 0.10
+            cand["semantic_score_used"] = float(semantic_score)
+            cand["content_density"] = float(content_density)
+            cand["final_score"] = float(final_score)
+            cand["score"] = float(final_score)
 
-            # Detect list intent generically from query keywords
-            list_keywords = ["list", "what are", "types", "steps", "levels", "phases", "functions", "elements"]
-            is_list_query = any(k in (normalized_query or "").lower() for k in list_keywords)
+        candidates.sort(key=lambda item: item.get("final_score", 0.0), reverse=True)
 
-            # Generic boosts for list-style queries and structured chunks
-            if is_list_query and is_structured:
-                final_score += 0.15
+        max_selected = max(1, min(3, top_k))
+        selected_high_quality = self._select_top_high_quality(candidates, max_items=max_selected)
+        if selected_high_quality:
+            final_results = selected_high_quality
+        else:
+            final_results = candidates[:max_selected]
 
-            if is_list_query and any(tok in doc_norm for tok in ("steps", "phases", "levels", "types", "functions", "elements")):
-                final_score += 0.10
+        self.last_search_debug = {
+            "query": normalized_query,
+            "before_count": len(before_filter_candidates),
+            "after_count": len(candidates),
+            "filtered_count": len(dropped_chunks),
+            "before_top": [
+                {
+                    "score": float(doc.get("similarity", doc.get("score", 0.0)) or 0.0),
+                    "text": str(doc.get("text") or doc.get("page_content") or ""),
+                    "id": doc.get("id"),
+                }
+                for doc in before_filter_candidates[:8]
+            ],
+            "dropped": dropped_chunks,
+            "selected": [
+                {
+                    "score": float(doc.get("final_score", 0.0) or 0.0),
+                    "text": str(doc.get("text") or doc.get("page_content") or ""),
+                    "id": doc.get("id"),
+                }
+                for doc in final_results
+            ],
+        }
 
-            # Generic debug prints
-            try:
-                print("[LIST MODE]", is_list_query)
-                print("[STRUCTURED BOOST]", is_structured)
-                print("[MATCHED TOKENS]", matched_tokens)
-                print("[FINAL SCORE AFTER BOOST]", final_score)
-            except Exception:
-                pass
+        logger.info(
+            "[RAG QUALITY FILTER] before=%s after=%s dropped=%s selected=%s",
+            len(before_filter_candidates),
+            len(candidates),
+            len(dropped_chunks),
+            len(final_results),
+        )
+        for dropped in dropped_chunks[:10]:
+            logger.info(
+                "[RAG QUALITY DROP] reason=%s score=%.4f preview=%s",
+                dropped.get("reason"),
+                float(dropped.get("score", 0.0) or 0.0),
+                str(dropped.get("text") or "")[:180].replace("\n", " "),
+            )
 
-            c["keyword_score"] = float(keyword_score)
-            c["semantic_score_used"] = float(semantic_score)
-            c["final_score"] = float(final_score)
-            c["matched_tokens"] = matched_tokens
-            c["exact_phrase_matched"] = exact_phrase_matched
-
-        # Sort by hybrid final score
-        candidates.sort(key=lambda x: x.get("final_score", 0.0), reverse=True)
-
-        final_results = candidates[:top_k]
         logger.info("[DOC COUNT TRACE] stage=VectorStore.search.final_results count=%s", len(final_results))
 
         # Enhanced debug logging for top results
         for i, res in enumerate(final_results[:min(10, len(final_results))]):
             logger.info(
-                "[RAG Result %d] semantic=%.4f | keyword=%.4f | final=%.4f | matched_tokens=%s | exact_phrase=%s | Page=%s | Source=%s",
+                "[RAG Result %d] semantic=%.4f | density=%.4f | final=%.4f | Page=%s | Source=%s",
                 i + 1,
                 res.get("semantic_score_used", 0.0),
-                res.get("keyword_score", 0.0),
+                res.get("content_density", 0.0),
                 res.get("final_score", 0.0),
-                res.get("matched_tokens", []),
-                res.get("exact_phrase_matched", False),
                 res.get("metadata", {}).get("page"),
                 res.get("metadata", {}).get("source"),
             )
-
-        # Final per-document sanity checks (helpful to validate index alignment)
-        for i, c in enumerate(final_results[:10]):
-            try:
-                print(
-                    f"[FINAL DOC CHECK] idx={i} "
-                    f"id={c.get('trace_id')} "
-                    f"page={c.get('trace_page')} "
-                    f"chunk_index={c.get('trace_chunk_index')} "
-                    f"len={len(c.get('page_content',''))} "
-                    f"preview={c.get('trace_preview')}"
-                )
-            except Exception:
-                pass
 
         # Hard assertion: top result must contain actual text (debugging guard)
         if final_results:
             try:
                 assert final_results[0].get("page_content"), "final_results[0] has empty page_content"
             except AssertionError as ae:
-                try:
-                    print("[FINAL ASSERT FAIL] final_results[0] dict:", final_results[0])
-                except Exception:
-                    pass
+                logger.error("[FINAL ASSERT FAIL] final_results[0] missing page_content")
                 raise
 
         if return_dicts:

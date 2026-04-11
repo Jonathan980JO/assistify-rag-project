@@ -1,3 +1,4 @@
+#NEW
 """
 Project configuration centralization.
 
@@ -141,7 +142,7 @@ LLM_URL = os.getenv("LLM_URL", "http://127.0.0.1:11434/api/chat")
 
 # Ollama configuration — GPU inference via local Ollama service
 # Model name must match exactly what `ollama list` shows
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "127.0.0.1")
 OLLAMA_PORT = int(os.getenv("OLLAMA_PORT", "11434"))
 OLLAMA_CLI = os.getenv("OLLAMA_CLI", "ollama")
