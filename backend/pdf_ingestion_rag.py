@@ -1141,6 +1141,21 @@ class AdaptiveRAGPipeline:
                 return True
             return False
 
+        def _is_placeholder_section_title(line: str) -> bool:
+            s = re.sub(r"\s+", " ", str(line or "").strip())
+            if not s:
+                return True
+            low = s.lower()
+            if low in {"unknown", "document", "contents", "table of contents"}:
+                return True
+            if re.match(r"^(?:page|p\.)\s*[0-9ivxlcdm]+$", low):
+                return True
+            if re.match(r"^(?:chapter|unit)\s+\d+(?:\.\d+){0,2}$", low):
+                return True
+            if re.match(r"^section\s+\d+(?:\.\d+){0,4}$", low):
+                return True
+            return False
+
         def _detect_definition_entity(text: str) -> Optional[str]:
             if not text:
                 return None
@@ -1222,7 +1237,8 @@ class AdaptiveRAGPipeline:
 
             if page_section:
                 current_section = page_section
-                current_section_title = page_section
+                if not _is_placeholder_section_title(page_section):
+                    current_section_title = page_section
 
             i = 0
             while i < len(lines):
@@ -1241,7 +1257,8 @@ class AdaptiveRAGPipeline:
                     current_section = f"Section {sec_match.group(1)}"
 
                 if _is_heading_line(line):
-                    current_section_title = line[:180]
+                    if not _is_placeholder_section_title(line):
+                        current_section_title = line[:180]
                     i += 1
                     continue
 

@@ -1,0 +1,212 @@
+﻿diff --git a/backend/assistify_rag_server.py b/backend/assistify_rag_server.py
+index 8120971e..63e89559 100644
+--- a/backend/assistify_rag_server.py
++++ b/backend/assistify_rag_server.py
+@@ -6276,6 +6276,12 @@ def _expand_query(query: str) -> List[str]:
+ 
+ 
+ def _search_with_query_expansion(query_text: str, top_k: int, distance_threshold: float, return_dicts: bool = True, enable_rerank: bool = True) -> list[dict]:
++    q_fam = _classify_query_family_v2(query_text)
++    if q_fam in {"definition_entity", "fact_entity", "list_entity"}:
++        logger.info("[DIRECT ROUTE] family=%s", q_fam)
++        logger.info("[EXPANSION SKIPPED]")
++        return _search_fast_minimal(query_text, top_k=top_k)
++
+     expanded = _expand_query(query_text)
+     if not expanded:
+         return []
+@@ -6368,7 +6374,11 @@ def _search_with_query_expansion(query_text: str, top_k: int, distance_threshold
+     return out
+ 
+ 
++_RETR_CALLS = 0
+ def _search_fast_minimal(query_text: str, top_k: int) -> list[dict]:
++    global _RETR_CALLS
++    _RETR_CALLS += 1
++    logger.info("[TOTAL RETRIEVAL CALLS]=%s", _RETR_CALLS)
+     requested_top_k = int(top_k or 1)
+     actual_top_k = max(1, requested_top_k)
+     if _classify_query_family_v2(query_text) == "fact_entity":
+@@ -6401,16 +6411,8 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
+     concept_text = (entity or "").strip()
+     definition_top_k = 12 if is_concept_query else 6
+     logger.info("[TOPK TRACE] requested=%s actual=%s function=_search_fast_definition_minimal", definition_top_k, definition_top_k)
+-    if is_concept_query and concept_text:
+-        probes.extend([
+-            (query_text or "").strip(),
+-            f"definition of {concept_text}",
+-            f"{concept_text} is",
+-        ])
+-    else:
+-        if has_entity and concept_text:
+-            probes.append(concept_text)
+-        probes.append((query_text or "").strip())
++    probes = [(query_text or "").strip()]
++    logger.info("[DEFINITION PROBE DISABLED]")
+ 
+     best: list[dict] = []
+     entity_l = (entity or "").strip().lower()
+@@ -6588,7 +6590,7 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
+     collected: List[dict] = []
+     seen_ids: set[str] = set()
+ 
+-    for q in probes[:3]:
++    for q in probes:
+         docs = _search_fast_minimal(q, top_k=definition_top_k)
+         logger.info("[DOC COUNT TRACE] stage=_search_fast_definition_minimal.probe_raw count=%s", len(docs))
+         if not docs:
+@@ -15697,6 +15699,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
+     trace_extractor_used = False
+     
+     # Skip RAG search for greetings only (optimization)
++    global _RETR_CALLS
++    _RETR_CALLS = 0
+     greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
+     is_greeting = len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns)
+     
+@@ -15727,7 +15731,12 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
+         logger.info("[TOPK TRACE] requested=%s actual=%s function=call_llm_with_rag", top_k_req, top_k_req)
+         print("[DEBUG] FINAL QUERY:", text)
+         print("[DEBUG] TOP_K:", top_k_req)
+-        if is_definition_fast:
++        family_v2 = _classify_query_family_v2(text)
++        if family_v2 in {"definition_entity", "fact_entity", "list_entity"}:
++            logger.info("[DIRECT ROUTE] family=%s", family_v2)
++            logger.info("[PRIMARY SEARCH] used=_search_fast_minimal")
++            relevant_docs = _search_fast_minimal(text, top_k=top_k_req)
++        elif is_definition_fast:
+             relevant_docs = _search_fast_definition_minimal(text)
+         else:
+             relevant_docs = _search_fast_minimal(text, top_k=top_k_req)
+@@ -15781,28 +15790,31 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
+             logger.exception("RAG typo-retry skipped due to internal error")
+ 
+         if _classify_query_family_v2(text) == "fact_entity":
+-            try:
+-                fact_rescue_queries = _build_fact_rescue_queries(text, history)
+-                rescue_collected: list[dict] = []
+-                for retry_count, rq in enumerate((fact_rescue_queries or [])[:MAX_FACT_RETRIES], start=1):
+-                    logger.info("[FACT RETRY] count=%s", retry_count)
+-                    logger.info("[FACT RESCUE QUERY] %s", rq)
+-                    rescue_collected.extend(_search_fast_minimal(rq, top_k=8) or [])
+-                if len(fact_rescue_queries or []) >= MAX_FACT_RETRIES:
+-                    logger.info("[FACT RETRY] max_reached=True")
+-                if rescue_collected:
+-                    base_doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs or [], text)
+-                    merged_fact_docs = _merge_rescue_docs_and_rerank(
+-                        text,
+-                        base_doc_dicts,
+-                        rescue_collected,
+-                        top_k=min(FACT_MAX_TOP_K, max(8, (top_k_req if 'top_k_req' in locals() else 5) + 4)),
+-                    )
+-                    if merged_fact_docs:
+-                        relevant_docs = merged_fact_docs
+-                        logger.info("[DOC COUNT TRACE] stage=call_llm_with_rag.fact_rescue_merged count=%s", len(relevant_docs or []))
+-            except Exception:
+-                logger.exception("FACT rescue retrieval skipped due to internal error")
++            if relevant_docs:
++                logger.info("[FACT RESCUE USED]=False")
++            else:
++                try:
++                    fact_rescue_queries = _build_fact_rescue_queries(text, history)
++                    rescue_collected: list[dict] = []
++                    for rq in (fact_rescue_queries or [])[:1]:
++                        if rq == text: continue
++                        logger.info("[FACT RESCUE USED]=True")
++                        logger.info("[FACT RETRY] count=1")
++                        logger.info("[FACT RESCUE QUERY] %s", rq)
++                        rescue_collected.extend(_search_fast_minimal(rq, top_k=8) or [])
++                    if rescue_collected:
++                        base_doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs or [], text)
++                        merged_fact_docs = _merge_rescue_docs_and_rerank(
++                            text,
++                            base_doc_dicts,
++                            rescue_collected,
++                            top_k=min(FACT_MAX_TOP_K, max(8, (top_k_req if 'top_k_req' in locals() else 5) + 4)),
++                        )
++                        if merged_fact_docs:
++                            relevant_docs = merged_fact_docs
++                            logger.info("[DOC COUNT TRACE] stage=call_llm_with_rag.fact_rescue_merged count=%s", len(relevant_docs or []))
++                except Exception:
++                    logger.exception("FACT rescue retrieval skipped due to internal error")
+ 
+     retrieval_ms = (time.perf_counter() - retrieval_t0) * 1000.0
+ 
+@@ -17747,6 +17759,8 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
+         arabic_small_talk = False
+ 
+     # RAG search (same as non-streaming)
++    global _RETR_CALLS
++    _RETR_CALLS = 0
+     greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
+     # In Arabic small-talk mode, treat as greeting
+     is_greeting = arabic_small_talk or (len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns))
+@@ -17776,7 +17790,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
+             top_k_req = 6
+         print("[DEBUG] FINAL QUERY:", text)
+         print("[DEBUG] TOP_K:", top_k_req)
+-        if family_v2 != "fact_entity" and _is_safe_definition_fast_path_query(text):
++        if family_v2 in {"definition_entity", "fact_entity", "list_entity"}:
++            logger.info("[DIRECT ROUTE] family=%s", family_v2)
++            logger.info("[PRIMARY SEARCH] used=_search_fast_minimal")
++            relevant_docs = _search_fast_minimal(text, top_k=top_k_req)
++        elif family_v2 != "fact_entity" and _is_safe_definition_fast_path_query(text):
+             relevant_docs = _search_fast_definition_minimal(text)
+         else:
+             relevant_docs = _search_fast_minimal(text, top_k=top_k_req)
+@@ -17805,29 +17823,32 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
+         relevant_docs = _rerank_docs_for_query_intent(text, relevant_docs)
+         relevant_docs = _retrieve_with_section_bias(text, relevant_docs, top_k=top_k_req if 'top_k_req' in locals() else 10)
+ 
+-    if (not is_greeting) and (_classify_query_family_v2(text) == "fact_entity") and relevant_docs:
+-        try:
+-            fact_rescue_queries = _build_fact_rescue_queries(text, history)
+-            rescue_collected: list[dict] = []
+-            for retry_count, rq in enumerate((fact_rescue_queries or [])[:MAX_FACT_RETRIES], start=1):
+-                logger.info("[FACT RETRY] count=%s", retry_count)
+-                logger.info("[FACT RESCUE QUERY] %s", rq)
+-                rescue_collected.extend(_search_fast_minimal(rq, top_k=8) or [])
+-            if len(fact_rescue_queries or []) >= MAX_FACT_RETRIES:
+-                logger.info("[FACT RETRY] max_reached=True")
+-            if rescue_collected:
+-                base_doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs or [], text)
+-                merged_fact_docs = _merge_rescue_docs_and_rerank(
+-                    text,
+-                    base_doc_dicts,
+-                    rescue_collected,
+-                    top_k=min(FACT_MAX_TOP_K, max(8, (top_k_req if 'top_k_req' in locals() else 5) + 4)),
+-                )
+-                if merged_fact_docs:
+-                    relevant_docs = merged_fact_docs
+-                    logger.info("[DOC COUNT TRACE] stage=call_llm_streaming.fact_rescue_merged count=%s", len(relevant_docs or []))
+-        except Exception:
+-            logger.exception("FACT rescue retrieval skipped due to internal error (ws)")
++    if (not is_greeting) and (_classify_query_family_v2(text) == "fact_entity"):
++        if relevant_docs:
++            logger.info("[FACT RESCUE USED]=False")
++        else:
++            try:
++                fact_rescue_queries = _build_fact_rescue_queries(text, history)
++                rescue_collected: list[dict] = []
++                for rq in (fact_rescue_queries or [])[:1]:
++                    if rq == text: continue
++                    logger.info("[FACT RESCUE USED]=True")
++                    logger.info("[FACT RETRY] count=1")
++                    logger.info("[FACT RESCUE QUERY] %s", rq)
++                    rescue_collected.extend(_search_fast_minimal(rq, top_k=8) or [])
++                if rescue_collected:
++                    base_doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs or [], text)
++                    merged_fact_docs = _merge_rescue_docs_and_rerank(
++                        text,
++                        base_doc_dicts,
++                        rescue_collected,
++                        top_k=min(FACT_MAX_TOP_K, max(8, (top_k_req if 'top_k_req' in locals() else 5) + 4)),
++                    )
++                    if merged_fact_docs:
++                        relevant_docs = merged_fact_docs
++                        logger.info("[DOC COUNT TRACE] stage=call_llm_streaming.fact_rescue_merged count=%s", len(relevant_docs or []))
++            except Exception:
++                logger.exception("FACT rescue retrieval skipped due to internal error (ws)")
+ 
+     if (not is_greeting) and relevant_docs and (not arabic_mode) and _is_simple_factual_text_query(text):
+         if not _passes_hybrid_relevance_gate(text, relevant_docs):

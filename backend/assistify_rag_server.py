@@ -6597,72 +6597,167 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
         return drifts / max(1, len(token_sets) - 1)
 
     def _best_local_window(raw_text: str) -> tuple[float, str, str, dict[str, float]]:
-        lines = [ln for ln in str(raw_text or "").splitlines() if str(ln or "").strip()]
-        if not lines:
+        lines_raw = [str(ln or "") for ln in str(raw_text or "").splitlines()]
+        if not lines_raw:
             return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
 
-        def _boundary_heading(line: str) -> bool:
-            s = str(line or "").strip()
-            if not s:
-                return False
-            if re.match(r"^\s*(?:chapter\s+\d+|unit\s+\d+|section\s+\d+|\d+(?:\.\d+){1,4}\s+.+|[A-Z]\.[\s]+.+|[IVXLC]+\.[\s]+.+)\s*$", s, flags=re.IGNORECASE):
+        course_code_re = re.compile(r"\b[A-Za-z]{2,8}\s*[-–—]?\s*\d{2,4}[A-Za-z]?\b", re.IGNORECASE)
+        broad_title_re = re.compile(r"\b(?:introduction|intro\s*duction|fundamentals|principles|basics|overview)\s+to\b", re.IGNORECASE)
+        doc_header_term_re = re.compile(r"\b(?:course|syllabus|textbook|edition|semester|module|manual)\b", re.IGNORECASE)
+
+        def _is_document_title_heading(cand: str, idx: int) -> bool:
+            c = re.sub(r"\s+", " ", str(cand or "")).strip()
+            if not c:
                 return True
-            return _heading_like(s)
+            lower = c.lower()
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", c)
+            title_case_words = sum(1 for w in words if re.match(r"^[A-Z][a-zA-Z\-']+$", w))
+            title_ratio = (float(title_case_words) / float(max(1, len(words)))) if words else 0.0
+            has_course_code = bool(course_code_re.search(c))
+            has_local_marker = bool(
+                c.endswith(":")
+                or re.match(r"^\s*\d+(?:\.\d+)*\s+[A-Za-z]", c)
+                or re.search(r"\b(?:section|part|topic|subsection)\s+\d+\b", lower)
+            )
+            if has_course_code and not has_local_marker:
+                return True
+            if re.search(r"[-–—]\s*[A-Za-z]{2,8}\s*\d{2,4}", c, flags=re.IGNORECASE) and not has_local_marker:
+                return True
+            if broad_title_re.search(c) and not has_local_marker:
+                return True
+            if doc_header_term_re.search(c) and title_ratio >= 0.5 and not has_local_marker:
+                return True
 
-        candidates: list[tuple[int, int, str]] = []
-        for idx, ln in enumerate(lines):
-            if _heading_like(ln):
-                start = max(0, idx)
-                end = min(len(lines), idx + 14)
-                for j in range(idx + 1, min(len(lines), idx + 44)):
-                    if (j - idx) >= 2 and _boundary_heading(lines[j]):
-                        end = j
-                        break
-                    end = j + 1
-                candidates.append((start, end, ln.strip()))
+            norm = re.sub(r"[^a-z0-9]+", " ", lower).strip()
+            repeated_head = 0
+            if norm:
+                for probe in lines_raw[max(0, idx - 80): min(len(lines_raw), idx + 80)]:
+                    p = re.sub(r"[^a-z0-9]+", " ", str(probe or "").lower()).strip()
+                    if p == norm:
+                        repeated_head += 1
+            if repeated_head >= 2 and title_ratio >= 0.55 and not has_local_marker:
+                return True
+            return False
 
-        step = 5
-        win = 24
-        for i in range(0, len(lines), step):
-            candidates.append((i, min(len(lines), i + win), ""))
+        heading_candidates: list[tuple[float, int, str]] = []
+        raw_candidates: list[str] = []
+        placeholder_heading_rejected = False
+        for idx, raw_ln in enumerate(lines_raw[:140]):
+            ln = re.sub(r"\s+", " ", raw_ln).strip()
+            if not ln:
+                continue
+            for cand in _extract_heading_snippets_from_line(ln):
+                if _is_placeholder_heading_text(cand):
+                    placeholder_heading_rejected = True
+                    logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_placeholder=True', cand[:120])
+                    continue
+                if _is_document_title_heading(cand, idx):
+                    logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_document_title=True', cand[:120])
+                    continue
+                raw_candidates.append(cand)
+                low_ln = cand.lower()
+                heading_overlap = float(sum(1 for tok in query_focus_tokens if _has_query_token(low_ln, tok)))
+                style = 1.0 if cand.endswith(":") else 0.0
+                if re.match(r"^[A-Z][A-Za-z0-9\- ,()]{3,90}$", cand):
+                    style += 0.75
+                heading_candidates.append(((1.45 * heading_overlap) + style, idx, cand))
 
-        if not candidates:
+        logger.info("[HEADING SOURCE DEBUG] raw_candidates=%s", raw_candidates[:8])
+        if not heading_candidates:
+            logger.info('[HEADING SOURCE DEBUG] chosen_heading=""')
+            logger.info("[HEADING SOURCE DEBUG] chosen_from=none")
+            logger.info("[HEADING SOURCE DEBUG] no_real_heading_found=True")
             return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
 
-        best_score = -1.0
-        best_text = ""
-        best_anchor = ""
-        best_meta = {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0}
+        heading_candidates.sort(key=lambda x: x[0], reverse=True)
+        _anchor_score, anchor_idx, anchor_heading = heading_candidates[0]
+        logger.info('[HEADING SOURCE DEBUG] chosen_heading="%s"', anchor_heading[:120])
+        logger.info("[HEADING SOURCE DEBUG] chosen_from=body_line")
 
-        for start, end, anchor in candidates[:60]:
-            block_lines = lines[start:end]
-            if not block_lines:
+        stop_reason = "max_local_window_length"
+        start_idx = anchor_idx
+        end_idx = anchor_idx
+        anchor_token_set = {t for t in re.findall(r"[a-z0-9]{3,}", anchor_heading.lower()) if t not in {"the", "and", "for", "with", "from", "section", "chapter", "unit"}}
+        blank_run = 0
+        prose_drift_run = 0
+        max_chars = 2400
+        max_lines = 52
+        acc_chars = 0
+
+        for j in range(anchor_idx, min(len(lines_raw), anchor_idx + max_lines)):
+            cur = str(lines_raw[j] or "")
+            cur_norm = re.sub(r"\s+", " ", cur).strip()
+            if not cur_norm:
+                blank_run += 1
+                if blank_run >= 2 and j > anchor_idx + 2:
+                    stop_reason = "clear_section_break"
+                    break
                 continue
-            block_text = "\n".join(block_lines).strip()
-            low = block_text.lower()
 
-            focus_hits = float(sum(1 for tok in query_focus_tokens if _has_query_token(low, tok)))
-            anchor_low = (anchor or "").lower()
-            heading_hits = float(sum(1 for tok in query_focus_tokens if anchor_low and _has_query_token(anchor_low, tok)))
-            marker = float(_marker_density(block_lines))
-            drift = float(_topic_drift(block_lines))
-            wc = len(re.findall(r"[a-z0-9]+", low))
-            compactness = max(0.0, 1.0 - (abs(wc - 120) / 220.0))
+            blank_run = 0
+            if j > anchor_idx:
+                if _heading_like(cur_norm) and (not _is_placeholder_heading_text(cur_norm)):
+                    stop_reason = "next_heading"
+                    break
 
-            score = (1.5 * focus_hits) + (1.2 * heading_hits) + (2.0 * marker) + (0.9 * compactness) + (1.0 * (1.0 - min(1.0, drift)))
-            if score > best_score:
-                best_score = score
-                best_text = block_text
-                best_anchor = anchor
-                best_meta = {
-                    "focus_hits": focus_hits,
-                    "heading_hits": heading_hits,
-                    "marker_density": marker,
-                    "compactness": compactness,
-                    "drift": drift,
-                }
+                cur_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", cur_norm.lower()) if t not in {"the", "and", "for", "with", "from", "is", "are", "was", "were"}}
+                if cur_tokens and anchor_token_set:
+                    inter = len(cur_tokens & anchor_token_set)
+                    union = len(cur_tokens | anchor_token_set) or 1
+                    if (inter / union) < 0.04 and (not re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", cur_norm)):
+                        prose_drift_run += 1
+                    else:
+                        prose_drift_run = 0
+                if prose_drift_run >= 3:
+                    stop_reason = "strong_prose_drift"
+                    break
 
-        return (best_score, best_text, best_anchor, best_meta)
+            end_idx = j
+            acc_chars += len(cur_norm)
+            if acc_chars >= max_chars:
+                stop_reason = "max_local_window_length"
+                break
+
+        block_lines = [re.sub(r"\s+", " ", str(x or "")).strip() for x in lines_raw[start_idx: end_idx + 1] if re.sub(r"\s+", " ", str(x or "")).strip()]
+        block_text = "\n".join(block_lines).strip()
+        if not block_text:
+            return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
+
+        low = block_text.lower()
+        focus_hits = float(sum(1 for tok in query_focus_tokens if _has_query_token(low, tok)))
+        anchor_low = anchor_heading.lower()
+        heading_hits = float(sum(1 for tok in query_focus_tokens if _has_query_token(anchor_low, tok)))
+        marker = float(_marker_density(block_lines))
+        drift = float(_topic_drift(block_lines))
+        wc = len(re.findall(r"[a-z0-9]+", low))
+        compactness = max(0.0, 1.0 - (abs(wc - 120) / 220.0))
+        score = (1.5 * focus_hits) + (1.25 * heading_hits) + (2.0 * marker) + (0.9 * compactness) + (1.0 * (1.0 - min(1.0, drift)))
+
+        sig_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", anchor_low) if t not in {"the", "and", "for", "with", "from", "section", "chapter", "unit"}][:4]
+        section_signature = " ".join(sig_tokens)
+
+        logger.info('[LOCAL SECTION WINDOW] anchor_heading="%s"', anchor_heading[:120])
+        logger.info('[LOCAL SECTION WINDOW] start=%s end=%s reason_stop="%s"', start_idx, end_idx, stop_reason)
+        logger.info("[LOCAL SECTION WINDOW] used_single_window=True")
+
+        return (
+            score,
+            block_text,
+            anchor_heading,
+            {
+                "focus_hits": focus_hits,
+                "heading_hits": heading_hits,
+                "marker_density": marker,
+                "compactness": compactness,
+                "drift": drift,
+                "used_single_window": 1.0,
+                "window_start": float(start_idx),
+                "window_end": float(end_idx),
+                "reason_stop": stop_reason,
+                "section_signature": section_signature,
+                "placeholder_heading_rejected": 1.0 if placeholder_heading_rejected else 0.0,
+            },
+        )
 
     def _base_score(doc: dict) -> float:
         for key in ("final_score", "similarity", "score"):
@@ -6826,6 +6921,11 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
                 md_new["_local_heading_match"] = round(local_heading_match, 4)
                 md_new["_local_list_density"] = round(local_list_density, 4)
                 md_new["_local_confidence_score"] = round(local_confidence_score, 4)
+                md_new["_used_single_window"] = bool(local_meta.get("used_single_window", 0.0) >= 0.5)
+                md_new["_placeholder_heading_rejected"] = bool(local_meta.get("placeholder_heading_rejected", 0.0) >= 0.5)
+                md_new["_local_window_stop_reason"] = str(local_meta.get("reason_stop") or "")
+                md_new["_section_signature"] = str(local_meta.get("section_signature") or "")
+                md_new["_single_local_window_text"] = local_text[:6000]
                 doc_new["metadata"] = md_new
                 doc_new["page_content"] = local_text
                 doc_new["text"] = local_text
@@ -6836,6 +6936,26 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
                     logger.info("[SECTION ANCHOR PROMOTION] chunk=%s anchor=%s score=%.3f", chunk_idx, local_anchor[:120], float(local_score))
             else:
                 doc_keep = dict(doc)
+                md_keep = dict(md)
+                local_focus_hits = float(local_meta.get("focus_hits", 0.0) or 0.0)
+                local_heading_match = float(local_meta.get("heading_hits", 0.0) or 0.0)
+                local_list_density = float(local_meta.get("marker_density", 0.0) or 0.0)
+                local_confidence_score = min(1.0, float(local_score) / 6.0)
+                md_keep["local_focus_hits"] = round(local_focus_hits, 4)
+                md_keep["local_heading_match"] = round(local_heading_match, 4)
+                md_keep["local_list_density"] = round(local_list_density, 4)
+                md_keep["local_confidence_score"] = round(local_confidence_score, 4)
+                md_keep["_local_focus_hits"] = round(local_focus_hits, 4)
+                md_keep["_local_heading_match"] = round(local_heading_match, 4)
+                md_keep["_local_list_density"] = round(local_list_density, 4)
+                md_keep["_local_confidence_score"] = round(local_confidence_score, 4)
+                md_keep["_used_single_window"] = bool(local_meta.get("used_single_window", 0.0) >= 0.5)
+                md_keep["_placeholder_heading_rejected"] = bool(local_meta.get("placeholder_heading_rejected", 0.0) >= 0.5)
+                md_keep["_local_window_stop_reason"] = str(local_meta.get("reason_stop") or "")
+                md_keep["_section_signature"] = str(local_meta.get("section_signature") or "")
+                if local_text:
+                    md_keep["_single_local_window_text"] = local_text[:6000]
+                doc_keep["metadata"] = md_keep
                 doc_keep["_local_window_score"] = float(local_score)
                 promoted_docs.append(doc_keep)
                 logger.info("[LOCAL WINDOW PROMOTION] chunk=%s promoted=False reason=weak_local_window", chunk_idx)
@@ -6853,14 +6973,22 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
         "heading_match": 0.0,
         "list_density": 0.0,
         "confidence": 0.0,
+        "used_single_window": 0.0,
+        "placeholder_heading_rejected": 0.0,
+        "merged_extra_chunks_count": 0.0,
         "source_chunk_count": 0.0,
         "chunk_span": 0.0,
         "source_chunks": [],
         "chunk_texts": [],
+        "validation_scope": "selected_chunks",
+        "single_local_window_text": "",
+        "scope_chunk": -1.0,
     }
     source_chunks: set[int] = set()
+    best_scope_conf = -1.0
     for d in (docs or []):
         md = dict((d or {}).get("metadata") or {})
+        chunk_idx = -1
         try:
             chunk_idx = int(md.get("chunk_index"))
             source_chunks.add(chunk_idx)
@@ -6873,6 +7001,20 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
                 "chunk": int(chunk_idx) if "chunk_idx" in locals() else -1,
                 "text": chunk_text[:3000],
             })
+        conf_raw = float(md.get("local_confidence_score") or md.get("_local_confidence_score") or md.get("_local_window_score") or 0.0)
+        conf = min(1.0, (conf_raw / 6.0)) if conf_raw > 1.0 else max(0.0, conf_raw)
+        support["confidence"] = max(support["confidence"], conf)
+        is_single_window = bool(md.get("_used_single_window"))
+        if is_single_window:
+            support["used_single_window"] = 1.0
+        if bool(md.get("_placeholder_heading_rejected")):
+            support["placeholder_heading_rejected"] = 1.0
+        scope_text = str(md.get("_single_local_window_text") or chunk_text)
+        if is_single_window and scope_text.strip() and conf > best_scope_conf:
+            best_scope_conf = conf
+            support["validation_scope"] = "single_local_window"
+            support["single_local_window_text"] = scope_text[:8000]
+            support["scope_chunk"] = float(chunk_idx)
         if not promoted:
             continue
         support["promoted_count"] += 1.0
@@ -6888,9 +7030,6 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
             support["list_density"],
             float(md.get("local_list_density") or md.get("_local_list_density") or 0.0),
         )
-        conf_raw = float(md.get("local_confidence_score") or md.get("_local_confidence_score") or md.get("_local_window_score") or 0.0)
-        conf = min(1.0, (conf_raw / 6.0)) if conf_raw > 1.0 else max(0.0, conf_raw)
-        support["confidence"] = max(support["confidence"], conf)
     ordered_chunks = sorted(source_chunks)
     support["source_chunk_count"] = float(len(ordered_chunks))
     support["chunk_span"] = float((ordered_chunks[-1] - ordered_chunks[0]) if len(ordered_chunks) >= 2 else 0.0)
@@ -8075,10 +8214,18 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
 
     vocab, freq_map, by_initial = _build_dynamic_vocab()
 
+    q_low = re.sub(r"\s+", " ", q.strip().lower())
+    list_query_mode = bool(
+        _is_targeted_list_question(q_low)
+        or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
+    )
+
     def _replace_token(m: re.Match) -> str:
         token = m.group(0)
         low = token.lower()
         if token.isupper() and len(token) >= 3:
+            return token
+        if list_query_mode and len(low) >= 5 and low.endswith("s"):
             return token
         if low in preserve_short_terms:
             return token
@@ -10429,6 +10576,7 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         return None
 
     principles_query = bool(re.search(r"\bprinciples?\b", q))
+    stage_list_query_mode = bool(re.search(r"\bstages?\b", q))
 
     raw = str(answer_text or "")
     if not raw.strip():
@@ -10460,7 +10608,52 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         x = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*", "", s or "", flags=re.IGNORECASE)
         x = re.sub(r"^[\W_]+|[\W_]+$", "", x)
         x = re.sub(r"\s+", " ", x).strip(" ,;:-")
+        words_x = re.findall(r"[A-Za-z][A-Za-z\-']*", x)
+        if len(words_x) == 2 and words_x[0][:1].isupper() and words_x[1][:1].islower():
+            label_suffixes = {"school", "psychology", "approach", "model", "perspective", "theory", "method"}
+            if words_x[1].lower() not in label_suffixes:
+                x = words_x[0] + words_x[1]
         return x
+
+    def _normalize_stage_label(item_text: str) -> str:
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", str(item_text or ""))
+        if not words:
+            return ""
+        out_words: List[str] = []
+        for w in words:
+            lw = w.lower()
+            if lw == "stage":
+                out_words.append("Stage")
+            elif lw == "period":
+                out_words.append("Period")
+            else:
+                out_words.append(w[:1].upper() + w[1:].lower())
+        return " ".join(out_words).strip()
+
+    def _extract_stage_labels(item_text: str) -> List[str]:
+        labels: List[str] = []
+        for m in re.finditer(
+            r"\b((?!(?:stage|period)\b)[A-Za-z][A-Za-z\-']{2,}(?:\s+(?!(?:stage|period)\b)[A-Za-z][A-Za-z\-']{2,}){0,2}\s+(?:stage|period))\b",
+            str(item_text or ""),
+            flags=re.IGNORECASE,
+        ):
+            norm_stage = _normalize_stage_label((m.group(1) or "").strip())
+            if not norm_stage:
+                continue
+            label_words = re.findall(r"[A-Za-z][A-Za-z\-']*", norm_stage)
+            if len(label_words) < 2 or label_words[-1].lower() not in {"stage", "period"}:
+                continue
+            prefix = [w.lower() for w in label_words[:-1]]
+            if not prefix or len(prefix) > 3:
+                continue
+            if any(w in {"the", "this", "that", "during", "from", "into", "with", "without", "year", "years", "zone"} for w in prefix):
+                continue
+            labels.append(norm_stage)
+        return labels
+
+    def _label_token_set(s: str) -> set[str]:
+        generic = {"school", "schools", "approach", "approaches", "model", "models", "perspective", "perspectives"}
+        return {t for t in re.findall(r"[a-z0-9]{3,}", str(s or "").lower()) if t not in generic}
 
     raw_candidates: List[str] = []
     for ln in [x for x in raw.splitlines() if x.strip()]:
@@ -10490,6 +10683,14 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     _sent_verb_re = re.compile(r"\b(?:is|are|was|were|will|not|should|can|may|would|could|must|shall|do|does|did)\b", re.IGNORECASE)
     for cand in raw_candidates:
         split_parts = [cand]
+        if stage_list_query_mode:
+            stage_parts: List[str] = []
+            for m in re.finditer(r"\b([A-Z][A-Za-z\-]{2,}(?:\s+[A-Z][A-Za-z\-]{2,}){0,2}\s+Stage)\b", cand):
+                stage_parts.append((m.group(1) or "").strip())
+            if stage_parts:
+                split_parts = stage_parts
+            else:
+                split_parts = [p.strip() for p in re.split(r"\s*[-–—;,|]\s*", cand) if p.strip()]
         if principles_query and re.search(r"\band\b", cand, flags=re.IGNORECASE):
             split_parts = [p.strip() for p in re.split(r"\band\b", cand, flags=re.IGNORECASE) if p.strip()]
 
@@ -10497,43 +10698,123 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             item = _clean_item(part)
             if not item:
                 continue
-            if _ocr_garbage(item):
-                continue
-            if re.search(r"\d", item):
-                continue
-            words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
-            if not words:
-                continue
-            wc = len(words)
-            if principles_query and wc > 4:
-                continue
-            if principles_query and re.search(r"\b(is|are|was|were|interacts?|incorporates?|essential|entity|organization)\b", item, flags=re.IGNORECASE):
-                continue
-            if wc < 3:
-                # Keep compact, meaningful list labels (e.g., Planning, Organizing).
-                if not all(len(w) >= 4 for w in words):
+            stage_mode_items: List[str] = [item]
+            if stage_list_query_mode:
+                stage_labels = _extract_stage_labels(item)
+                if not stage_labels:
                     continue
-            # Reject sentence fragments: 5+ words with common verbs are not list items
-            if wc >= 5 and _sent_verb_re.search(item):
-                continue
-            # Reject mid-sentence fragments (start with lowercase, suggesting they were
-            # split mid-sentence rather than being actual list labels)
-            if wc >= 3 and item[0].islower() and not item[0].isdigit():
-                continue
-            # Reject multi-sentence items (contain '. ' mid-text)
-            if ". " in item and len(item) > 20:
-                continue
-            low_words = [w.lower() for w in words]
-            if all(w in stopwords for w in low_words):
-                continue
-            norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
-            if not norm or norm in seen:
-                continue
-            seen.add(norm)
-            cleaned.append(item)
+                stage_mode_items = stage_labels
+            for stage_item in stage_mode_items:
+                item = stage_item
+                if not item:
+                    continue
+                if _ocr_garbage(item):
+                    continue
+                if re.search(r"\d", item):
+                    continue
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+                if not words:
+                    continue
+                wc = len(words)
+                if principles_query and wc > 4:
+                    continue
+                if principles_query and re.search(r"\b(is|are|was|were|interacts?|incorporates?|essential|entity|organization)\b", item, flags=re.IGNORECASE):
+                    continue
+                if wc < 3:
+                    # Keep compact, meaningful list labels (e.g., Planning, Organizing).
+                    if not all(len(w) >= 4 for w in words):
+                        continue
+                if stage_list_query_mode and wc <= 3 and re.search(r"\b(?:stage|period)\b", item, flags=re.IGNORECASE):
+                    item = re.sub(r"\s+", " ", item).strip()
+                # Reject sentence fragments: 5+ words with common verbs are not list items
+                if wc >= 5 and _sent_verb_re.search(item):
+                    continue
+                # Reject mid-sentence fragments (start with lowercase, suggesting they were
+                # split mid-sentence rather than being actual list labels)
+                if wc >= 3 and item[0].islower() and not item[0].isdigit():
+                    continue
+                # Reject multi-sentence items (contain '. ' mid-text)
+                if ". " in item and len(item) > 20:
+                    continue
+                low_words = [w.lower() for w in words]
+                if all(w in stopwords for w in low_words):
+                    continue
+                norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+                if not norm or norm in seen:
+                    continue
+                item_tokens = _label_token_set(item)
+                if item_tokens:
+                    replaced = False
+                    skip_item = False
+                    for idx_existing, existing in enumerate(cleaned):
+                        existing_tokens = _label_token_set(existing)
+                        if not existing_tokens:
+                            continue
+                        if item_tokens <= existing_tokens:
+                            skip_item = True
+                            break
+                        if existing_tokens < item_tokens:
+                            cleaned[idx_existing] = item
+                            seen.add(norm)
+                            replaced = True
+                            break
+                    if skip_item:
+                        continue
+                    if replaced:
+                        continue
+                seen.add(norm)
+                cleaned.append(item)
 
+
+    if stage_list_query_mode and cleaned:
+        split_stage_items: List[str] = []
+        for item in cleaned:
+            stage_hits = _extract_stage_labels(item)
+            if stage_hits:
+                split_stage_items.extend(stage_hits)
+        deduped_stage_items: List[str] = []
+        seen_stage_norm: Set[str] = set()
+        for item in split_stage_items:
+            norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+            if not norm or norm in seen_stage_norm:
+                continue
+            seen_stage_norm.add(norm)
+            deduped_stage_items.append(item)
+        cleaned = deduped_stage_items
 
     logger.info("[LIST CLEAN] before=%d after=%d", len(raw_candidates), len(cleaned))
+    goal_objective_mode = _is_goal_objective_list_query(q, "list_entity")
+    if goal_objective_mode and len(cleaned) >= 4:
+        def _word_count(s: str) -> int:
+            return len(re.findall(r"[A-Za-z][A-Za-z\-']*", str(s or "")))
+
+        lead = cleaned[:-1]
+        tail = cleaned[-1]
+        upper_ratio = sum(1 for it in lead if it and it[0].isupper()) / float(max(1, len(lead)))
+        tail_wc = _word_count(tail)
+        prev = lead[-1] if lead else ""
+        prev_wc = _word_count(prev)
+        prev_has_prep = bool(re.search(r"\b(?:of|for|to|with|in|on|by)\b", prev.lower()))
+        tail_overlap = 0
+        tail_tokens = {t for t in re.findall(r"[a-z]{3,}", tail.lower()) if t not in stopwords}
+        for it in lead:
+            it_tokens = {t for t in re.findall(r"[a-z]{3,}", it.lower()) if t not in stopwords}
+            if tail_tokens and it_tokens and (tail_tokens & it_tokens):
+                tail_overlap += 1
+
+        tail_is_spill = bool(
+            tail
+            and tail[0].islower()
+            and tail_wc <= 3
+            and upper_ratio >= 0.70
+            and prev_wc >= 4
+            and prev_has_prep
+            and tail_overlap == 0
+        )
+        if tail_is_spill:
+            logger.info("[LIST CLEAN OUTLIER] dropped_tail_fragment=%s", tail[:120])
+            cleaned = lead
+
     if len(cleaned) < 2:
         return None
     return "\n".join(f"- {it}" for it in cleaned)
@@ -10586,7 +10867,50 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         seen_norm.add(norm)
         cleaned_items.append(x)
 
-    if len(cleaned_items) < 3:
+    source_chunk_count = 0.0
+    merged_extra_chunks_count = 0.0
+    selected_chunks_count = 0.0
+    used_single_window = False
+    placeholder_heading_rejected = False
+    strict_adjacent_merge_allowed = False
+    if isinstance(local_support, dict):
+        source_chunk_count = float(local_support.get("source_chunk_count", 0.0) or 0.0)
+        merged_extra_chunks_count = float(local_support.get("merged_extra_chunks_count", 0.0) or 0.0)
+        selected_chunks_count = float(local_support.get("selected_chunks_count", source_chunk_count) or source_chunk_count)
+        used_single_window = bool(
+            float(local_support.get("used_single_window", 0.0) or 0.0) >= 0.5
+            or str(local_support.get("validation_scope") or "") == "single_local_window"
+        )
+        placeholder_heading_rejected = bool(float(local_support.get("placeholder_heading_rejected", 0.0) or 0.0) >= 0.5)
+        strict_adjacent_merge_allowed = bool(float(local_support.get("strict_adjacent_merge_allowed", 0.0) or 0.0) >= 0.5)
+    if (not used_single_window) and int(round(selected_chunks_count)) == 1 and merged_extra_chunks_count <= 0.0:
+        used_single_window = True
+    if (not used_single_window) and selected_chunks_count <= 1.0 and source_chunk_count <= 1.0 and merged_extra_chunks_count <= 0.0:
+        used_single_window = True
+
+    def _looks_compact_list_item_shape(item_text: str) -> bool:
+        low = item_text.lower().strip()
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item_text)
+        wc = len(words)
+        if wc < 1 or wc > 12:
+            return False
+        if wc >= 6 and re.search(r"\b(?:is|are|was|were|has|have|had|because|therefore|however|which|that)\b", low):
+            return False
+        if ". " in item_text:
+            return False
+        return True
+
+    compact_item_count = sum(1 for it in cleaned_items if _looks_compact_list_item_shape(it))
+    coherent_short_items = bool(len(cleaned_items) >= 2 and compact_item_count >= 2)
+    single_window_short_list_override = bool(
+        used_single_window
+        and int(round(selected_chunks_count)) == 1
+        and merged_extra_chunks_count <= 0.0
+        and coherent_short_items
+    )
+    min_required_items = 2 if single_window_short_list_override else 3
+
+    if len(cleaned_items) < min_required_items:
         logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(cleaned_items), rejected_items, 0, 0.0, 0.0)
         logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
         return (False, "min_quality_failed", None)
@@ -10606,10 +10930,130 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     if (len(aligned_items) < 3 or alignment_score < 0.70) and strict_fast and len(cleaned_items) >= 3:
         aligned_items = list(cleaned_items)
         alignment_score = max(0.70, alignment_score)
-    if len(aligned_items) < 3 or alignment_score < 0.70:
+
+    _list_query_norm = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    _directive_list_query_mode = bool(re.match(r"^\s*(?:list|name|give|mention|identify)\b", _list_query_norm))
+    strict_label_query_mode = bool(
+        (re.match(r"^\s*(?:what|which)\s+are\b", _list_query_norm) or _directive_list_query_mode)
+        and (not _is_goal_objective_list_query(query_text, q_family_v2))
+    )
+    stage_list_query_mode = bool(re.search(r"\bstages?\b", _list_query_norm))
+    strict_continuation_window_ok = bool(
+        _directive_list_query_mode
+        and stage_list_query_mode
+        and used_single_window
+        and strict_adjacent_merge_allowed
+        and int(round(selected_chunks_count)) <= 2
+        and merged_extra_chunks_count <= 1.0
+    )
+    if (
+        _directive_list_query_mode
+        and used_single_window
+        and int(round(selected_chunks_count)) == 1
+        and merged_extra_chunks_count <= 0.0
+    ):
+        min_required_items = 2
+
+    def _is_clean_label_item(item_text: str) -> bool:
+        s = re.sub(r"\s+", " ", str(item_text or "")).strip(" ,;:-")
+        if not s:
+            return False
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+        wc = len(words)
+        if wc < 1 or wc > 6:
+            return False
+        low = s.lower()
+        if re.search(r"\b(?:is|are|was|were|be|been|being|include|includes|included|consist|consists|consisted|comprise|comprises|composed|focus|focuses|focused|study|studies|studied|explain|explains|explained|describe|describes|described|involv(?:e|es|ed)|concern(?:s|ed)?)\b", low):
+            return False
+        if re.match(r"^\s*(?:popular|major|main|different|various|important)\s+(?:areas?|types?|kinds?|forms?|branches?)\s+of\b", low):
+            return False
+        if re.search(r"[;:]", s):
+            return False
+        if ". " in s:
+            return False
+        return True
+
+    if strict_label_query_mode:
+        if stage_list_query_mode:
+            stage_only_items = [
+                it for it in cleaned_items
+                if re.search(r"\bstage\b", str(it or "").lower())
+            ]
+            if len(stage_only_items) >= 2:
+                cleaned_items = stage_only_items
+        cleaned_label_items = [it for it in cleaned_items if _is_clean_label_item(it)]
+        if len(cleaned_label_items) >= 2:
+            aligned_items = cleaned_label_items
+            alignment_score = max(alignment_score, 0.70)
+
+    def _strong_focus_match(item_text: str) -> bool:
+        low_item = item_text.lower()
+        focus_hits = sum(1 for tok in q_focus_tokens if _token_match_light(low_item, tok))
+        context_hits = sum(1 for tok in q_context_tokens if _token_match_light(low_item, tok))
+        return bool(focus_hits >= 1 or (focus_hits + context_hits) >= 2)
+
+    def _list_internal_coherence(items: list[str]) -> bool:
+        if len(items) < 2:
+            return False
+        token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those"}
+        token_sets: list[set[str]] = []
+        for item in items:
+            toks = {t for t in re.findall(r"[a-z0-9]{3,}", item.lower()) if t not in token_stop}
+            if toks:
+                token_sets.append(toks)
+        if len(token_sets) < 2:
+            return False
+        overlaps: list[float] = []
+        for i in range(len(token_sets) - 1):
+            inter = len(token_sets[i] & token_sets[i + 1])
+            union = len(token_sets[i] | token_sets[i + 1]) or 1
+            overlaps.append(inter / union)
+        avg_overlap = (sum(overlaps) / len(overlaps)) if overlaps else 0.0
+        if len(token_sets) == 2:
+            return avg_overlap >= 0.10
+        return avg_overlap >= 0.08
+
+    strong_focus_present = bool(any(_strong_focus_match(it) for it in cleaned_items) or len(aligned_items) >= 1)
+    coherent_override_items = _list_internal_coherence(cleaned_items)
+
+    single_window_alignment_override = bool(
+        used_single_window
+        and int(round(selected_chunks_count)) == 1
+        and len(cleaned_items) >= 2
+        and strong_focus_present
+        and coherent_override_items
+    )
+
+    if (len(aligned_items) < min_required_items or alignment_score < 0.70) and single_window_alignment_override:
+        aligned_items = list(cleaned_items)
+        alignment_score = max(0.70, alignment_score)
+        logger.info("[LIST ALIGNMENT OVERRIDE] enabled=True reason=single_window_focus_match")
+
+    if len(aligned_items) < min_required_items or alignment_score < 0.70:
         logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
         logger.info("[LIST FINAL DECISION] accepted=False reason=alignment_failed")
         return (False, "alignment_failed", None)
+
+    if strict_label_query_mode:
+        if _directive_list_query_mode and not (
+            (
+                used_single_window
+                and int(round(selected_chunks_count)) == 1
+                and merged_extra_chunks_count <= 0.0
+            )
+            or strict_continuation_window_ok
+        ):
+            logger.info("[LIST FINAL DECISION] accepted=False reason=single_window_required")
+            return (False, "single_window_required", None)
+        if stage_list_query_mode:
+            stage_item_count = sum(1 for it in aligned_items if re.search(r"\bstage\b", str(it or "").lower()))
+            if stage_item_count < 2:
+                logger.info("[LIST FINAL DECISION] accepted=False reason=stage_label_min_failed")
+                return (False, "stage_label_min_failed", None)
+        clean_label_count = sum(1 for it in aligned_items if _is_clean_label_item(it))
+        if clean_label_count < 2:
+            logger.info("[LIST FINAL DECISION] accepted=False reason=clean_label_min_failed")
+            return (False, "clean_label_min_failed", None)
 
     sentence_verb_re = re.compile(r"\b(?:is|are|was|were|has|have|had|includes?|involves?|suggests?|indicates?|means|refers\s+to|contain|contains|describe|describes)\b", re.IGNORECASE)
     connector_re = re.compile(r"\b(?:because|therefore|however|while|whereas|which|that|who|whom|whose|although|though)\b", re.IGNORECASE)
@@ -10660,7 +11104,42 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
 
     same_chunk_locality = bool(source_chunk_count <= 1.0)
     same_window_locality = bool(local_promoted >= 1.0 and local_confidence >= 0.70 and chunk_span <= 1.0)
-    locality_ok = bool(same_chunk_locality or same_window_locality)
+    single_selected_locality = bool(
+        used_single_window
+        and int(round(selected_chunks_count)) == 1
+        and merged_extra_chunks_count <= 0.0
+    )
+    locality_ok = bool(same_chunk_locality or same_window_locality or single_selected_locality)
+
+    validation_scope = "selected_chunks"
+    locality_reason = "chunk_locality"
+    if isinstance(local_support, dict) and str(local_support.get("validation_scope") or "") == "single_local_window":
+        scope_text = str(local_support.get("single_local_window_text") or "")
+        validation_scope = "single_local_window"
+        scope_low = scope_text.lower()
+        items_in_scope = 0
+        for item in aligned_items:
+            item_low = item.lower()
+            if item_low in scope_low:
+                items_in_scope += 1
+                continue
+            toks = [t for t in re.findall(r"[a-z0-9]{3,}", item_low) if t not in {"the", "and", "for", "with", "from", "of", "to"}]
+            if toks:
+                hit_toks = sum(1 for t in toks if _token_match_light(scope_low, t))
+                if hit_toks >= max(1, min(2, len(toks))):
+                    items_in_scope += 1
+        scope_ratio = float(items_in_scope) / float(max(1, len(aligned_items)))
+        locality_ok = bool(items_in_scope >= min_required_items and scope_ratio >= 0.70)
+        locality_reason = "items_not_in_single_window" if not locality_ok else "single_window_match"
+        logger.info("[LOCALITY DEBUG] validation_scope=%s", validation_scope)
+        logger.info("[LOCALITY DEBUG] items_in_scope=%s", items_in_scope)
+        logger.info("[LOCALITY DEBUG] accepted=%s reason=%s", bool(locality_ok), locality_reason)
+    else:
+        logger.info("[LOCALITY DEBUG] validation_scope=%s", validation_scope)
+        logger.info("[LOCALITY DEBUG] items_in_scope=%s", -1)
+        if single_selected_locality and not (same_chunk_locality or same_window_locality):
+            locality_reason = "single_selected_chunk"
+        logger.info("[LOCALITY DEBUG] accepted=%s reason=%s", bool(locality_ok), locality_reason)
 
     logger.info(
         "[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f",
@@ -10681,7 +11160,7 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     if not noise_ok:
         logger.info("[LIST FINAL DECISION] accepted=False reason=ocr_noise_detected")
         return (False, "ocr_noise_detected", None)
-    if len(aligned_items) < 3:
+    if len(aligned_items) < min_required_items:
         logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
         return (False, "min_quality_failed", None)
 
@@ -11702,9 +12181,56 @@ def _normalize_phrase_text(text: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())).strip()
 
 
+def _is_goal_objective_list_query(query_text: str, family_v2: str = "") -> bool:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+    if family_v2 and family_v2 not in {"list_entity", "list_structure"}:
+        return False
+    has_list_intent = bool(re.match(r"^\s*(?:list|name|mention|identify|give|what\s+are|which\s+are)\b", q))
+    has_goal_like = bool(re.search(r"\b(?:goals?|objectives?|aims?)\b", q))
+    return bool(has_list_intent and has_goal_like)
+
+
+def _is_attribution_or_citation_heading_text(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "").strip())
+    if not s:
+        return False
+    low = s.lower()
+    if re.search(r"\b(?:given|proposed|developed|introduced|formulated|presented)\s+by\b", low):
+        return True
+    if re.search(r"\b(?:colleagues|et\s*al\.?|researchers?)\b", low) and re.search(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", low):
+        return True
+    if re.search(r"\(\s*(?:19|20)\d{2}[a-z]?\s*\)", low) and len(re.findall(r"[A-Za-z][A-Za-z\-']*", s)) <= 14:
+        return True
+    return False
+
+
+def _is_placeholder_heading_text(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "").strip())
+    if not s:
+        return True
+    low = s.lower()
+    if low in {"unknown", "document", "front matter", "body", "content", "contents", "table of contents"}:
+        return True
+    if re.match(r"^\[source:.*\]$", low):
+        return True
+    if re.match(r"^(?:page|p\.)\s*[0-9ivxlcdm]+$", low):
+        return True
+    if re.match(r"^(?:chapter|unit)\s+\d+(?:\.\d+){0,2}$", low):
+        return True
+    if re.match(r"^section\s+\d+(?:\.\d+){0,4}$", low):
+        return True
+    if re.match(r"^\d+$", low):
+        return True
+    return False
+
+
 def _is_heading_candidate_line(line: str) -> bool:
     s = re.sub(r"\s+", " ", str(line or "").strip())
     if not s:
+        return False
+    if _is_placeholder_heading_text(s):
         return False
     word_count = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", s))
     if word_count < 3 or word_count > 10:
@@ -11730,9 +12256,144 @@ def _extract_heading_like_lines_from_chunk(text: str, max_lines: int = 24) -> li
     for ln in lines:
         if len(ln) > 120:
             continue
+        if ln.startswith("[Source:"):
+            continue
+        if _is_placeholder_heading_text(ln):
+            logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_placeholder=True', ln[:120])
+            continue
         if _is_heading_candidate_line(ln):
             out.append(ln)
     return out[:10]
+
+
+def _extract_heading_snippets_from_line(line: str) -> list[str]:
+    s = re.sub(r"\s+", " ", str(line or "").strip())
+    if not s:
+        return []
+    if s.startswith("[Source:") and "]" in s:
+        s = s.split("]", 1)[1].strip()
+    if not s:
+        return []
+
+    segments = [
+        re.sub(r"\s+", " ", seg).strip(" -–—:;,.\t")
+        for seg in re.split(r"[•\|]|\s{2,}|\s+[-–—]\s+|(?<=[?!:])\s+", s)
+        if str(seg or "").strip()
+    ]
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for seg in segments[:8]:
+        if len(seg) > 110:
+            continue
+        if _is_placeholder_heading_text(seg):
+            continue
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", seg)
+        if not (3 <= len(words) <= 10):
+            continue
+        if re.search(r"\b(?:is|are|was|were|has|have|had|because|therefore|however|which|that|who)\b", seg.lower()):
+            continue
+        if not _is_heading_candidate_line(seg):
+            continue
+        low = seg.lower()
+        if low in seen:
+            continue
+        seen.add(low)
+        out.append(seg)
+    return out[:6]
+
+
+def _is_document_title_heading_text(text: str) -> bool:
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not s:
+        return True
+    low = s.lower()
+    words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+    title_case_words = sum(1 for w in words if re.match(r"^[A-Z][a-zA-Z\-']+$", w))
+    title_ratio = (float(title_case_words) / float(max(1, len(words)))) if words else 0.0
+    has_local_marker = bool(
+        s.endswith(":")
+        or re.match(r"^\s*\d+(?:\.\d+)*\s+[A-Za-z]", s)
+        or re.search(r"\b(?:section|part|topic|subsection)\s+\d+\b", low)
+    )
+    if has_local_marker:
+        return False
+    if re.search(r"\b[A-Za-z]{2,8}\s*[-–—]?\s*\d{2,4}[A-Za-z]?\b", s, flags=re.IGNORECASE):
+        return True
+    if re.search(r"[-–—]\s*[A-Za-z]{2,8}\s*\d{2,4}", s, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:introduction|intro\s*duction|fundamentals|principles|basics|overview)\s+to\b", s, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b(?:course|syllabus|textbook|edition|semester|module|manual)\b", s, flags=re.IGNORECASE) and title_ratio >= 0.5:
+        return True
+    return False
+
+
+def _resolve_doc_heading_source(query_text: str, doc: dict) -> dict[str, Any]:
+    txt = str((doc or {}).get("page_content") or (doc or {}).get("text") or "")
+    list_goal_mode = _is_goal_objective_list_query(query_text)
+    q_tokens = [
+        t for t in re.findall(r"[a-z0-9]{3,}", str(query_text or "").lower())
+        if t not in {"what", "which", "are", "the", "and", "for", "with", "from", "list", "name", "give", "mention", "identify"}
+    ]
+
+    raw_candidates: list[str] = []
+    scored: list[tuple[float, str]] = []
+    placeholder_rejected = False
+    document_title_rejected = False
+    lines = str(txt or "").splitlines()[:140]
+    for raw_ln in lines:
+        ln = re.sub(r"\s+", " ", str(raw_ln or "").strip())
+        if not ln:
+            continue
+        for cand in _extract_heading_snippets_from_line(ln):
+            if _is_placeholder_heading_text(cand):
+                placeholder_rejected = True
+                logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_placeholder=True', cand[:120])
+                continue
+            if list_goal_mode and _is_attribution_or_citation_heading_text(cand):
+                logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_attribution_citation=True', cand[:120])
+                continue
+            if _is_document_title_heading_text(cand):
+                document_title_rejected = True
+                logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_document_title=True', cand[:120])
+                continue
+            raw_candidates.append(cand)
+            low = cand.lower()
+            overlap = sum(1 for tok in q_tokens if _token_match_light(low, tok))
+            title_like = 1.0 if bool(re.match(r"^[A-Z][A-Za-z0-9\- ,()]{3,90}$", cand)) else 0.0
+            all_caps = 0.8 if bool(re.match(r"^[A-Z0-9\- ]{3,90}$", cand) and re.search(r"[A-Z]{3,}", cand)) else 0.0
+            colon = 0.7 if cand.endswith(":") else 0.0
+            score = (1.45 * float(overlap)) + title_like + all_caps + colon
+            scored.append((score, cand))
+
+    logger.info("[HEADING SOURCE DEBUG] raw_candidates=%s", raw_candidates[:8])
+
+    if not scored:
+        logger.info('[HEADING SOURCE DEBUG] chosen_heading=""')
+        logger.info("[HEADING SOURCE DEBUG] chosen_from=none")
+        logger.info("[HEADING SOURCE DEBUG] no_real_heading_found=True")
+        return {
+            "chosen_heading": "",
+            "chosen_from": "none",
+            "raw_candidates": raw_candidates[:8],
+            "heading_lines": [],
+            "placeholder_rejected": bool(placeholder_rejected),
+            "document_title_rejected": bool(document_title_rejected),
+        }
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    chosen = scored[0][1]
+    logger.info('[HEADING SOURCE DEBUG] chosen_heading="%s"', chosen[:120])
+    logger.info("[HEADING SOURCE DEBUG] chosen_from=body_line")
+    return {
+        "chosen_heading": chosen,
+        "chosen_from": "body_line",
+        "raw_candidates": raw_candidates[:8],
+        "heading_lines": [x[1] for x in scored[:6]],
+        "placeholder_rejected": bool(placeholder_rejected),
+        "document_title_rejected": bool(document_title_rejected),
+    }
 
 
 def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict[str, float]:
@@ -11752,13 +12413,33 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
     local_list_density_raw = float(md.get("local_list_density") or md.get("_local_list_density") or 0.0)
     local_conf_raw = float(md.get("local_confidence_score") or md.get("_local_confidence_score") or md.get("_local_window_score") or 0.0)
     local_conf_norm = min(1.0, (local_conf_raw / 6.0)) if local_conf_raw > 1.0 else max(0.0, local_conf_raw)
-    heading_parts = [str(md.get(k) or "") for k in ("heading", "section", "title", "chapter", "role")]
-    heading_lines = _extract_heading_like_lines_from_chunk(txt, max_lines=24)
+    heading_src = _resolve_doc_heading_source(query_text, doc)
+    heading_parts: list[str] = []
+    chosen_heading = str(heading_src.get("chosen_heading") or "").strip()
+    if chosen_heading:
+        heading_parts.append(chosen_heading)
+    for k in ("heading", "section", "title", "chapter", "role"):
+        val = str(md.get(k) or "").strip()
+        if not val:
+            continue
+        if _is_placeholder_heading_text(val):
+            logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_placeholder=True', val[:120])
+            continue
+        if _is_document_title_heading_text(val):
+            logger.info('[HEADING SOURCE DEBUG] raw_heading="%s" rejected_as_document_title=True', val[:120])
+            continue
+        heading_parts.append(val)
+    heading_lines = [str(x).strip() for x in (heading_src.get("heading_lines") or []) if str(x).strip()]
     heading_parts.extend(heading_lines)
     heading_blob = " ".join(heading_parts).lower()
     norm_heading = _normalize_phrase_text(" ".join(heading_parts))
-    heading_detected = bool(heading_lines)
+    heading_detected = bool(chosen_heading)
     toc_like = bool(re.search(r"\b(?:table\s+of\s+contents|contents?)\b", f"{heading_blob}\n{low_txt[:900]}"))
+    goal_list_mode = _is_goal_objective_list_query(query_text, family_v2)
+    possessive_owner_tokens = [
+        t for t in re.findall(r"\b([a-z0-9][a-z0-9\-]{2,})[’']s\b", str(query_text or "").lower())
+        if t not in {"what", "which", "list", "name", "give", "mention", "identify", "stage", "stages", "development"}
+    ]
 
     if not tokens:
         return {
@@ -11865,6 +12546,64 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
             generic_penalty -= (0.20 * min(1.0, local_list_density_raw / 0.2))
             generic_penalty = max(0.0, generic_penalty)
 
+        if goal_list_mode:
+            context_tokens_local, _focus_tokens_local = _split_query_context_focus_tokens(query_text, family_v2)
+            relation_match = False
+            for ctx_tok in context_tokens_local[:3]:
+                ctx = re.escape(ctx_tok)
+                if re.search(rf"\b(?:goals?|objectives?|aims?)\s+(?:of|for)\s+(?:the\s+)?{ctx}\b", heading_blob):
+                    relation_match = True
+                    break
+                if re.search(rf"\b{ctx}\s+(?:goals?|objectives?|aims?)\b", heading_blob):
+                    relation_match = True
+                    break
+                if re.search(rf"\b(?:goals?|objectives?|aims?)\s+(?:of|for)\s+(?:the\s+)?{ctx}\b", low_txt[:1400]):
+                    relation_match = True
+                    break
+                if re.search(rf"\b{ctx}\s+(?:goals?|objectives?|aims?)\b", low_txt[:1400]):
+                    relation_match = True
+                    break
+
+            has_goal_lexeme = bool(re.search(r"\b(?:goals?|objectives?|aims?)\b", f"{chosen_heading.lower()} {low_txt[:1400]}"))
+            heading_goal_like = bool(re.search(r"\b(?:goals?|objectives?|aims?)\b", chosen_heading.lower()))
+
+            if chosen_heading and _is_attribution_or_citation_heading_text(chosen_heading):
+                heading_detected = False
+                generic_penalty += 0.95
+            if heading_detected and chosen_heading and (not heading_goal_like):
+                heading_detected = False
+                generic_penalty += 0.75
+            if not relation_match:
+                phrase_hits *= 0.35
+                generic_penalty += 0.85
+                if has_goal_lexeme:
+                    marker_score = min(marker_score, 0.35)
+                    generic_penalty += 2.35
+                    if re.search(r"\b(?:setting|evaluating|maintaining|achieving|pursuing|tracking)\s+goals?\b", low_txt[:1400]):
+                        generic_penalty += 2.25
+
+        if possessive_owner_tokens:
+            owner_hit = any(
+                _token_match_light(f"{heading_blob} {low_txt[:2200]}", owner_tok)
+                for owner_tok in possessive_owner_tokens[:2]
+            )
+            owner_stage_relation = any(
+                re.search(
+                    rf"\b{re.escape(owner_tok)}\b[^\n.]{{0,80}}\b(?:stage|stages|development|theory|model|approach)\b",
+                    f"{heading_blob} {low_txt[:2200]}"
+                )
+                for owner_tok in possessive_owner_tokens[:2]
+            )
+            if not owner_hit:
+                phrase_hits *= 0.55
+                heading_hits *= 0.65
+                token_hits *= 0.75
+                generic_penalty += 2.35
+            elif not owner_stage_relation:
+                generic_penalty += 0.55
+            else:
+                phrase_hits += 0.45
+
     return {
         "token_hits": float(token_hits),
         "heading_hits": float(heading_hits),
@@ -11881,6 +12620,8 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
         "local_confidence_score": float(local_conf_norm),
         "toc_hint": float(1.0 if toc_like else 0.0),
         "heading_detected": float(1.0 if heading_detected else 0.0),
+        "heading_placeholder_rejected": float(1.0 if heading_src.get("placeholder_rejected") else 0.0),
+        "heading_document_title_rejected": float(1.0 if heading_src.get("document_title_rejected") else 0.0),
     }
 
 
@@ -11945,8 +12686,11 @@ def _apply_heading_boost_for_family(query_text: str, family_v2: str, docs: list[
         d2["_section_phrase_hits"] = round(sig.get("phrase_hits", 0.0), 4)
         d2["_section_marker_score"] = round(sig.get("marker_score", 0.0), 4)
         d2["_section_density"] = round(sig.get("density", 0.0), 6)
-        heading_candidates = [str(md.get(k) or "").strip() for k in ("heading", "section", "title", "chapter") if str(md.get(k) or "").strip()]
-        heading_line = heading_candidates[0] if heading_candidates else (_extract_heading_like_lines_from_chunk(txt, max_lines=8)[0] if _extract_heading_like_lines_from_chunk(txt, max_lines=8) else "")
+        heading_src = _resolve_doc_heading_source(query_text, d)
+        heading_line = str(heading_src.get("chosen_heading") or "").strip()
+        if not heading_line:
+            heading_lines_local = _extract_heading_like_lines_from_chunk(txt, max_lines=8)
+            heading_line = heading_lines_local[0] if heading_lines_local else ""
         heading_l = heading_line.lower()
         heading_query_match = bool(any(re.search(rf"\b{re.escape(t)}\b", heading_l) for t in context_tokens)) if context_tokens else False
         heading_focus_match = bool(any(re.search(rf"\b{re.escape(t)}\b", heading_l) for t in focus_tokens)) if focus_tokens else False
@@ -13446,7 +14190,9 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
     if is_list_mode:
         answer_type = str(dec.get("answer_type") or "")
         fast_deterministic_mode = bool((not dec.get("used_llm", False)) and answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
-        list_support = _collect_local_window_support(retrieved_docs or [])
+        list_support = dict(dec.get("_list_local_support") or {}) if isinstance(dec.get("_list_local_support"), dict) else {}
+        if not list_support:
+            list_support = _collect_local_window_support(retrieved_docs or [])
         list_ok, list_reason, shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(answer), strict_fast=fast_deterministic_mode, local_support=list_support)
         logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok), list_reason)
         if fast_deterministic_mode:
@@ -13514,7 +14260,15 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
                 chunk_idxs.append(int(md.get("chunk_index")))
             except Exception:
                 pass
-        if len(section_keys) > 1 or (len(chunk_idxs) >= 2 and (max(chunk_idxs) - min(chunk_idxs) > 3)):
+        support_chunk_count = float(list_support.get("source_chunk_count", 0.0) or 0.0) if isinstance(list_support, dict) else 0.0
+        strict_adjacent_scope = bool(
+            isinstance(list_support, dict)
+            and float(list_support.get("strict_adjacent_merge_allowed", 0.0) or 0.0) >= 0.5
+            and float(list_support.get("selected_chunks_count", 0.0) or 0.0) <= 2.0
+            and float(list_support.get("merged_extra_chunks_count", 0.0) or 0.0) <= 1.0
+        )
+        anchored_single_scope = bool((support_chunk_count <= 1.0) or strict_adjacent_scope)
+        if (not anchored_single_scope) and (len(section_keys) > 1 or (len(chunk_idxs) >= 2 and (max(chunk_idxs) - min(chunk_idxs) > 3))):
             q_family_v2 = _classify_query_family_v2(query)
             q_ctx_tokens, q_focus_tokens = _split_query_context_focus_tokens(query, q_family_v2)
 
@@ -13663,19 +14417,114 @@ def _shared_rag_final_answer_decision(
     list_local_override = _has_strong_local_window_support(list_local_support, confidence_threshold=0.58)
 
     if family_v2 in {"list_entity", "list_structure"} and (routed_docs or doc_dicts):
-        list_ranked: list[tuple[float, dict, dict]] = []
+        _list_query_norm = re.sub(r"\s+", " ", str(query or "").strip().lower())
+        _directive_list_query = bool(re.match(r"^\s*(?:list|name|give|mention|identify)\b", _list_query_norm))
+        strict_label_query = bool(
+            (re.match(r"^\s*(?:what|which)\s+are\b", _list_query_norm) or _directive_list_query)
+            and (not _is_goal_objective_list_query(query, family_v2))
+        )
+        _owner_tokens_for_strict = [
+            t for t in re.findall(r"\b([a-z0-9][a-z0-9\-]{2,})[’']s\b", _list_query_norm)
+            if t not in {"what", "which", "list", "name", "give", "mention", "identify", "stage", "stages", "development"}
+        ]
+
+        def _strict_clean_label_count(doc_text: str) -> int:
+            if not strict_label_query:
+                return 0
+            doc_low = str(doc_text or "").lower()
+            if _owner_tokens_for_strict:
+                owner_stage_relation = any(
+                    re.search(
+                        rf"\b{re.escape(owner_tok)}\b[^\n.]{{0,100}}\b(?:stage|stages|development|theory|model|approach)\b",
+                        doc_low,
+                    )
+                    for owner_tok in _owner_tokens_for_strict[:2]
+                )
+                if not owner_stage_relation:
+                    return 0
+            extracted_local = _extract_list_from_context(query, str(doc_text or ""), max_candidate_blocks=1)
+            items_local: list[str] = []
+            if extracted_local:
+                items_local = [
+                    re.sub(r"^\s*[-•*�]\s+", "", ln).strip()
+                    for ln in str(extracted_local).splitlines()
+                    if re.match(r"^\s*[-•*�]\s+", ln)
+                ]
+
+            if len(items_local) < 2:
+                raw_text = str(doc_text or "")
+                heuristic_candidates: list[str] = []
+                if raw_text:
+                    for seg in [s.strip() for s in re.split(r"\s*[�•]\s*", raw_text) if s.strip()]:
+                        if ":" in seg:
+                            heuristic_candidates.append(seg.split(":", 1)[0].strip())
+
+                    heuristic_candidates.extend(
+                        [
+                            m.strip()
+                            for m in re.findall(
+                                r"\b([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})\s+(?:It|An|A|The)\s+(?:is|was|are|were|focused|focuses|concentrated|views|approach)\b",
+                                raw_text,
+                            )
+                        ]
+                    )
+
+                    heuristic_candidates.extend(
+                        [
+                            m.strip()
+                            for m in re.findall(
+                                r"\b([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})\s*:\s*",
+                                raw_text,
+                            )
+                        ]
+                    )
+
+                seen_local: set[str] = set()
+                for cand in heuristic_candidates:
+                    norm_c = re.sub(r"\s+", " ", str(cand or "")).strip(" ,;:-")
+                    if not norm_c:
+                        continue
+                    key = re.sub(r"[^a-z0-9]+", " ", norm_c.lower()).strip()
+                    if not key or key in seen_local:
+                        continue
+                    seen_local.add(key)
+                    items_local.append(norm_c)
+            count = 0
+            for it in items_local:
+                low_it = it.lower()
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", it)
+                wc = len(words)
+                if wc < 1 or wc > 6:
+                    continue
+                if re.search(r"\b(?:is|are|was|were|be|been|being|include|includes|included|consist|consists|consisted|comprise|comprises|composed|focus|focuses|focused|study|studies|studied|explain|explains|explained|describe|describes|described|involv(?:e|es|ed)|concern(?:s|ed)?)\b", low_it):
+                    continue
+                if re.match(r"^\s*(?:popular|major|main|different|various|important)\s+(?:areas?|types?|kinds?|forms?|branches?)\s+of\b", low_it):
+                    continue
+                if re.search(r"[;:]", it) or ". " in it:
+                    continue
+                count += 1
+            return count
+
+        list_ranked: list[tuple[float, dict, dict, int]] = []
         for d in (routed_docs or doc_dicts or [])[:10]:
             sig = _doc_query_token_signals(query, family_v2, d)
+            cand_text = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+            clean_label_count = _strict_clean_label_count(cand_text)
             local_priority_bonus = 0.0
             if sig.get("local_promoted", 0.0) >= 0.5 and sig.get("local_confidence_score", 0.0) >= 0.58:
                 local_priority_bonus = 1.6 + (0.9 * sig.get("local_confidence_score", 0.0))
+            if strict_label_query:
+                if clean_label_count >= 2:
+                    local_priority_bonus += 1.6 + (0.35 * min(6, clean_label_count))
+                else:
+                    local_priority_bonus -= 1.2
             local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.9 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus - sig.get("generic_penalty", 0.0) - (0.45 * sig.get("missing_penalty", 0.0))
-            list_ranked.append((float(local_score), d, sig))
+            list_ranked.append((float(local_score), d, sig, int(clean_label_count)))
         list_ranked.sort(key=lambda x: x[0], reverse=True)
 
         if list_ranked:
             logger.info("[SECTION DEBUG] query=%s", (query or "")[:220])
-        for rank_idx, (cand_score, cand_doc, cand_sig) in enumerate(list_ranked[: min(5, len(list_ranked))], start=1):
+        for rank_idx, (cand_score, cand_doc, cand_sig, cand_clean_count) in enumerate(list_ranked[: min(5, len(list_ranked))], start=1):
             md_c = dict((cand_doc or {}).get("metadata") or {})
             cand_txt = str((cand_doc or {}).get("page_content") or (cand_doc or {}).get("text") or "")
             heading_parts = [str(md_c.get(k) or "") for k in ("heading", "section", "title", "chapter", "role")]
@@ -13717,6 +14566,8 @@ def _shared_rag_final_answer_decision(
                 section_conf,
                 preview,
             )
+            if strict_label_query:
+                logger.info("[SECTION DEBUG] rank=%s clean_label_count=%s", rank_idx, int(cand_clean_count))
 
         top_sig = list_ranked[0][2] if list_ranked else {}
         top_score = float(list_ranked[0][0]) if list_ranked else -999.0
@@ -13727,18 +14578,257 @@ def _shared_rag_final_answer_decision(
             or (top_sig.get("local_focus_hits", 0.0) >= 1.0 and top_sig.get("local_confidence_score", 0.0) >= 0.45)
         )
         list_section_confident = bool((top_score >= 1.15 or top_sig.get("local_confidence_score", 0.0) >= 0.55) and strong_anchor and top_sig.get("generic_penalty", 0.0) < 1.35)
-        selected_ranked = [
-            (score, d, sig)
-            for score, d, sig in list_ranked
-            if (score > 0.10)
-            or (sig.get("focus_hits", 0.0) >= 1.0)
-            or (sig.get("token_hits", 0.0) >= 0.75)
-            or (sig.get("marker_score", 0.0) >= 0.20)
-        ][:4]
-        if (not selected_ranked) and list_ranked:
-            selected_ranked = list_ranked[: min(3, len(list_ranked))]
-        elif (len(selected_ranked) == 1) and (len(list_ranked) >= 2) and (not list_section_confident):
-            selected_ranked = list_ranked[: min(3, len(list_ranked))]
+        selected_ranked: list[tuple[float, dict, dict]] = []
+        merged_extra_chunks: list[Any] = []
+        strict_adjacent_merge_allowed = False
+
+        def _section_signature_for_doc(d: dict) -> str:
+            md_local = dict((d or {}).get("metadata") or {})
+            sig = str(md_local.get("_section_signature") or "").strip().lower()
+            if sig:
+                return sig
+            anchor = str(md_local.get("_local_anchor") or "").strip().lower()
+            if not anchor:
+                return ""
+            toks = [t for t in re.findall(r"[a-z0-9]{3,}", anchor) if t not in {"the", "and", "for", "with", "from", "section", "chapter", "unit"}][:4]
+            return " ".join(toks)
+
+        def _same_section_signature(sig_a: str, sig_b: str) -> bool:
+            a = str(sig_a or "").strip().lower()
+            b = str(sig_b or "").strip().lower()
+            if not a or not b:
+                return False
+            if a == b:
+                return True
+            ta = set(re.findall(r"[a-z0-9]{3,}", a))
+            tb = set(re.findall(r"[a-z0-9]{3,}", b))
+            if not ta or not tb:
+                return False
+            overlap = len(ta & tb) / float(max(1, len(ta | tb)))
+            return overlap >= 0.55
+
+        def _owner_focus_consistent(doc_a: dict, doc_b: dict) -> bool:
+            if not _owner_tokens_for_strict:
+                return True
+            txt_a = str((doc_a or {}).get("page_content") or (doc_a or {}).get("text") or "")
+            txt_b = str((doc_b or {}).get("page_content") or (doc_b or {}).get("text") or "")
+            md_a = dict((doc_a or {}).get("metadata") or {})
+            md_b = dict((doc_b or {}).get("metadata") or {})
+            blob_a = f"{md_a.get('heading') or ''} {md_a.get('section') or ''} {md_a.get('title') or ''} {txt_a[:2200]}".lower()
+            blob_b = f"{md_b.get('heading') or ''} {md_b.get('section') or ''} {md_b.get('title') or ''} {txt_b[:2200]}".lower()
+            owner_hits_a = any(_token_match_light(blob_a, owner_tok) for owner_tok in _owner_tokens_for_strict[:2])
+            owner_hits_b = any(_token_match_light(blob_b, owner_tok) for owner_tok in _owner_tokens_for_strict[:2])
+            if owner_hits_a and owner_hits_b:
+                return True
+            query_anchor_terms = [t for t in (focus_tokens_dbg or context_tokens_dbg) if len(str(t or "")) >= 3][:6]
+            if not query_anchor_terms:
+                return False
+            anchor_hits_a = sum(1 for tok in query_anchor_terms if _token_match_light(blob_a, tok))
+            anchor_hits_b = sum(1 for tok in query_anchor_terms if _token_match_light(blob_b, tok))
+            return bool(anchor_hits_a >= 1 and anchor_hits_b >= 1)
+
+        def _safe_int(v: Any) -> int | None:
+            try:
+                return int(v)
+            except Exception:
+                return None
+
+        def _page_num(md: dict) -> int | None:
+            raw_page = md.get("page")
+            if raw_page is None:
+                return None
+            m = re.search(r"\d+", str(raw_page))
+            if not m:
+                return None
+            try:
+                return int(m.group(0))
+            except Exception:
+                return None
+
+        def _page_adjacent_or_same(md_a: dict, md_b: dict) -> bool:
+            pa = _page_num(md_a)
+            pb = _page_num(md_b)
+            if pa is None or pb is None:
+                return False
+            return abs(pa - pb) <= 1
+
+        def _semantic_signal(doc_obj: dict, sig_obj: dict, ranked_score: float) -> float:
+            dense = float((sig_obj or {}).get("density", 0.0) or 0.0)
+            local_conf = float((sig_obj or {}).get("local_confidence_score", 0.0) or 0.0)
+            token_hits = float((sig_obj or {}).get("token_hits", 0.0) or 0.0)
+            raw_sem = 0.0
+            for sk in ("similarity", "score", "final_score", "_boosted_score"):
+                if sk in (doc_obj or {}):
+                    try:
+                        raw_sem = float((doc_obj or {}).get(sk) or 0.0)
+                    except Exception:
+                        raw_sem = 0.0
+                    break
+            return max(raw_sem, ranked_score, local_conf, dense * 10.0, token_hits * 0.35)
+
+        def _is_weakly_semantic_match(doc_obj: dict, sig_obj: dict, ranked_score: float) -> bool:
+            sem_gate = _semantic_signal(doc_obj, sig_obj, ranked_score) >= 0.40
+            token_gate = float((sig_obj or {}).get("token_hits", 0.0) or 0.0) >= 0.60
+            phrase_gate = float((sig_obj or {}).get("phrase_hits", 0.0) or 0.0) >= 0.30
+            local_focus_gate = float((sig_obj or {}).get("local_focus_hits", 0.0) or 0.0) >= 0.60
+            return bool(sem_gate or token_gate or phrase_gate or local_focus_gate)
+
+        candidate_pool = list(routed_docs or doc_dicts or [])[:20]
+        neighbor_map: dict[tuple[str, int], tuple[float, dict, dict, int]] = {}
+        for pool_doc in candidate_pool:
+            md_pool = dict((pool_doc or {}).get("metadata") or {})
+            src_pool = str(md_pool.get("source") or md_pool.get("filename") or md_pool.get("id") or "")
+            idx_pool = _safe_int(md_pool.get("chunk_index"))
+            if not src_pool or idx_pool is None:
+                continue
+            sig_pool = _doc_query_token_signals(query, family_v2, pool_doc)
+            clean_pool = _strict_clean_label_count(str((pool_doc or {}).get("page_content") or (pool_doc or {}).get("text") or "")) if strict_label_query else 0
+            sem_pool = 0.0
+            for sk in ("similarity", "score", "final_score", "_boosted_score"):
+                if sk in (pool_doc or {}):
+                    try:
+                        sem_pool = float((pool_doc or {}).get(sk) or 0.0)
+                    except Exception:
+                        sem_pool = 0.0
+                    break
+            key_pool = (src_pool, idx_pool)
+            prev_entry = neighbor_map.get(key_pool)
+            if (prev_entry is None) or (sem_pool > float(prev_entry[0])):
+                neighbor_map[key_pool] = (sem_pool, pool_doc, sig_pool, int(clean_pool))
+
+        def _fetch_adjacent_doc_from_store(source_name: str, chunk_idx: int) -> tuple[float, dict, dict, int] | None:
+            if not source_name:
+                return None
+            try:
+                collection = getattr(getattr(live_rag, "vs", None), "collection", None)
+            except Exception:
+                collection = None
+            if collection is None:
+                return None
+
+            rows = None
+            where_candidates = [
+                {"$and": [{"source": source_name}, {"chunk_index": int(chunk_idx)}]},
+                {"$and": [{"source": source_name}, {"chunk_index": str(chunk_idx)}]},
+            ]
+            for where_clause in where_candidates:
+                try:
+                    rows = collection.get(where=where_clause, include=["documents", "metadatas"])
+                except Exception:
+                    rows = None
+                if rows and rows.get("documents"):
+                    break
+
+            if not rows or not rows.get("documents"):
+                return None
+
+            docs_list = rows.get("documents") or []
+            metas_list = rows.get("metadatas") or []
+            if not docs_list:
+                return None
+
+            fetched_text_raw = str(docs_list[0] or "")
+            fetched_text_norm = _normalize_context_entities(query, _clean_ocr_artifacts(fetched_text_raw) or fetched_text_raw)
+            fetched_text = _focus_doc_to_query_window(query, fetched_text_norm)
+            fetched_meta = dict(metas_list[0] or {}) if metas_list else {}
+            fetched_doc = {
+                "page_content": fetched_text,
+                "text": fetched_text,
+                "content": fetched_text,
+                "metadata": fetched_meta,
+            }
+            fetched_sig = _doc_query_token_signals(query, family_v2, fetched_doc)
+            fetched_clean = _strict_clean_label_count(fetched_text) if strict_label_query else 0
+            return (0.0, fetched_doc, fetched_sig, int(fetched_clean))
+
+        primary_clean_count = 0
+        if list_ranked:
+            primary_tuple = list_ranked[0]
+            if strict_label_query:
+                for cand in list_ranked:
+                    if int(cand[3]) >= 2:
+                        primary_tuple = cand
+                        break
+            primary_score, primary_doc, primary_sig, primary_clean_count = primary_tuple
+            selected_ranked = [(primary_score, primary_doc, primary_sig)]
+            md_primary = dict((primary_doc or {}).get("metadata") or {})
+            primary_chunk = md_primary.get("chunk_index")
+            primary_source = str(md_primary.get("source") or md_primary.get("filename") or md_primary.get("id") or "")
+            primary_signature = _section_signature_for_doc(primary_doc)
+            logger.info("[LIST SOURCE DEBUG] primary_chunk=%s", primary_chunk)
+            if strict_label_query:
+                logger.info("[LIST SOURCE DEBUG] primary_clean_label_count=%s", int(primary_clean_count))
+
+            if strict_label_query and int(primary_clean_count) >= 2:
+                logger.info("[LIST SOURCE DEBUG] strict_single_window_mode=true reason=clean_labels_in_primary")
+            p_idx = _safe_int(primary_chunk)
+            strict_mode = bool(strict_label_query and int(primary_clean_count) >= 2)
+            if p_idx is None or not primary_source:
+                logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="primary_chunk_missing"', primary_chunk)
+            else:
+                md_primary_page = dict((primary_doc or {}).get("metadata") or {})
+                selected_seen_chunks: set[int] = {p_idx}
+                for n_idx in [p_idx - 1, p_idx + 1]:
+                    if len(selected_ranked) >= 3:
+                        break
+                    cand_tuple = neighbor_map.get((primary_source, n_idx))
+                    if cand_tuple is None:
+                        fetched_tuple = _fetch_adjacent_doc_from_store(primary_source, n_idx)
+                        if fetched_tuple is None:
+                            logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="adjacent_chunk_missing"', n_idx)
+                            continue
+                        cand_tuple = fetched_tuple
+                        neighbor_map[(primary_source, n_idx)] = cand_tuple
+                        logger.info('[LIST SOURCE DEBUG] merge_allowed_chunk=%s reason="adjacent_chunk_fetched"', n_idx)
+                    cand_score, cand_doc, cand_sig, _cand_clean_count = cand_tuple
+                    md_cand = dict((cand_doc or {}).get("metadata") or {})
+                    cand_chunk = md_cand.get("chunk_index")
+                    c_idx = _safe_int(cand_chunk)
+                    if c_idx is None or c_idx in selected_seen_chunks:
+                        logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="duplicate_or_invalid_chunk"', cand_chunk)
+                        continue
+                    if abs(c_idx - p_idx) != 1:
+                        logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="non_contiguous_chunk"', cand_chunk)
+                        continue
+                    if not _page_adjacent_or_same(md_primary_page, md_cand):
+                        logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="non_adjacent_page"', cand_chunk)
+                        continue
+                    if not _is_weakly_semantic_match(cand_doc, cand_sig, cand_score):
+                        logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="weak_semantic_match"', cand_chunk)
+                        continue
+                    cand_signature = _section_signature_for_doc(cand_doc)
+                    same_section = _same_section_signature(primary_signature, cand_signature)
+                    owner_consistent = _owner_focus_consistent(primary_doc, cand_doc)
+                    if strict_mode:
+                        if not owner_consistent:
+                            logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strict_mode_owner_mismatch"', cand_chunk)
+                            continue
+                        if not same_section and primary_signature and cand_signature:
+                            logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strict_mode_different_section"', cand_chunk)
+                            continue
+                        logger.info('[LIST SOURCE DEBUG] merge_allowed_chunk=%s reason="strict_mode_bidirectional_adjacent" same_section=%s semantic=%.3f', cand_chunk, same_section, _semantic_signal(cand_doc, cand_sig, cand_score))
+                        strict_adjacent_merge_allowed = True
+                    else:
+                        if not same_section and primary_signature and cand_signature:
+                            logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="different_section_signature"', cand_chunk)
+                            continue
+                        logger.info('[LIST SOURCE DEBUG] merge_allowed_chunk=%s reason="bidirectional_adjacent" same_section=%s semantic=%.3f', cand_chunk, same_section, _semantic_signal(cand_doc, cand_sig, cand_score))
+
+                    selected_ranked.append((cand_score, cand_doc, cand_sig))
+                    selected_seen_chunks.add(c_idx)
+                    merged_extra_chunks.append(cand_chunk)
+
+                def _chunk_sort_key(row: tuple[float, dict, dict]) -> tuple[int, float]:
+                    md_row = dict((row[1] or {}).get("metadata") or {})
+                    idx_row = _safe_int(md_row.get("chunk_index"))
+                    if idx_row is None:
+                        idx_row = 10**9
+                    return (idx_row, -float(row[0]))
+
+                selected_ranked = sorted(selected_ranked, key=_chunk_sort_key)[:3]
+
+            logger.info("[LIST SOURCE DEBUG] merged_extra_chunks=%s", merged_extra_chunks)
+
         list_docs = [d for score, d, sig in selected_ranked]
 
         section_coherence_ok = False
@@ -13794,6 +14884,9 @@ def _shared_rag_final_answer_decision(
                 and (marker_hits >= 1 or heading_or_phrase_hits >= 2 or local_list_total >= 0.14)
                 and (low_drift or local_promoted_hits >= 1)
             )
+            if strict_label_query and len(selected_ranked) == 1 and int(primary_clean_count) >= 2:
+                section_coherence_ok = True
+                section_coherence_reason = "strict_clean_single_window"
             if section_coherence_ok:
                 section_coherence_reason = "coherent_local_window"
             elif not (max_section_score >= 0.42 and avg_section_score >= 0.28):
@@ -13810,13 +14903,40 @@ def _shared_rag_final_answer_decision(
         if list_docs:
             list_debug_selected_chunks = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in list_docs]
             list_debug_section_confidences = [round(_debug_section_confidence(sig, score), 3) for score, d, sig in selected_ranked[: len(list_docs)]]
+            selected_local_support = _collect_local_window_support(list_docs)
+            list_local_support["used_single_window"] = max(float(list_local_support.get("used_single_window", 0.0) or 0.0), float(selected_local_support.get("used_single_window", 0.0) or 0.0))
+            list_local_support["placeholder_heading_rejected"] = max(float(list_local_support.get("placeholder_heading_rejected", 0.0) or 0.0), float(selected_local_support.get("placeholder_heading_rejected", 0.0) or 0.0))
+            if str(selected_local_support.get("validation_scope") or "") == "single_local_window":
+                list_local_support["validation_scope"] = "single_local_window"
+                list_local_support["single_local_window_text"] = str(selected_local_support.get("single_local_window_text") or "")
+            list_local_support["merged_extra_chunks_count"] = float(len(merged_extra_chunks))
+            list_local_support["selected_chunks_count"] = float(len(list_debug_selected_chunks))
+            list_local_support["strict_adjacent_merge_allowed"] = 1.0 if strict_adjacent_merge_allowed else 0.0
+            if len(list_debug_selected_chunks) == 1 and len(merged_extra_chunks) == 0:
+                list_local_support["used_single_window"] = 1.0
+            if any(float(sig.get("heading_placeholder_rejected", 0.0) or 0.0) >= 0.5 for _s, _d, sig in selected_ranked):
+                list_local_support["placeholder_heading_rejected"] = 1.0
+            if any((float(sig.get("heading_placeholder_rejected", 0.0) or 0.0) >= 0.5) or (float(sig.get("heading_document_title_rejected", 0.0) or 0.0) >= 0.5) for _s, _d, sig, _clean in list_ranked[: min(6, len(list_ranked))]):
+                list_local_support["placeholder_heading_rejected"] = 1.0
             logger.info("[SECTION SELECT] family=%s selected_docs=%s top_score=%.3f confident=%s", family_v2, len(list_docs), top_score, list_section_confident)
 
             if list_section_confident:
                 routed_docs = list_docs
-                focused_context = "\n\n".join((d.get("page_content") or d.get("text") or "") for d in list_docs)
+                if strict_adjacent_merge_allowed and len(list_docs) >= 2:
+                    focused_context = "\n".join((d.get("page_content") or d.get("text") or "") for d in list_docs)
+                else:
+                    focused_context = "\n\n".join((d.get("page_content") or d.get("text") or "") for d in list_docs)
                 list_context = focused_context
                 list_local_support = _collect_local_window_support(list_docs)
+                list_local_support["merged_extra_chunks_count"] = float(len(merged_extra_chunks))
+                list_local_support["selected_chunks_count"] = float(len(list_debug_selected_chunks))
+                list_local_support["strict_adjacent_merge_allowed"] = 1.0 if strict_adjacent_merge_allowed else 0.0
+                if len(list_debug_selected_chunks) == 1 and len(merged_extra_chunks) == 0:
+                    list_local_support["used_single_window"] = 1.0
+                if any(float(sig.get("heading_placeholder_rejected", 0.0) or 0.0) >= 0.5 for _s, _d, sig in selected_ranked):
+                    list_local_support["placeholder_heading_rejected"] = 1.0
+                if any((float(sig.get("heading_placeholder_rejected", 0.0) or 0.0) >= 0.5) or (float(sig.get("heading_document_title_rejected", 0.0) or 0.0) >= 0.5) for _s, _d, sig, _clean in list_ranked[: min(6, len(list_ranked))]):
+                    list_local_support["placeholder_heading_rejected"] = 1.0
                 list_local_override = _has_strong_local_window_support(list_local_support, confidence_threshold=0.58)
                 logger.info("[LOCAL SIGNAL USE] promoted=%s focus=%.2f heading=%.2f density=%.3f confidence=%.3f", int(list_local_support.get("promoted_count", 0.0)), float(list_local_support.get("focus_hits", 0.0)), float(list_local_support.get("heading_match", 0.0)), float(list_local_support.get("list_density", 0.0)), float(list_local_support.get("confidence", 0.0)))
             else:
@@ -13954,6 +15074,7 @@ def _shared_rag_final_answer_decision(
             "answer_type": answer_type,
             "extractor_items_count": items_count,
             "source_mode": answer_source_mode,
+            "_list_local_support": dict(list_local_support or {}),
         }
 
     if family_v2 == "fact_entity":
@@ -14427,7 +15548,7 @@ def _shared_rag_final_answer_decision(
         extraction_blocks = 3 if list_section_confident else 4
         deterministic_list = _extract_list_from_context(query, list_context, max_candidate_blocks=extraction_blocks)
         if deterministic_list:
-            det_ok, det_reason, det_shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(deterministic_list), strict_fast=list_section_confident, local_support=_collect_local_window_support(routed_docs or doc_dicts or []))
+            det_ok, det_reason, det_shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(deterministic_list), strict_fast=list_section_confident, local_support=list_local_support)
             logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(det_ok), det_reason)
             logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(det_ok), det_reason)
             if det_ok and det_shaped:
@@ -14465,7 +15586,19 @@ def _shared_rag_final_answer_decision(
         )
         fast_list = None if prefer_deterministic_list else _extract_simple_list_from_docs(routed_docs or doc_dicts or [], query_text=query)
         if fast_list:
-            logger.info("[LIST REJECTED] reason=fallback_list_path_blocked")
+            fast_ok, fast_reason, fast_shaped = _assess_list_coherence(
+                query,
+                _preclean_list_answer_for_assessment(fast_list),
+                strict_fast=True,
+                local_support=list_local_support,
+            )
+            fast_items = [ln for ln in str(fast_shaped or "").splitlines() if ln.strip()]
+            has_non_empty_items = len(fast_items) >= 2
+            has_local_window = bool(len(list_debug_selected_chunks) >= 1)
+            if list_section_confident and has_local_window and fast_ok and has_non_empty_items and fast_shaped:
+                logger.info("[LIST WINNER] mode=fallback_fast_list_guarded items=%s", len(fast_items))
+                return _result(fast_shaped, used_llm=False, answer_type="list_fast_simple", items_count=len(fast_items))
+            logger.info("[LIST REJECTED] reason=fallback_list_path_blocked coherence_reason=%s items=%s local_window=%s", fast_reason, len(fast_items), has_local_window)
             return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
 
     if family == "explanatory_compare":
@@ -15169,6 +16302,16 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
     if not list_mode:
         return None
 
+    q_family_v2 = _classify_query_family_v2(query)
+    strict_label_query_mode = bool(
+        (
+            re.match(r"^\s*(?:what|which)\s+are\b", ql)
+            or re.match(r"^\s*(?:list|name|give|mention|identify)\b", ql)
+        )
+        and (not _is_goal_objective_list_query(query, q_family_v2))
+    )
+    stage_list_query_mode = bool(re.search(r"\bstages?\b", ql))
+
     context_chunks = [c for c in re.split(r"\n\s*\n+", str(context)) if str(c or "").strip()]
     structured_items = _extract_structured_list_from_context(context_chunks, query_text=query)
     if structured_items and len(structured_items) >= 2:
@@ -15176,12 +16319,21 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         if sanitized_structured:
             return sanitized_structured
 
-    query_tokens = [
+    query_tokens_raw = [
         t for t in re.findall(r"[a-z0-9]{3,}", ql)
         if t not in {"what", "which", "are", "the", "and", "for", "with", "from", "list", "name", "give", "mention", "identify"}
     ]
+    query_tokens: List[str] = []
+    seen_query_tokens: Set[str] = set()
+    for t in query_tokens_raw:
+        for cand_tok in (t, _light_normalize_query_token(t)):
+            cand_tok = str(cand_tok or "").strip().lower()
+            if len(cand_tok) < 3 or cand_tok in seen_query_tokens:
+                continue
+            seen_query_tokens.add(cand_tok)
+            query_tokens.append(cand_tok)
     year_re = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-    bullet_num_re = re.compile(r"^\s*(?:[-•*]|\d+[.)])\s*(.+)$")
+    bullet_num_re = re.compile(r"^\s*(?:[-•*�]|\d+[.)])\s*(.+)$")
     caption_re = re.compile(r"^\s*(?:figure|fig\.?|table)\b", flags=re.IGNORECASE)
 
     def _looks_like_heading(line: str) -> bool:
@@ -15196,10 +16348,13 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
 
     def _normalize_item(raw: str) -> str:
         item = (raw or "").strip()
-        item = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", item)
+        item = re.sub(r"^\s*(?:[-•*�]|\d+[.)])\s*", "", item)
         item = re.sub(r"^\s*\d+\s*:\s*", "", item)
         item = re.sub(r"^\s*(?:first|second|third|fourth|fifth|then|next|finally)\s*[:\-]?\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:this\s+is|it\s+is|they\s+are|according\s+to|for\s+example|in\s+order\s+to|there\s+are|there\s+is)\s*[,:\-]?\s*", "", item, flags=re.IGNORECASE)
+        if strict_label_query_mode and ":" in item:
+            item = item.split(":", 1)[0].strip()
+        item = re.sub(r"\s+(?:a|an|the)\s*$", "", item, flags=re.IGNORECASE)
         item = re.sub(r"\s+", " ", item).strip(" ,;:-–—.")
         return item
 
@@ -15214,7 +16369,10 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         if len(item) < 4 or len(item) > 120:
             return False
         wc = len(item.split())
-        if wc < 2 or wc > 12:
+        if strict_label_query_mode:
+            if wc < 1 or wc > 8:
+                return False
+        elif wc < 2 or wc > 12:
             return False
         if not re.search(r"[a-zA-Z]", item):
             return False
@@ -15232,9 +16390,39 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         if not ln:
             return out
 
+        line_low = ln.lower()
+        line_anchor_hit = True
+        if strict_label_query_mode and query_tokens:
+            line_anchor_hit = any(_token_match_light(line_low, tok) for tok in query_tokens[:4])
+
+        if strict_label_query_mode and line_anchor_hit and ("�" in ln or "•" in ln):
+            for seg in [s.strip() for s in re.split(r"\s*[�•]\s*", ln) if s.strip()]:
+                if len(seg) < 2:
+                    continue
+                out.append(seg)
+
         bullet = bullet_num_re.match(ln)
         if bullet:
             out.append(bullet.group(1).strip())
+
+        if strict_label_query_mode and line_anchor_hit:
+            colon_labels = re.findall(
+                r"(?:^|[�•\-]\s*|\b)([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})\s*:\s*",
+                ln,
+            )
+            out.extend([c.strip() for c in colon_labels if str(c or "").strip()])
+
+            descriptor_labels = re.findall(
+                r"\b([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){0,3})\s+(?:It|An|A|The)\s+(?:is|was|are|were|focused|focuses|concentrated|views|approach)\b",
+                ln,
+            )
+            out.extend([c.strip() for c in descriptor_labels if str(c or "").strip()])
+
+        if stage_list_query_mode:
+            for m in re.finditer(r"\b((?!(?:stage|period)\b)[A-Za-z][A-Za-z\-']{2,}(?:\s+(?!(?:stage|period)\b)[A-Za-z][A-Za-z\-']{2,}){0,2}\s+(?:stage|period))\b", ln, flags=re.IGNORECASE):
+                cand_stage = (m.group(1) or "").strip()
+                if cand_stage:
+                    out.append(cand_stage)
 
         inline_numbered = re.findall(r"(?:^|\s)\d+[.)]\s*([^\d\n][^\n]*?)(?=(?:\s\d+[.)]\s)|$)", ln)
         out.extend([p.strip(" ,;:-") for p in inline_numbered if p.strip()])
@@ -15323,6 +16511,7 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
 
     candidate_blocks = sorted(blocks, key=lambda b: _anchor_hits(b), reverse=True)
     max_blocks = max(1, min(4, int(max_candidate_blocks)))
+    pooled_stage_items: List[str] = []
 
     def _dedupe_ordered(items: List[str]) -> List[str]:
         out: List[str] = []
@@ -15344,9 +16533,19 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         ordered = _dedupe_ordered(collected)
         if len(ordered) < 2:
             continue
+        if stage_list_query_mode:
+            pooled_stage_items.extend(ordered)
+            continue
         sanitized = _sanitize_list_answer_text(query, "\n".join(f"- {item}" for item in ordered[:12]))
         if sanitized:
             return sanitized
+
+    if stage_list_query_mode:
+        merged_stage_items = _dedupe_ordered(pooled_stage_items)
+        if len(merged_stage_items) >= 2:
+            sanitized_stage = _sanitize_list_answer_text(query, "\n".join(f"- {item}" for item in merged_stage_items[:16]))
+            if sanitized_stage:
+                return sanitized_stage
 
     return None
 

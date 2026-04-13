@@ -1,0 +1,29 @@
+], RemoteException
+    + FullyQualifiedError 
+[DIRECT ROUTE] 
+[PRIMARY SEARCH] 
+QUERY: What is psychology?
+[DEBUG] FINAL QUERY: What is psychology?
+[DIRECT ROUTE] 
+[PRIMARY SEARCH] 
+[RESULT]
+Total Retrieval Calls Tracked: 1
+Docs retrieved: 3
+QUERY: Who established the first psychological laboratory and in what year?
+[DEBUG] FINAL QUERY: Who established the first psychological laboratory and in what year?
+[FACT RESCUE USED]=False
+[DIRECT ROUTE] 
+[PRIMARY SEARCH] 
+[RESULT]
+Total Retrieval Calls Tracked: 1
+Docs retrieved: 0
+QUERY: List the six goals of psychology.
+[DEBUG] FINAL QUERY: List the six goals of psychology.
+[RESULT]
+Total Retrieval Calls Tracked: 1
+Docs retrieved: 2
+QUERY: What is blockchain?
+[DEBUG] FINAL QUERY: What is blockchain?
+[RESULT]
+Total Retrieval Calls Tracked: 1
+Docs retrieved: 3
