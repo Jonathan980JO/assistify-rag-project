@@ -491,9 +491,6 @@ class VectorStore:
         tokens = VectorStore._tokenize_words(raw_text)
         word_count = sum(1 for tok in tokens if re.search(r"[A-Za-z\u0600-\u06FF]", tok))
 
-        if re.search(r"\b(table\s+of\s+contents|brief\s+contents|contents)\b", lowered):
-            return "toc_like"
-
         numeric_tokens = sum(1 for tok in tokens if tok.isdigit())
         numeric_ratio = numeric_tokens / float(max(1, len(tokens)))
         if len(tokens) >= 16 and numeric_ratio >= 0.35:
@@ -824,6 +821,12 @@ class VectorStore:
             metadata = dict(cand.get("metadata") or {})
             reason = self._low_quality_reason(text, metadata)
             if reason:
+                if reason in {"toc_index_like"}:
+                    cand["_toc_hint"] = True
+                    metadata["_toc_hint"] = True
+                    cand["metadata"] = metadata
+                    quality_filtered.append(cand)
+                    continue
                 dropped_chunks.append(
                     {
                         "reason": reason,
@@ -851,6 +854,12 @@ class VectorStore:
 
             content_density = self._content_density_score(cand.get("text") or cand.get("page_content") or "")
             final_score = (semantic_score * 0.7) + (content_density * 0.3)
+
+            if bool(cand.get("_toc_hint")):
+                if query_profile.get("structure_query") or query_profile.get("chapter_query"):
+                    final_score -= 0.08
+                else:
+                    final_score -= 0.28
 
             cand["semantic_score_used"] = float(semantic_score)
             cand["content_density"] = float(content_density)

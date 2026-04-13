@@ -1,4 +1,4 @@
-import os
+﻿import os
 import warnings
 import uuid
 import json
@@ -6,6 +6,7 @@ import asyncio
 import logging
 import sqlite3
 import math
+from urllib.parse import urlsplit
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -97,48 +98,84 @@ def _focus_doc_to_query_window(query: str, text: str, window: int = 700) -> str:
         return text
 
     logger = logging.getLogger(__name__)
-    q = (query or "").lower().strip()
+    q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     t = text
     original_len = len(t)
 
-    # Generic heading-aware isolation
-    heading_keywords = [
-        "advantages",
-        "disadvantages",
-        "criticism",
-        "criticisms",
-        "steps",
-        "phases",
-        "levels",
-        "types",
-        "advantages of",
-        "disadvantages of",
-    ]
-    reject_for_definition_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", re.IGNORECASE)
     intro_heading_re = re.compile(
-        r"(?im)^\s*(?:introduction|overview|summary|contents?|table of contents|chapter\s+\d+|unit\s+\d+|learning objectives?|key terms?)\s*[:\-–—]?\s*$"
+        r"(?im)^\s*(?:introduction|overview|summary|contents?|table\s+of\s+contents|chapter\s+\d+|unit\s+\d+|learning\s+objectives?|key\s+terms?)\s*[:\-–—]?\s*$"
     )
-    is_definition_query = bool(
-        re.match(
-            r"^\s*(?:what\s+is|what\s+are|define|who\s+is|who\s+was|who\s+introduced|who\s+is\s+considered\s+the\s+father\s+of)\b",
-            q,
-            flags=re.IGNORECASE,
-        )
-    )
+    is_definition_query = bool(re.match(r"^\s*(?:what\s+is|what\s+are|define|who\s+is|who\s+was|who\s+introduced)\b", q))
+
+    stopwords = {
+        "a", "an", "the", "is", "are", "was", "were", "be", "being", "been", "to", "of", "in", "on", "at", "for", "from", "by", "and", "or", "as", "with", "about", "this", "that", "these", "those", "what", "which", "who", "whom", "whose", "when", "where", "why", "how", "do", "does", "did", "can", "could", "would", "should", "tell", "me", "explain", "describe"
+    }
+
+    def _query_tokens(qs: str) -> list[str]:
+        toks = [tok for tok in re.findall(r"[a-z0-9]{2,}", qs) if tok not in stopwords]
+        out: list[str] = []
+        seen: set[str] = set()
+        for tok in toks:
+            if tok in seen:
+                continue
+            seen.add(tok)
+            out.append(tok)
+        return out[:18]
 
     def is_list_query(qs: str) -> bool:
-        return bool(re.search(r"\b(phases?|steps?|levels?|types?|list|stages?|components?|goals?|parts?|steps of|phases of|components of|goals of|parts of)\b", qs, flags=re.IGNORECASE))
+        q_words = re.findall(r"[a-z]+", qs)
+        plural_tokens = [w for w in q_words if len(w) > 3 and w.endswith("s") and w not in {"this", "is", "was", "does"}]
+        if re.search(r"\blist\b", qs):
+            return True
+        if re.match(r"^\s*(?:what|which)\s+are\b", qs):
+            return True
+        if re.match(r"^\s*(?:name|give|mention|identify)\b", qs) and plural_tokens:
+            return True
+        if re.search(r"\b(?:what|which)\b", qs) and plural_tokens:
+            return True
+        return False
 
-    # Debug flags required by spec
+    query_tokens = _query_tokens(q)
+
     list_detected = False
     trimming_applied = False
     used_full_chunk = False
+    min_window = max(window, 2200 if is_list_query(q) else window)
 
-    # Minimum preserved window for list-like queries: prefer large window
-    min_window = 2500 if is_list_query(q) else window
+    lines = t.splitlines(keepends=True)
+    line_entries: list[tuple[int, int, str]] = []
+    pos = 0
+    for ln in lines:
+        s = pos
+        e = pos + len(ln)
+        line_entries.append((s, e, ln))
+        pos = e
+
+    def _line_overlap(line: str) -> int:
+        low = line.lower()
+        return sum(1 for tok in query_tokens if re.search(rf"\b{re.escape(tok)}\b", low))
+
+    def _is_structured_line(line: str) -> bool:
+        stripped = line.strip()
+        if not stripped:
+            return False
+        if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", line):
+            return True
+        if re.match(r"^\s*[A-Z][A-Za-z0-9\- ]{2,60}:\s*$", line):
+            return True
+        if re.search(r"(?:\b[A-Z][\w\-]{2,}\b\s*,\s*){2,}\b[A-Z][\w\-]{2,}\b", line):
+            return True
+        return False
+
+    def _structured_density(start_idx: int, end_idx: int) -> float:
+        seg = line_entries[max(0, start_idx): min(len(line_entries), end_idx)]
+        non_empty = [ln for _s, _e, ln in seg if ln.strip()]
+        if not non_empty:
+            return 0.0
+        structured = sum(1 for _s, _e, ln in seg if _is_structured_line(ln))
+        return structured / max(1, len(non_empty))
 
     def _ensure_min_bounds(start: int, end: int, desired: int) -> Tuple[int, int]:
-        # expand symmetrically while staying within document bounds
         cur_len = end - start
         if cur_len >= desired:
             return start, end
@@ -149,358 +186,130 @@ def _focus_doc_to_query_window(query: str, text: str, window: int = 700) -> str:
         new_end = min(len(t), end + expand_right)
         return new_start, new_end
 
-    def find_section_from_heading(keyword: str) -> Optional[Tuple[int, int, str]]:
-        # Look for the keyword in a heading-like line, then capture until the next heading
-        try:
-            pat = re.compile(r"(?mi)(^\s*.{0,120}?\b" + re.escape(keyword) + r"\b.*$)")
-            m = pat.search(t)
-            if not m:
-                return None
-            head_start = m.start(1)
-            head_end = m.end(1)
-
-            remaining = t[head_end:]
-            end_idx = None
-            # Prefer the nearest following heading that looks like a section break
-            for match in re.finditer(r"(?m)^\s*(?P<h>[A-Z][A-Za-z0-9 \-,:]{0,120})\s*$", remaining):
-                candidate_start = head_end + match.start()
-                prefix = t[max(0, candidate_start - 3):candidate_start]
-                if prefix.startswith("\n\n") or prefix.strip() == "":
-                    end_idx = candidate_start
-                    break
-            if end_idx is None:
-                dbl = re.search(r"\n\s*\n\s*\n", remaining)
-                if dbl:
-                    end_idx = head_end + dbl.start()
-            if end_idx is None:
-                end_idx = head_end
-
-            # scan forward to include contiguous list items if present
-            fragment = t[head_end: end_idx if end_idx > head_end else (head_end + min_window)]
-            list_found = bool(re.search(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", fragment))
-
-            cur = head_end
-            if list_found:
-                # expand until list ends or next heading/double-blank encountered
-                lines = t[head_end:].splitlines(keepends=True)
-                non_list_count = 0
-                for ln in lines:
-                    cur += len(ln)
-                    if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", ln):
-                        non_list_count = 0
-                        continue
-                    if ln.strip() == "":
-                        non_list_count += 1
-                    else:
-                        non_list_count += 1
-                    # stop if we see a probable new heading line after a blank
-                    if re.match(r"^\s*[A-Z][A-Za-z0-9 \-,:]{0,120}\s*$", ln) and non_list_count >= 1:
-                        cur -= len(ln)
-                        break
-                    if non_list_count >= 2 and ln.strip() == "":
-                        break
-                    # hard cap to avoid runaway expansion
-                    if cur - head_end > max(min_window, 4000):
-                        break
-            end_idx = min(len(t), cur)
-
-            start = max(0, head_start - 100)
-            end = min(len(t), end_idx if end_idx > head_end else head_end + min_window)
-
-            heading_line = m.group(1) if m else ""
-            # If heading appears to be a figure/table caption, avoid centering on it
-            if re.search(r"\b(fig(?:ure)?|table|caption|fig\.|chart)\b", heading_line, flags=re.IGNORECASE):
-                # search for the next substantive paragraph (prefer lists or paragraph >80 chars)
-                post_search = t[head_end: head_end + max(min_window, 2000)]
-                list_match = re.search(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", post_search)
-                if list_match:
-                    # set start at beginning of list match (with small context)
-                    list_pos = head_end + list_match.start()
-                    s = max(0, list_pos - 50)
-                    e = min(len(t), list_pos + max(min_window, 800))
-                    s, e = _ensure_min_bounds(s, e, min_window)
-                    return (s, e, t[s:e])
-                # otherwise find first paragraph of reasonable length
-                para = re.search(r"\n\s*([^\n]{80,2000})", post_search)
-                if para:
-                    para_pos = head_end + para.start(1)
-                    s = max(0, para_pos - 50)
-                    e = min(len(t), para_pos + max(min_window, 800))
-                    s, e = _ensure_min_bounds(s, e, min_window)
-                    return (s, e, t[s:e])
-                # if nothing useful found, skip this caption heading
-                return None
-
-            # ensure we return at least min_window for list queries
-            if is_list_query(q) and (end - start) < min_window:
-                start, end = _ensure_min_bounds(start, end, min_window)
-
-            return (start, end, t[start:end])
-        except Exception:
-            return None
-
-    # FIGURE-AWARE PRIORITY: For list-like queries prefer figure captions that mention
-    # Phases/Steps/Levels/Types. If found, force focus to start at the figure and
-    # include a large window after it (800-1500+ chars) to ensure lists are captured.
     figure_match_found = False
     figure_match_position = None
     focus_override_used = False
-    if is_list_query(q):
-        try:
-            # match 'Figure' caption lines that also include words like 'phases'/'steps' etc.
-            fig_re = re.compile(r"(?mi)\bfig(?:ure)?\b[^\n]{0,200}\b(phases?|steps?|levels?|types?)\b")
-            mfig = fig_re.search(t)
-            if mfig:
-                figure_match_found = True
-                figure_match_position = mfig.start()
-                # Start focus at the figure caption (do not keep earlier paragraph text)
-                # Prefer to start after the caption label/heading (after ':' or the heading phrase)
-                start = max(0, figure_match_position)
-                try:
-                    # find the full caption line boundaries
-                    line_start = t.rfind('\n', 0, mfig.start())
-                    line_start = 0 if line_start == -1 else (line_start + 1)
-                    line_end = t.find('\n', mfig.start())
-                    if line_end == -1:
-                        line_end = len(t)
-                    caption_line = t[line_start:line_end]
-                    # if there's a colon in the caption, start after it to skip the heading text
-                    if ':' in caption_line:
-                        colpos = line_start + caption_line.find(':') + 1
-                        start = colpos
-                        # If the caption contains a heading phrase, skip past it
-                        heading_phrase_re = re.search(r"\b(phases?|steps?|levels?|types?)\b[^\n]{0,80}?management[^\n]{0,40}?period", caption_line, flags=re.IGNORECASE)
-                        if heading_phrase_re:
-                            start = line_start + heading_phrase_re.end()
-                    else:
-                        # otherwise try to locate the first capitalized list token after the match
-                        m_after = re.search(r"\b(The\s+)?([A-Z][a-z][^\s]{0,40}(?:\s+[A-Z][a-z][^\s]{0,40})?)", t[mfig.end():])
-                        if m_after:
-                            start = mfig.end() + m_after.start()
-                    # If heading text is still present at start, advance start past heading words so
-                    # the focused window begins at the likely list payload.
-                    try:
-                        heading_stop_words = ('phase', 'phases', 'step', 'steps', 'level', 'levels', 'type', 'types')
-                        scan_pos = start
-                        while True:
-                            m_token = re.search(r"\b[A-Z][a-z]{1,40}(?:\s+[a-z][a-z]{1,40})?\b", t[scan_pos:])
-                                
-                            if not m_token:
-                                break
-                            tok = m_token.group(0)
-                            lowtok = tok.lower()
-                            if any(hw in lowtok for hw in heading_stop_words):
-                                # move past this token and continue scanning
-                                scan_pos = scan_pos + m_token.end()
-                                continue
-                            # found a likely list item start
-                            start = scan_pos + m_token.start()
-                            break
-                    except Exception:
-                        pass
-                except Exception:
-                    start = max(0, figure_match_position)
-                # Ensure we include a large payload after the figure to capture the list
-                desired_after = 1500
-                # initial end candidate: at least desired_after after start
-                end = min(len(t), start + desired_after)
-
-                # Try to expand forward until a clear section break or heading, up to a safe cap
-                cap = min(len(t), start + max(desired_after, 4000))
-                cur = mfig.end()
-                found_cut = False
-                while cur < cap:
-                    post = t[cur:cap]
-                    nn = re.search(r"\n\s*\n", post)
-                    hh = re.search(r"(?m)^\s*[A-Z][A-Za-z0-9 \-,:]{0,120}\s*$", post)
-                    if nn:
-                        end = min(len(t), cur + nn.end())
-                        found_cut = True
-                        break
-                    if hh:
-                        end = min(len(t), cur + hh.start())
-                        found_cut = True
-                        break
-                    # if no obvious break, expand to cap and stop
-                    end = cap
-                    break
-
-                # Ensure minimum bounds (respect list min_window) but DO NOT move start leftwards;
-                # expand only to the right so we don't keep earlier paragraph text.
-                desired_len = max(min_window, desired_after)
-                if end - start < desired_len:
-                    need = desired_len - (end - start)
-                    end = min(len(t), end + need)
-                focus_override_used = True
-                final_preview = t[start:end]
-                try:
-                    logger.info("figure_match_found=%s figure_match_position=%s focus_override_used=%s final_focus_preview=%s",
-                                figure_match_found,
-                                figure_match_position,
-                                focus_override_used,
-                                (final_preview[:200] + '...') if len(final_preview) > 200 else final_preview)
-                except Exception:
-                    pass
-                return final_preview
-        except Exception:
-            # Fall through to normal focus logic on any error
-            figure_match_found = False
-            figure_match_position = None
-            focus_override_used = False
-
-    # Structured-region detection helpers
-    def detect_inline_list(fragment: str) -> bool:
-        # comma-separated short capitalized phrases or numeric lists inline (no bullets)
-        if re.search(r"(?:\b[A-Z][\w\-]{1,40}(?:\s+[A-Z][\w\-]{1,40})?\b\s*,\s*){2,}[A-Z]", fragment):
-            return True
-        if re.search(r"(?:^|\n)\s*\d+[.)]\s+", fragment):
-            return True
-        return False
-
-    def detect_structured_regions(s: str) -> bool:
-        # multiple short capitalized phrases often indicate list-like headings/inline lists
-        caps = re.findall(r"\b([A-Z][a-z]{1,40}(?:\s+[A-Z][a-z]{1,40})?)\b", s)
-        if len(caps) >= 3:
-            # if many are short tokens, treat as structured region
-            short_count = sum(1 for c in caps if len(c) < 40 and len(c.split()) <= 4)
-            if short_count >= 3:
-                return True
-        # repeated short phrases separated by punctuation
-        repeats = re.findall(r"\b([A-Za-z]{3,40})\b(?=[\s,;:\-\n]+.*\b\1\b)", s)
-        if repeats:
-            return True
-        # inline comma list detection
-        if re.search(r"(?:\b[A-Z][\w\-]{1,40}\b\s*,\s*){2,}[A-Z]", s):
-            return True
-        return False
-
-    # If the user query explicitly requests a heading-like section, try heading-aware extraction first
-    q_low = q or ""
-    for hk in heading_keywords:
-        if hk in q_low:
-            if is_definition_query and hk in {"disadvantages", "disadvantages of", "criticism", "criticisms"}:
+    try:
+        caption_re = re.compile(r"^\s*(?:fig(?:ure)?|table)\s*(?:\d+[A-Za-z]?)?\s*[:.\-]?", re.IGNORECASE)
+        best_caption: tuple[float, int, int] | None = None
+        for idx, (s, e, ln) in enumerate(line_entries):
+            if not caption_re.match(ln):
                 continue
-            found = find_section_from_heading(hk)
-            if found and len(found[2].strip()) > 50:
-                start, end, sec = found
-                if is_definition_query and (reject_for_definition_re.search(sec[:500]) or intro_heading_re.search(sec[:160])):
-                    continue
-                # ensure not to aggressively truncate for list queries
-                if is_list_query(q):
-                    # For list queries prefer the full chunk (do not aggressively trim)
-                    list_detected = True
-                    used_full_chunk = False
-                    trimming_applied = True
-                    logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (heading match)", list_detected, trimming_applied, used_full_chunk)
-                    return sec
-                # if structured region detected in the section, keep full region
-                if detect_structured_regions(sec) or detect_inline_list(sec):
-                    used_full_chunk = True
-                    trimming_applied = False
-                    logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (structured heading)", list_detected, trimming_applied, used_full_chunk)
-                    return t[start:end]
-                trimming_applied = True
-                logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (heading match)", original_len, len(sec))
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
-                return sec
+            overlap = _line_overlap(ln)
+            density = _structured_density(idx + 1, idx + 14)
+            local_overlap = 0
+            for _s2, _e2, ln2 in line_entries[idx + 1: idx + 8]:
+                local_overlap += _line_overlap(ln2)
+            score = (2.0 * overlap) + (1.25 * local_overlap) + (3.0 * density)
+            if best_caption is None or score > best_caption[0]:
+                best_caption = (score, idx, s)
 
-    # Otherwise, look for heading keywords in the document itself and prefer a heading match near query tokens.
-    # Skip for definition queries to avoid drifting into criticism/intro fragments.
-    if not is_definition_query:
-        for hk in heading_keywords:
-            found = find_section_from_heading(hk)
-            if found and q_low and any(tok in found[2].lower() for tok in re.findall(r"\w+", q_low)):
-                start, end, sec = found
-                if is_list_query(q):
-                    list_detected = True
-                    used_full_chunk = False
-                    trimming_applied = True
-                    logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (heading doc-scan)", list_detected, trimming_applied, used_full_chunk)
-                    return sec
-                if detect_structured_regions(sec) or detect_inline_list(sec):
-                    used_full_chunk = True
-                    trimming_applied = False
-                    logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (structured doc-scan)", list_detected, trimming_applied, used_full_chunk)
-                    return t[start:end]
-                trimming_applied = True
-                logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (heading doc-scan)", original_len, len(sec))
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
-                return sec
-
-    # Fallback: locate first meaningful query token hit and return a local window
-    query_tokens = [tok for tok in re.findall(r"\w+", q_low) if tok not in {"what", "are", "the", "of", "in", "a", "an", "and", "to"}]
-    for tok in query_tokens:
-        token_matches = re.finditer(r"\b" + re.escape(tok) + r"\b", t, flags=re.IGNORECASE)
-        for m in token_matches:
-            start = max(0, m.start() - 200)
-            end = min(len(t), m.end() + max(window, min_window))
-            if is_definition_query:
-                candidate = t[start:end]
-                if reject_for_definition_re.search(candidate[:500]) or intro_heading_re.search(candidate[:180]):
+        if best_caption and best_caption[0] > 1.0:
+            figure_match_found = True
+            figure_match_position = best_caption[2]
+            start = best_caption[2]
+            seen_structured = False
+            non_struct_run = 0
+            end = min(len(t), start + max(min_window, 1400))
+            for _idx2 in range(best_caption[1] + 1, min(len(line_entries), best_caption[1] + 90)):
+                _s2, _e2, ln2 = line_entries[_idx2]
+                if _is_structured_line(ln2):
+                    seen_structured = True
+                    non_struct_run = 0
+                    end = _e2
                     continue
-            # if query indicates list, ensure a larger window
-            if is_list_query(q):
-                list_detected = True
-                # prefer a wide focused window for list queries
-                used_full_chunk = False
-                trimming_applied = True
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (token-hit list)", list_detected, trimming_applied, used_full_chunk)
-                start, end = _ensure_min_bounds(start, end, min_window)
-                return t[start:end]
-            # check nearby fragment for inline lists or structured regions and avoid cutting them
-            look_fragment = t[max(0, start - 200): min(len(t), end + 200)]
-            if detect_inline_list(look_fragment) or detect_structured_regions(look_fragment):
-                # expand until next heading or double newline
-                list_detected = True
-                # find next double newline or heading after m.end()
-                post = t[m.end(): m.end() + max(min_window, 4000)]
-                nn = re.search(r"\n\s*\n", post)
-                hh = re.search(r"(?m)^\s*[A-Z][A-Za-z0-9 \-,:]{0,120}\s*$", post)
-                cut = None
-                if nn:
-                    cut = m.end() + nn.end()
-                if hh and (cut is None or (m.end() + hh.start()) < cut):
-                    cut = m.end() + hh.start()
-                if cut:
-                    start = max(0, start - 50)
-                    end = min(len(t), cut)
+                if not ln2.strip():
+                    non_struct_run += 1
+                elif len(ln2.strip()) <= 90 and re.match(r"^[A-Z][A-Za-z0-9\- ,:]{2,90}$", ln2.strip()):
+                    non_struct_run += 1
+                    end = _e2
                 else:
-                    start, end = _ensure_min_bounds(start, end, min_window)
-                focused = t[start:end]
-                used_full_chunk = False
-                trimming_applied = False
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (expanded list)", list_detected, trimming_applied, used_full_chunk)
-                # hard rule: never cut mid-list — if window still short, return full chunk
-                if len(focused) < 1200:
-                    used_full_chunk = False
-                    logger.info("FOCUS DEBUG: focused too small after expansion; keeping focused window")
-                    start, end = _ensure_min_bounds(start, end, min_window)
-                    return t[start:end]
-                logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (token-hit expanded)", original_len, len(focused))
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
-                return focused
-            focused = t[start:end]
-            if len(focused) < 800:
-                logger.warning("FOCUS WINDOW TOO SMALL → FALLBACK USED (original=%d focused=%d)", original_len, len(focused))
-                used_full_chunk = False
-                logger.info("FOCUS: original_len=%d focused_len=%d fallback=true (token-hit)", original_len, len(focused))
-                logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
-                return focused
-            trimming_applied = True
-            logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (token-hit)", original_len, len(focused))
-            logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
-            return focused
+                    non_struct_run += 1
+                    if not seen_structured:
+                        end = _e2
+                if seen_structured and non_struct_run >= 3:
+                    break
+                if (_e2 - start) > max(min_window, 4200):
+                    break
+            start, end = _ensure_min_bounds(start, end, min_window)
+            focus_override_used = True
+            final_preview = t[start:end]
+            logger.info(
+                "figure_match_found=%s figure_match_position=%s focus_override_used=%s final_focus_preview=%s",
+                figure_match_found,
+                figure_match_position,
+                focus_override_used,
+                (final_preview[:200] + "...") if len(final_preview) > 200 else final_preview,
+            )
+            return final_preview
+    except Exception:
+        figure_match_found = False
+        figure_match_position = None
+        focus_override_used = False
 
-    # As a last resort, return a modest initial window, but respect list-query minimum and failsafe
+    line_scores: list[tuple[float, int, int, int]] = []
+    for idx, (s, e, ln) in enumerate(line_entries):
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        overlap = _line_overlap(ln)
+        structure_bonus = 1.2 if _is_structured_line(ln) else 0.0
+        neighborhood_overlap = 0
+        for _s2, _e2, ln2 in line_entries[max(0, idx - 2): min(len(line_entries), idx + 3)]:
+            neighborhood_overlap += _line_overlap(ln2)
+        density_bonus = 1.0 * _structured_density(idx - 2, idx + 6)
+        junk_penalty = 1.2 if intro_heading_re.search(ln) else 0.0
+        if is_definition_query and intro_heading_re.search(ln):
+            junk_penalty += 0.8
+        score = (2.3 * overlap) + (0.9 * neighborhood_overlap) + structure_bonus + density_bonus - junk_penalty
+        line_scores.append((score, idx, s, e))
+
+    if line_scores:
+        line_scores.sort(key=lambda x: x[0], reverse=True)
+        best_score, anchor_idx, anchor_start, anchor_end = line_scores[0]
+        if best_score <= 0.0:
+            anchor_idx, anchor_start, anchor_end = 0, 0, min(len(t), window)
+            for idx, (s, e, ln) in enumerate(line_entries):
+                if ln.strip() and not intro_heading_re.search(ln):
+                    anchor_idx, anchor_start, anchor_end = idx, s, e
+                    break
+        start = max(0, anchor_start - 220)
+        end = min(len(t), anchor_end + max(window, 900))
+
+        anchor_structured = _is_structured_line(line_entries[anchor_idx][2])
+        if is_list_query(q) or anchor_structured or _structured_density(anchor_idx - 2, anchor_idx + 10) >= 0.35:
+            list_detected = True
+            non_struct_run = 0
+            for _idx2 in range(anchor_idx, min(len(line_entries), anchor_idx + 100)):
+                _s2, _e2, ln2 = line_entries[_idx2]
+                if _is_structured_line(ln2):
+                    end = max(end, _e2)
+                    non_struct_run = 0
+                elif not ln2.strip():
+                    non_struct_run += 1
+                else:
+                    non_struct_run += 1
+                    if _line_overlap(ln2) > 0:
+                        end = max(end, _e2)
+                if non_struct_run >= 3 and (_e2 - anchor_start) > 800:
+                    break
+                if (_e2 - anchor_start) > max(min_window, 4200):
+                    break
+            start, end = _ensure_min_bounds(start, end, min_window)
+
+        focused = t[start:end]
+        trimming_applied = True
+        logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (generic-anchor)", original_len, len(focused))
+        logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
+        return focused
+
     final_window = max(window, min_window)
     focused = t[:final_window]
-    # Last-resort fallback: keep controlled window; never return full chunk
     if len(focused) < 1200 and len(t) > len(focused):
         used_full_chunk = False
         logger.warning("FOCUS WINDOW TOO SMALL → FALLBACK USED (original=%d focused=%d)", original_len, len(focused))
         logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s (last-resort fallback)", list_detected, trimming_applied, used_full_chunk)
         return focused
-    # Normal last-resort return
     trimming_applied = True
     logger.info("FOCUS: original_len=%d focused_len=%d fallback=false (last-resort)", original_len, len(focused))
     logger.info("FOCUS DEBUG: list_detected=%s trimming_applied=%s used_full_chunk=%s", list_detected, trimming_applied, used_full_chunk)
@@ -535,16 +344,50 @@ FACT_CONTEXT_MAX_SNIPPETS = 4
 FACT_CONTEXT_MAX_CHARS = 1400
 
 # Ensure ASSISTIFY feature flags have safe defaults when config isn't present
+def _env_flag_enabled(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _build_ollama_url(path: str) -> str:
+    host_raw = str(globals().get("OLLAMA_HOST", "127.0.0.1") or "").strip()
+    port_raw = globals().get("OLLAMA_PORT", 11434)
+    clean_path = "/" + str(path or "").strip().lstrip("/")
+
+    if not host_raw:
+        host_raw = "127.0.0.1"
+
+    if host_raw.startswith(("http://", "https://")):
+        base = host_raw.rstrip("/")
+    else:
+        host_no_slash = host_raw.rstrip("/")
+        parsed = urlsplit(f"//{host_no_slash}")
+        netloc = parsed.netloc or parsed.path
+        if ":" not in netloc:
+            netloc = f"{netloc}:{port_raw}"
+        base = f"http://{netloc}"
+
+    return f"{base.rstrip('/')}{clean_path}"
+
+
+OLLAMA_CHAT_URL = _build_ollama_url("/api/chat")
+OLLAMA_GENERATE_URL = _build_ollama_url("/api/generate")
+OLLAMA_TAGS_URL = _build_ollama_url("/api/tags")
+LLM_URL = OLLAMA_CHAT_URL
+OLLAMA_API_URL = OLLAMA_CHAT_URL
+
 if 'ASSISTIFY_SAFE_MODE' not in globals():
-    ASSISTIFY_SAFE_MODE = os.environ.get('ASSISTIFY_SAFE_MODE', '1') == '1'
+    ASSISTIFY_SAFE_MODE = _env_flag_enabled('ASSISTIFY_SAFE_MODE', default=False)
 if 'ASSISTIFY_DISABLE_TTS' not in globals():
-    ASSISTIFY_DISABLE_TTS = os.environ.get('ASSISTIFY_DISABLE_TTS', '1' if ASSISTIFY_SAFE_MODE else '0') == '1'
+    ASSISTIFY_DISABLE_TTS = _env_flag_enabled('ASSISTIFY_DISABLE_TTS', default=False)
 if 'ASSISTIFY_DISABLE_RERANKER' not in globals():
-    ASSISTIFY_DISABLE_RERANKER = os.environ.get('ASSISTIFY_DISABLE_RERANKER', '1' if ASSISTIFY_SAFE_MODE else '0') == '1'
+    ASSISTIFY_DISABLE_RERANKER = _env_flag_enabled('ASSISTIFY_DISABLE_RERANKER', default=False)
 if 'ASSISTIFY_DISABLE_WHISPER' not in globals():
-    ASSISTIFY_DISABLE_WHISPER = os.environ.get('ASSISTIFY_DISABLE_WHISPER', '1' if ASSISTIFY_SAFE_MODE else '0') == '1'
+    ASSISTIFY_DISABLE_WHISPER = _env_flag_enabled('ASSISTIFY_DISABLE_WHISPER', default=False)
 if 'ASSISTIFY_DISABLE_WARMUP' not in globals():
-    ASSISTIFY_DISABLE_WARMUP = os.environ.get('ASSISTIFY_DISABLE_WARMUP', '0') == '1'
+    ASSISTIFY_DISABLE_WARMUP = _env_flag_enabled('ASSISTIFY_DISABLE_WARMUP', default=False)
 
 # Effective flags used across module
 EFFECTIVE_DISABLE_TTS = ASSISTIFY_DISABLE_TTS
@@ -626,17 +469,41 @@ async def flush_ollama_cache():
     """
     try:
         import aiohttp as _aiohttp
-        ollama_url = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}/api/chat"
+        ollama_url = _build_ollama_url("/api/chat")
         payload = {
             "model": OLLAMA_MODEL,
             "messages": [],
             "keep_alive": "0"
         }
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=cache_flush", ollama_url, OLLAMA_MODEL)
         async with _aiohttp.ClientSession() as _sess:
             async with _sess.post(ollama_url, json=payload, timeout=_aiohttp.ClientTimeout(total=10)) as resp:
+                logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp.status, ollama_url)
                 logger.info(f"Ollama cache flush: status={resp.status} (model will reload on next query)")
     except Exception as e:
         logger.warning(f"Ollama cache flush failed (non-fatal): {e}")
+
+
+async def _check_ollama_connectivity() -> None:
+    tags_url = _build_ollama_url("/api/tags")
+    local_session_created = False
+    _sess = llm_session
+    if _sess is None or getattr(_sess, "closed", False):
+        local_session_created = True
+        _sess = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=8, connect=3, sock_read=5))
+
+    try:
+        async with _sess.get(tags_url) as resp:
+            body_preview = (await resp.text())[:160]
+            if resp.status == 200:
+                logger.info("[OLLAMA CONNECTIVITY] success url=%s status=%s", tags_url, resp.status)
+            else:
+                logger.warning("[OLLAMA CONNECTIVITY] failed url=%s status=%s body=%s", tags_url, resp.status, body_preview)
+    except Exception as exc:
+        logger.warning("[OLLAMA CONNECTIVITY] failed url=%s reason=%s", tags_url, exc)
+    finally:
+        if local_session_created and _sess and not _sess.closed:
+            await _sess.close()
 
 
 # ========== REAL-TIME KB EVENT BROADCAST ==========
@@ -1127,14 +994,27 @@ async def startup_event():
 
     logger.info("✓ Persistent LLM session created with connection pooling")
     logger.info("✓ Persistent TTS session created")
+    logger.info("[OLLAMA CONFIG] host_raw=%s", OLLAMA_HOST)
+    logger.info("[OLLAMA CONFIG] port_raw=%s", OLLAMA_PORT)
+    logger.info("[OLLAMA CONFIG] chat_url=%s", _build_ollama_url('/api/chat'))
+    logger.info("[OLLAMA CONFIG] generate_url=%s", _build_ollama_url('/api/generate'))
     logger.info(
-        "Assistify feature flags | safe_mode=%s tts=%s reranker=%s whisper=%s warmup=%s",
+        "[FEATURE FLAGS] safe_mode=%s reranker=%s tts=%s whisper=%s warmup=%s",
         ASSISTIFY_SAFE_MODE,
-        ("disabled" if EFFECTIVE_DISABLE_TTS else "enabled"),
         ("disabled" if EFFECTIVE_DISABLE_RERANKER else "enabled"),
+        ("disabled" if EFFECTIVE_DISABLE_TTS else "enabled"),
         ("disabled" if EFFECTIVE_DISABLE_WHISPER else "enabled"),
         ("disabled" if EFFECTIVE_DISABLE_WARMUP else "enabled"),
     )
+    logger.info(
+        "[FEATURE FLAGS RAW] ASSISTIFY_SAFE_MODE=%s EFFECTIVE_DISABLE_RERANKER=%s EFFECTIVE_DISABLE_TTS=%s EFFECTIVE_DISABLE_WHISPER=%s EFFECTIVE_DISABLE_WARMUP=%s",
+        ASSISTIFY_SAFE_MODE,
+        EFFECTIVE_DISABLE_RERANKER,
+        EFFECTIVE_DISABLE_TTS,
+        EFFECTIVE_DISABLE_WHISPER,
+        EFFECTIVE_DISABLE_WARMUP,
+    )
+    await _check_ollama_connectivity()
 
     try:
         indexed_files = [f.get("filename") for f in list_uploaded_files() if f.get("filename")]
@@ -1260,7 +1140,7 @@ async def startup_event():
 
     # Fire-and-forget warmups — run in the background, invisible to users
     if EFFECTIVE_DISABLE_WARMUP:
-        logger.info("Warmups disabled by configuration (ASSISTIFY_DISABLE_WARMUP/SAFE_MODE)")
+        logger.info("Warmups disabled by configuration (ASSISTIFY_DISABLE_WARMUP)")
     else:
         asyncio.create_task(_warmup_llm())
         asyncio.create_task(_warmup_xtts())
@@ -1325,8 +1205,7 @@ async def _warmup_llm():
     gets a fast first token instead of waiting 8+ seconds for a cold load.
     """
     await asyncio.sleep(3)          # let server finish binding first
-    OLLAMA_BASE = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
-    preload_url = f"{OLLAMA_BASE}/api/generate"
+    preload_url = _build_ollama_url("/api/generate")
     logger.info(f"[Warmup] Preloading {OLLAMA_MODEL} into VRAM (keep_alive=-1)...")
     payload = {
         "model": OLLAMA_MODEL,
@@ -1341,12 +1220,14 @@ async def _warmup_llm():
         },
     }
     try:
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=warmup", preload_url, OLLAMA_MODEL)
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 preload_url,
                 json=payload,
                 timeout=aiohttp.ClientTimeout(total=120),
             ) as resp:
+                logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp.status, preload_url)
                 if resp.status == 200:
                     logger.info(f"[Warmup] ✓ {OLLAMA_MODEL} loaded into VRAM | keep_alive=forever")
                 else:
@@ -2114,7 +1995,9 @@ async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> s
         _sess = llm_session
         if _sess is None or _sess.closed:
             _sess = aiohttp.ClientSession()
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=translate", LLM_URL, OLLAMA_MODEL)
         async with _sess.post(LLM_URL, json=payload, timeout=timeout) as resp:
+            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp.status, LLM_URL)
             if resp.status == 200:
                 data = await resp.json()
                 translated = data["message"]["content"].strip()
@@ -2132,7 +2015,9 @@ async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> s
                             {"role": "user", "content": f"ترجم: {text}"},
                         ]
                         payload["messages"] = retry_messages
+                        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=translate_retry", LLM_URL, OLLAMA_MODEL)
                         async with _sess.post(LLM_URL, json=payload, timeout=timeout) as resp2:
+                            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp2.status, LLM_URL)
                             if resp2.status == 200:
                                 data2 = await resp2.json()
                                 translated = data2["message"]["content"].strip()
@@ -2224,6 +2109,7 @@ def _rewrite_generation_query_for_grounded_llm(query_text: str) -> str:
         sentence_count = sentence_count_match.group(1) if sentence_count_match else None
         topic = re.sub(r"\b(summarize|summary)\b", "", q, flags=re.IGNORECASE)
         topic = re.sub(r"\bin\s+\d+\s+sentences?\b", "", topic, flags=re.IGNORECASE)
+        topic = _strip_query_instruction_modifiers(topic)
         topic = re.sub(r"\s+", " ", topic).strip(" .,:;!?-")
         if topic:
             if sentence_count:
@@ -2241,10 +2127,23 @@ def _rewrite_generation_query_for_grounded_llm(query_text: str) -> str:
 
     if re.search(r"\b(explain|describe)\b", q_low):
         topic = re.sub(r"\b(explain|describe)\b", "", q, flags=re.IGNORECASE)
+        topic = _strip_query_instruction_modifiers(topic)
         topic = re.sub(r"\s+", " ", topic).strip(" .,:;!?-")
         if topic:
             return f"Explain {topic} in one short paragraph using full sentences."
     return q
+
+
+def _is_generation_bypass_query(query_text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+    return bool(
+        re.search(
+            r"\b(explain|describe|summarize|summary|in\s+simple\s+words|explain\s+simply|simplify|easy\s+to\s+understand|make\s+it\s+simple)\b",
+            q,
+        )
+    )
 
 
 def _format_generation_answer_by_query(query_text: str, answer_text: str) -> str:
@@ -2324,7 +2223,7 @@ def _format_generation_answer_by_query(query_text: str, answer_text: str) -> str
     if is_explain:
         lines = [re.sub(r"^\s*(?:[-*•]+|\d+[.)])\s*", "", ln).strip() for ln in str(ans).splitlines() if ln.strip()]
         paragraph = " ".join(lines).strip() if lines else ans
-        paragraph = re.split(r"\b(Before Conditioning|Copyright|Introduction to Psychology)\b", paragraph, maxsplit=1, flags=re.IGNORECASE)[0]
+        paragraph = re.split(r"\b(Copyright|Table of Contents)\b", paragraph, maxsplit=1, flags=re.IGNORECASE)[0]
         paragraph = re.sub(r"\s+", " ", paragraph).strip()
         exp_sents = _sentences(paragraph)
         if len(exp_sents) > 3:
@@ -2422,7 +2321,7 @@ def _build_generation_context(query_text: str, docs: list[dict], max_chars: int 
             if token_hits <= 0:
                 continue
 
-            explain_signal = 1.0 if re.search(r"\b(is|refers\s+to|defined\s+as|means|includes|involves|focuses\s+on|reinforcement|punishment)\b", low) else 0.0
+            explain_signal = 1.0 if re.search(r"\b(is|refers\s+to|defined\s+as|means|includes|involves|focuses\s+on)\b", low) else 0.0
             compare_signal = 0.0
             if compare_mode:
                 if left_term and re.search(rf"\b{re.escape(left_term.lower())}\b", low):
@@ -2481,7 +2380,7 @@ def _compose_grounded_generation_answer(query_text: str, context: str) -> str | 
         hits = count_token_matches(tokens, low)
         if hits <= 0:
             continue
-        explanatory = 1.0 if re.search(r"\b(is|refers\s+to|defined\s+as|means|includes|involves|reinforcement|punishment|association)\b", low) else 0.0
+        explanatory = 1.0 if re.search(r"\b(is|refers\s+to|defined\s+as|means|includes|involves|association)\b", low) else 0.0
         score = (2.0 * float(hits)) + explanatory - (0.01 * i)
         scored.append((score, s))
 
@@ -2549,7 +2448,10 @@ async def call_llm_with_context(query: str, context: str, system_prompt: str) ->
 
     try:
         timeout = aiohttp.ClientTimeout(total=60, connect=5, sock_read=45)
+        query_type = "generation" if _is_llm_generation_query(query_text) else "grounded_context"
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=%s", LLM_URL, OLLAMA_MODEL, query_type)
         async with _sess.post(LLM_URL, json=payload, timeout=timeout) as response:
+            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", response.status, LLM_URL)
             if response.status != 200:
                 return RAG_NO_MATCH_RESPONSE
             data = await response.json()
@@ -2612,7 +2514,7 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
         return False
 
     classical_alias_entity_hit = bool(
-        e == "classical approach"
+        False
         and re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", t)
     )
     if (e not in t) and (not classical_alias_entity_hit):
@@ -2635,14 +2537,14 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
 
     for sentence in sentence_candidates:
         has_entity_anywhere = bool(entity_anywhere_re.search(sentence))
-        if (not has_entity_anywhere) and e == "classical approach":
+        if False:
             has_entity_anywhere = bool(
                 re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", sentence)
             )
         has_definition_pattern = bool(definition_pattern_re.search(sentence))
         sentence_low = sentence.lower()
         if has_entity_anywhere and has_definition_pattern:
-            if e == "classical approach":
+            if False:
                 if re.search(r"\b(?:classification|major\s+classification|contributors?|table\s*\d+|scientific\s+management\s*[-•]|administrative\s+management\s*[-•])\b", sentence_low):
                     logger.info("[DEF REJECT WEAK] entity=%s reason=classification_style sentence=%s", entity, sentence[:160])
                     continue
@@ -2665,7 +2567,7 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
             if re.match(r"^\s*(he|she|they|it|this)\b", sentence_low):
                 logger.info("[DEF REJECT WEAK] entity=%s reason=pronoun_led sentence=%s", entity, sentence[:160])
                 continue
-            if re.search(r"\b(father\s+of|known\s+as\s+the\s+father\s+of|born|biography|worked\s+as)\b", sentence_low):
+            if re.search(r"\b(known\s+as\s+the\s+born|biography|worked\s+as)\b", sentence_low):
                 logger.info("[DEF REJECT WEAK] entity=%s reason=biography_style sentence=%s", entity, sentence[:160])
                 continue
             logger.info("[STRICT DEF PREF PASS] entity=%s sentence=%s", entity, sentence[:160])
@@ -2738,10 +2640,6 @@ def _is_explanation_sentence_for_entity(sentence: str, entity: str, chunk_is_top
         logger.info("[DEF REJECT BOILERPLATE] entity=%s sentence=%s", entity, s[:180])
         return False
 
-    if e not in {"psychology", "behavior and mental processes"} and "psychology is the scientific study of behavior and mental processes" in s_low:
-        logger.info("[DEF REJECT OTHER_CONCEPT] entity=%s sentence=%s", entity, s[:180])
-        return False
-
     if e and defines_other_concept(s_low, e):
         logger.info("[DEF REJECT OTHER_CONCEPT] entity=%s sentence=%s", entity, s[:180])
         return False
@@ -2778,10 +2676,6 @@ def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) 
     if not docs:
         return None
     e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
-    if e == "reinforcement":
-        reinforcement_ans = "Reinforcement strengthens behavior by following it with a consequence, such as adding a reward or removing an unpleasant condition."
-        logger.info("[DEF FALLBACK ANSWER] %s", reinforcement_ans[:260])
-        return reinforcement_ans
     ranked = sorted(list(docs or []), key=lambda x: float((x or {}).get("score", 0.0) or 0.0), reverse=True)
     logger.info("[DEF FALLBACK MODE] activated entity=%s", e)
     for d in ranked[:5]:
@@ -2963,691 +2857,150 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     if not (is_explain_mode or is_definition_mode):
         return ans
 
-    logger.info("[CHEAT TEMPLATE REMOVED] function=_ws_fix_explanation_answer")
     not_found = "Not found in the document."
-    q_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
-    query_work_mode = bool(re.match(r"^\s*how\s+does\s+.+\s+(?:work|operate)\s*\??\s*$", q_low))
-
     has_entity, entity = _extract_entity_from_definition_query(query)
     entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
     if not entity_l:
-        logger.info("[ENTITY GROUNDING REJECT] reason=no_entity query=%s", str(query or "")[:140])
-        logger.info("[FINAL FALLBACK NOT_FOUND] query=%s", str(query or "")[:140])
         return not_found
-
-    def _norm(text: str) -> str:
-        return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())).strip()
 
     def _final_clean(text: str) -> str:
         out = re.sub(r"\s+", " ", str(text or "").strip())
-        out = re.sub(r"\bacti\s+ve\b", "active", out, flags=re.IGNORECASE)
-        out = re.sub(r"\bemoti\s+ons\b", "emotions", out, flags=re.IGNORECASE)
-        out = re.sub(r"\bbehav\s+ior\b", "behavior", out, flags=re.IGNORECASE)
-        out = re.sub(r"\bconsequ\s+ences\b", "consequences", out, flags=re.IGNORECASE)
-        out = re.sub(r"\borgani\s+sm\b", "organism", out, flags=re.IGNORECASE)
-        if entity_l:
-            out = re.sub(rf"\b({re.escape(entity_l)})\s+\1\b", r"\1", out, flags=re.IGNORECASE)
-        out = re.sub(r"\b(consequences?)\s+(the\s+organism\b)", r"\1. \2", out, flags=re.IGNORECASE)
-        if entity_l == "structuralism":
-            out = re.sub(r"\bStructuralism\s+It\s+", "Structuralism ", out, flags=re.IGNORECASE)
         out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+        out = re.sub(r"\b(\w+)\s+\1\b", r"\1", out, flags=re.IGNORECASE)
         if out and not re.search(r"[.!?]\s*$", out):
             out = out.rstrip(" ,;:-") + "."
         return out
 
-    synonyms: dict[str, tuple[str, ...]] = {
-        "classical conditioning": ("pavlovian conditioning", "respondent conditioning"),
-        "operant conditioning": ("instrumental conditioning",),
-    }
-    entity_forms = {_norm(entity_l)}
-    for alt in synonyms.get(entity_l, ()): 
-        entity_forms.add(_norm(alt))
-    entity_forms = {f for f in entity_forms if f}
+    def _entity_hit(sentence: str) -> bool:
+        sl = str(sentence or "").lower()
+        return bool(entity_l and re.search(rf"\b{re.escape(entity_l)}\b", sl))
 
-    def _contains_entity(sentence: str) -> bool:
-        s_norm = _norm(sentence)
-        if not s_norm:
-            return False
-        return any(re.search(rf"\b{re.escape(f)}\b", s_norm) for f in entity_forms)
+    def _has_definition_signal(sentence: str) -> bool:
+        sl = str(sentence or "").lower()
+        return bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|works|operates?)\b", sl))
 
-    def _quality_reject(sentence: str) -> str:
-        s = re.sub(r"\s+", " ", str(sentence or "").strip())
-        if not s:
-            return "empty"
-        sl = s.lower()
-        words = re.findall(r"[a-zA-Z0-9][a-zA-Z0-9'\-]*", s)
-        if len(words) < 6:
-            return "too_short"
-        if len(words) > 58:
-            return "too_long"
-        if re.search(r"\b(?:american\s+psychologist|founder\s+of\s+operant\s+conditioning|\(\s*19\d{2}\s*[-–]\s*19\d{2}\s*\))\b", sl):
-            has_mechanism = bool(re.search(r"\b(?:is|means|refers\s+to|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|consequence|consequences|reinforcement|punishment|strengthens?|weakens?)\b", sl))
-            if not has_mechanism:
-                return "biography_line"
-        if re.search(r"(?:ΓÇ|�|â€¢)", s):
-            return "ocr_garbled"
-        if re.search(r"\b(?:response\s+will\s+be\s+repeated|fixed\s+ratio|variable\s+ratio|fixed\s+interval|variable\s+interval|ratio\s+schedule|interval\s+schedule|p\+\s*r\-|r\+\s*p\-|schedule\s+of\s+reinforcement|table\s+of\s+contents)\b", sl):
-            return "table_pattern"
-        if re.search(r"\b(?:consider\s+no\s+reinforcement|classroom\s+management|positive\s*/\s*negative\s+reinforcement|negative\s*/\s*positive\s+reinforcement|child\s+rearing\s+things\s+to\s+remember)\b", sl):
-            return "instructional_list_noise"
-        if re.search(r"\bhis/her/its\b|\bpr\s*ogress\s+not\s+followed\b", sl):
-            return "ocr_instructional_noise"
-        if re.search(r"\b(?:ratio|schedule|response)\b", sl) and (":" in s or re.search(r"\b[A-Z]{2,}\b", s) or re.search(r"\s{3,}|\||\t", s)):
-            return "table_like"
-        if re.search(r"\b(?:repea\s+ted|envir\s+onment|wha\s+t|stimu\s+lus)\b", sl):
-            return "ocr_fragment"
-        if re.search(r"^\s*(?:[-•*]|\d+[.)])", s) or re.search(r"\s{3,}|\||\t", s):
-            return "list_layout"
-        if re.search(r"\b(?:chapter|lesson|table\s+of\s+contents|contents?)\b", sl):
-            return "heading_like"
-        if re.search(r"\b(?:principles?\s+operate\s+here\s+too|operate\s+here\s+too|applies?\s+here\s+too|application\s+of\s+this\s+principle)\b", sl):
-            return "weak_application_line"
-        if re.search(r"(?:\be\.g\.?\s*$|\bi\.e\.?\s*$|\bsuch\s+as\s*$|\blike\s*$)", sl):
-            return "cut_tail"
-        if re.search(r"\b(?:the\s+type\s+of\s+learning\s+in\s+which\s*$|response\s+will\s+be\s*$|is\s+used\s+for\s*$)", sl):
-            return "incomplete_fragment"
-        if re.search(r"\b(?:19\d{2}|20\d{2})\b", sl) and (not re.search(r"\b(?:type\s+of\s+learning\s+in\s+which|forms\s+an\s+association|refers\s+to|defined\s+as|means|\bis\b)\b", sl)):
-            return "year_noise"
-        return ""
+    def _has_explain_signal(sentence: str) -> bool:
+        sl = str(sentence or "").lower()
+        return bool(re.search(r"\b(?:works?|operates?|process|mechanism|involves|includes|causes|results?\s+in|leads?\s+to)\b", sl))
 
-    def _looks_cut_ending(sentence: str) -> bool:
-        s = re.sub(r"\s+", " ", str(sentence or "").strip())
+    heading_like_re = re.compile(
+        r"\b(?:important\s+terminology|terminology|introduction|overview|summary|contents?|table\s+of\s+contents|chapter\s+\d+|unit\s+\d+|lesson\s+\d+)\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _looks_heading_like(sentence: str) -> bool:
+        s = re.sub(r"\s+", " ", str(sentence or "")).strip()
         if not s:
             return True
-        sl = s.lower().rstrip()
-        if re.search(r"(?:\be\.g\.?$|\bi\.e\.?$|\bsuch\s+as$|\blike$)", sl):
+        if heading_like_re.search(s):
             return True
-        if re.search(r"\b(?:and|or|with|without|because|which|that|to)\.?$", sl):
-            return True
-        if re.search(r"\b(?:is|are|was|were|means|refers\s+to|defined\s+as|includes|involves|focuses\s+on)\.?$", sl):
+        if re.match(r"^\s*[A-Z][A-Za-z0-9\s\-,:]{3,120}\s*$", s) and not re.search(r"[.!?]$", s):
             return True
         return False
 
-    def _strip_trailing_bio_noise(sentence: str) -> str:
-        s = re.sub(r"\s+", " ", str(sentence or "").strip())
+    def _is_fragmentary_garbage(sentence: str) -> bool:
+        s = str(sentence or "").strip()
         if not s:
-            return ""
-        cut_markers = [
-            r"\bBurrhus\b",
-            r"\bAmerican\s+Psychologist\b",
-            r"\(\s*19\d{2}\s*[-–]\s*19\d{2}\s*\)",
-        ]
-        cut_pos = None
-        for pat in cut_markers:
-            m = re.search(pat, s, flags=re.IGNORECASE)
-            if not m:
-                continue
-            if cut_pos is None or m.start() < cut_pos:
-                cut_pos = m.start()
-        if cut_pos is not None and cut_pos >= 30:
-            s = s[:cut_pos].rstrip(" ,;:-")
-        return s
-
-    def _mode_reject(sentence: str) -> str:
-        sl = sentence.lower()
-        if is_definition_mode and not re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|focuses\s+on|focused\s+on|concentrated\s+on|entailed|emphasized)\b", sl):
-            return "missing_definition_verb"
-        if is_explain_mode and not re.search(r"\b(?:is|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|concentrated\s+on|associates|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|works|operate|strengthens?|weakens?|consequence|consequences|reinforcement|punishment|entailed|approach)\b", sl):
-            return "missing_explanation_signal"
-        if is_explain_mode and query_work_mode and (not re.search(r"\b(?:work|operate|strengthens?|weakens?|increases?|decreases?|provided|withheld|consequence|consequences)\b", sl)):
-            return "missing_work_mechanism"
-        return ""
-
-    def _is_weak_entity_mention_sentence(sentence: str) -> bool:
-        sl = sentence.lower()
-        if re.search(r"\b(?:applications?\s+of|applies\s+to|used\s+in|most\s+effective\s+with|operate\s+here\s+too|who\s+is\s+.+\?|who\s+are\s+.+\?|for\s+example|in\s+classroom\s+management)\b", sl):
             return True
-        if re.search(r"\b(?:principles?|concepts?)\b", sl) and not re.search(r"\b(?:is|means|refers\s+to|defined\s+as|forms\s+an\s+association|consequence|reinforcement|punishment|strengthens?|weakens?)\b", sl):
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+        if len(words) < 5:
+            return True
+        if re.search(r"(?:\b[A-Za-z]\s+){4,}\b", s):
+            return True
+        if re.search(r"\b(?:www\.|https?://|isbn|copyright|table\s*\d+|figure\s*\d+)\b", s, flags=re.IGNORECASE):
             return True
         return False
 
-    def _is_strong_entity_anchor(sentence: str) -> bool:
-        sl = sentence.lower()
-        first_entity_at = sl.find(entity_l) if entity_l else -1
-        if first_entity_at < 0 or first_entity_at > 58:
-            return False
-        if _is_weak_entity_mention_sentence(sentence):
-            return False
-        if not re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|involves|includes|works|operate|focuses\s+on|focused\s+on|concentrated\s+on|entailed|emphasized|consequence|reinforcement|punishment|strengthens?|weakens?)\b", sl):
-            return False
-        return True
+    def _entity_hit_in_local_window(sentences: list[str], idx: int) -> bool:
+        for j in range(max(0, idx - 1), min(len(sentences), idx + 2)):
+            if _entity_hit(sentences[j]):
+                return True
+        return False
 
-    def _is_same_chunk_explain_continuation(sentence: str) -> bool:
-        s = re.sub(r"\s+", " ", str(sentence or "").strip())
-        if not s:
+    def _entity_definition_cue_local(sentence: str) -> bool:
+        sl = str(sentence or "").lower()
+        if not _entity_hit(sentence):
             return False
-        if _quality_reject(s):
+        cue_m = re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|is\s+the\s+study\s+of)\b", sl)
+        ent_m = re.search(rf"\b{re.escape(entity_l)}\b", sl) if entity_l else None
+        if not cue_m or not ent_m:
             return False
-        if s.strip().endswith("?"):
-            return False
-        if re.match(r"^\s*(?:chapter|lesson|table\s+of\s+contents|contents?|learning\s+objectives?)\b", s, flags=re.IGNORECASE):
-            return False
-        if _is_weak_entity_mention_sentence(s):
-            return False
-        sl = s.lower()
-        if entity_l == "structuralism" and re.search(r"\b(?:functionalism|gestalt|behaviorism)\b", sl) and (not re.search(r"\bstructuralism\b", sl)):
-            return False
-        if re.search(r"\b(?:applications?\s+of|biography|born\s+in|developed\s+as\s+a\s+reaction\s+to)\b", sl):
-            return False
-        if not re.search(r"\b(?:consequence|consequences|reinforcement|punishment|behavior|association|linked\s+to|immediate|provided|withheld|strengthens?|weakens?|increases?|decreases?|works|operate|focuses\s+on|involves|includes|this\s+learning\s+process|this\s+approach|it)\b", sl):
-            return False
-        return True
+        return abs(cue_m.start() - ent_m.start()) <= 80
 
-    def _extract_entity_clauses(sentence: str) -> list[str]:
-        src = re.sub(r"\s+", " ", str(sentence or "").strip())
-        if not src:
-            return []
-        verb_re = r"(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|involves|includes|works|operate|strengthens?|weakens?|increases?|decreases?)"
-        out: list[str] = []
-        seen: set[str] = set()
-        for form in entity_forms:
-            form_re = re.escape(form).replace("\\ ", r"\\s+")
-            for m in re.finditer(rf"(\b{form_re}\b\s+(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which)\b[^.!?\n]{{0,260}})", src, flags=re.IGNORECASE):
-                cand = _clean_definition_like_sentence(m.group(1))
-                if not cand:
-                    continue
-                n = _norm(cand)
-                if n and n not in seen:
-                    seen.add(n)
-                    out.append(cand)
-            for m in re.finditer(rf"(\b{form_re}\b[^.!?\n]{{0,260}}\b{verb_re}\b[^.!?\n]{{0,260}})", src, flags=re.IGNORECASE):
-                cand = _clean_definition_like_sentence(m.group(1))
-                if not cand:
-                    continue
-                n = _norm(cand)
-                if n and n not in seen:
-                    seen.add(n)
-                    out.append(cand)
-        return out
+    strict_answer_lock = False
+    if is_definition_mode and ans and ans.lower() != not_found.lower():
+        if (
+            _entity_hit(ans)
+            and _has_definition_signal(ans)
+            and (not _looks_heading_like(ans))
+            and (not _is_fragmentary_garbage(ans))
+            and _passes_strict_definition_relevance_guard(query, ans)
+        ):
+            strict_answer_lock = True
+            logger.info("[STRICT DEFINITION WINNER CHOSEN] source=current_answer answer=%s", str(ans)[:220])
 
     ranked_docs = sorted(list(docs or []), key=lambda x: float((x or {}).get("score", 0.0) or 0.0), reverse=True)
-    candidates: list[tuple[float, int, int, str | int | None, str, bool, bool]] = []
-    sentence_map: dict[tuple[int, str], list[str]] = {}
+    candidates: list[tuple[float, str, int, int]] = []
 
     for doc_rank, d in enumerate(ranked_docs[:5]):
         txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
         if not txt.strip():
             continue
-        dscore = float((d or {}).get("score", 0.0) or 0.0)
-        md = dict((d or {}).get("metadata") or {})
-        chunk_idx = md.get("chunk_index")
-        raw_sents = _split_text_into_sentences(txt)[:34]
-        clean_sents = [_clean_definition_like_sentence(s) for s in raw_sents]
-        chunk_key = (doc_rank, str(chunk_idx))
-        sentence_map[chunk_key] = clean_sents
+        base_score = float((d or {}).get("score", 0.0) or 0.0)
+        sents = [_clean_definition_like_sentence(s) for s in _split_text_into_sentences(txt)[:28]]
+        sents = [re.sub(r"\s+", " ", str(s or "").strip()) for s in sents if str(s or "").strip()]
 
-        for sent_idx, sent in enumerate(clean_sents):
-            base = re.sub(r"\s+", " ", str(sent or "").strip())
-            if not base:
+        for sent_idx, s in enumerate(sents):
+            if not _entity_hit_in_local_window(sents, sent_idx):
                 continue
-            candidate_pool = [base] + _extract_entity_clauses(base)
+            if len(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9'\-]*", s)) < 5:
+                continue
+            if _looks_heading_like(s):
+                continue
+            if _is_fragmentary_garbage(s):
+                continue
 
-            for cand_idx, cand in enumerate(candidate_pool):
-                s = re.sub(r"\s+", " ", str(cand or "").strip())
-                if not s:
-                    continue
-                s = _strip_trailing_bio_noise(s)
-                if not s:
-                    continue
+            if is_definition_mode and not _has_definition_signal(s):
+                continue
+            if is_explain_mode and not (_has_definition_signal(s) or _has_explain_signal(s)):
+                continue
 
-                qrej = _quality_reject(s)
-                if qrej:
-                    logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=%s chunk=%s sentence=%s", entity_l, qrej, chunk_idx, s[:180])
-                    continue
-
-                entity_hit = _contains_entity(s)
-                prev_entity_hit = bool(sent_idx > 0 and _contains_entity(clean_sents[sent_idx - 1]))
-                if not entity_hit:
-                    if prev_entity_hit and re.match(r"^\s*(it|this|these|they|the\s+concept|the\s+approach)\b", s.lower()):
-                        logger.info("[ENTITY GROUNDING PASS] entity=%s mode=adjacent_context chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                    elif is_explain_mode and prev_entity_hit and re.match(r"^\s*(consequence|consequences|the\s+organism|this\s+learning\s+process|reinforcement)\b", s.lower()):
-                        logger.info("[ENTITY GROUNDING PASS] entity=%s mode=adjacent_explain_context chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                    elif is_explain_mode and prev_entity_hit and re.search(r"\b(?:type\s+of\s+learning\s+in\s+which|voluntary\s+response|organism|behavior|consequence|consequences|reinforcement|punishment|operate|works|strengthens?|weakens?)\b", s.lower()):
-                        logger.info("[ENTITY GROUNDING PASS] entity=%s mode=adjacent_same_chunk_mechanism chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                    else:
-                        logger.info("[ENTITY GROUNDING REJECT] entity=%s chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
+            score = base_score + 2.0 + (0.4 if _has_definition_signal(s) else 0.0) + (0.3 if _has_explain_signal(s) else 0.0) - (0.01 * sent_idx) - (0.001 * doc_rank)
+            if is_definition_mode:
+                if _entity_definition_cue_local(s):
+                    score += 1.3
                 else:
-                    logger.info("[ENTITY GROUNDING PASS] entity=%s mode=direct chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                    if is_explain_mode and _is_weak_entity_mention_sentence(s):
-                        logger.info("[EXPLAIN WEAK ENTITY REJECT] entity=%s chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
-                    if is_explain_mode and entity_l == "structuralism" and _is_strong_entity_anchor(s):
-                        logger.info("[STRUCTURALISM SUPPORT PASS] mode=anchor chunk=%s sentence=%s", chunk_idx, s[:180])
-
-                if is_definition_mode:
-                    first_entity_at = s.lower().find(entity_l)
-                    if first_entity_at < 0:
-                        logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=definition_needs_direct_entity chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
-                    if first_entity_at > 72:
-                        logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=definition_entity_too_late chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
-                    if not re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|focuses\s+on|focused\s+on|concentrated\s+on|entailed|emphasized)\b", s.lower()):
-                        logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=definition_not_local_to_entity chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
-                    if entity_l == "structuralism":
-                        logger.info("[STRUCTURALISM SUPPORT PASS] mode=definition_local chunk=%s sentence=%s", chunk_idx, s[:180])
-
-                if defines_other_concept(s.lower(), entity_l):
-                    logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=other_concept chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                    continue
-
-                mrej = _mode_reject(s)
-                if mrej:
-                    logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=%s chunk=%s sentence=%s", entity_l, mrej, chunk_idx, s[:180])
-                    continue
-
-                if entity_l == "reinforcement":
-                    sl_bad = s.lower()
-                    if re.search(r"\b(?:if\s+reinforcement\s+is\s+withheld|response\s+rate\s+decreases|no\s+response\s+is\s+shown|extinction|acquire\s+a\s+particular\s+behavior|does\s+not\s+readily\s+demonstrate)\b", sl_bad):
-                        logger.info("[GROUNDED SENTENCE REJECT] entity=%s reason=reinforcement_bad_fragment chunk=%s sentence=%s", entity_l, chunk_idx, s[:180])
-                        continue
-
-                explain_bonus = 0.0
-                if re.search(r"\b(?:works|operate|involves|includes|forms\s+an\s+association|consequence|reinforcement|punishment|strengthens?|weakens?|increases?|decreases?)\b", s.lower()):
-                    explain_bonus = 0.5
-                if query_work_mode and re.search(r"\b(?:increases?|decreases?|withheld|provided|strengthens?|weakens?)\b", s.lower()):
-                    explain_bonus += 0.7
-                reinforcement_bonus = 0.0
-                reinforcement_penalty = 0.0
-                if entity_l == "reinforcement":
-                    sl = s.lower()
-                    if re.search(r"\b(?:strengthens?\s+behavior|increases?\s+the\s+likelihood|increases?\s+the\s+probability|follow(?:ing)?\s+it\s+with\s+a\s+consequence|consequence\s+follow(?:s|ing)|reward|positive\s+reinforcement|negative\s+reinforcement|remov(?:e|ing)\s+an\s+unpleasant)\b", sl):
-                        reinforcement_bonus += 1.25
-                    if re.search(r"\b(?:if\s+reinforcement\s+is\s+withheld|response\s+rate\s+decreases|no\s+response\s+is\s+shown|extinction|acquire\s+a\s+particular\s+behavior|does\s+not\s+readily\s+demonstrate)\b", sl):
-                        reinforcement_penalty += 1.8
-                starts_entity_bonus = 0.4 if re.match(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\b", s.lower()) else 0.0
-                list_penalty = 0.4 if (s.count(",") >= 3 or "/" in s) else 0.0
-                word_len = len(re.findall(r"[a-zA-Z0-9][a-zA-Z0-9'\-]*", s))
-                length_penalty = 0.04 * max(0, word_len - 28)
-                score = dscore + (2.0 if entity_hit else 0.7) + (0.5 if prev_entity_hit else 0.0) + explain_bonus + reinforcement_bonus + starts_entity_bonus - reinforcement_penalty - list_penalty - length_penalty - (0.01 * (sent_idx + cand_idx))
-                candidates.append((score, doc_rank, sent_idx, chunk_idx, s, entity_hit, prev_entity_hit))
-                logger.info("[GROUNDED SENTENCE ACCEPT] entity=%s chunk=%s score=%.3f sentence=%s", entity_l, chunk_idx, score, s[:180])
-
-    if not candidates:
-        logger.info("[FINAL FALLBACK NOT_FOUND] query=%s entity=%s", str(query or "")[:140], entity_l)
-        return not_found
-
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    seen_norm: set[str] = set()
-    uniq: list[tuple[float, int, int, str | int | None, str, bool, bool]] = []
-    for cand in candidates:
-        n = _norm(cand[4])
-        if not n or n in seen_norm:
-            continue
-        seen_norm.add(n)
-        uniq.append(cand)
-
-    if not uniq:
-        logger.info("[FINAL FALLBACK NOT_FOUND] query=%s entity=%s", str(query or "")[:140], entity_l)
-        return not_found
-
-    if is_definition_mode:
-        best = uniq[0][4]
-        final_ans = _final_clean(best)
-        logger.info("[FINAL GROUNDED ANSWER] mode=definition entity=%s answer=%s", entity_l, final_ans[:260])
-        return final_ans
-
-    primary = None
-    for u in uniq:
-        if u[5] and _is_strong_entity_anchor(u[4]):
-            primary = u
-            break
-    if primary is None:
-        for u in uniq:
-            if u[5] and (not _is_weak_entity_mention_sentence(u[4])):
-                primary = u
-                break
-    if primary is None:
-        fb = _definition_explanation_fallback(query, docs, entity_l)
-        if fb:
-            fb_clean = _final_clean(str(fb))
-            if fb_clean and not _quality_reject(fb_clean) and not _is_weak_entity_mention_sentence(fb_clean):
-                logger.info("[FINAL GROUNDED ANSWER] mode=explain_fallback entity=%s answer=%s", entity_l, fb_clean[:260])
-                return fb_clean
-        term_rescue, _term_md = _best_term_explanation_from_docs(entity_l, docs or [])
-        if term_rescue:
-            term_rescue = _final_clean(str(term_rescue))
-            if term_rescue and not _quality_reject(term_rescue) and not _is_weak_entity_mention_sentence(term_rescue):
-                if (not query_work_mode) or re.search(r"\b(?:work|operate|strengthens?|weakens?|increases?|decreases?|consequence|consequences|reinforcement|punishment|association)\b", term_rescue.lower()):
-                    logger.info("[FINAL GROUNDED ANSWER] mode=explain_term_rescue entity=%s answer=%s", entity_l, term_rescue[:260])
-                    return term_rescue
-        ans_rescue = _final_clean(str(ans or ""))
-        if ans_rescue and (ans_rescue.lower() != not_found.lower()):
-            ans_qrej = _quality_reject(ans_rescue)
-            ans_low = ans_rescue.lower()
-            ans_anchor_ok = _contains_entity(ans_rescue) and bool(re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|type\s+of\s+learning\s+in\s+which|works|operate|consequence|consequences|reinforcement|punishment|focuses\s+on|focused\s+on|entailed)\b", ans_low))
-            ans_work_ok = query_work_mode and bool(re.search(r"\b(?:operate|works|consequence|consequences|reinforcement|punishment|strengthens?|weakens?|increases?|decreases?)\b", ans_low))
-            if (not ans_qrej) and (not _is_weak_entity_mention_sentence(ans_rescue)) and (ans_anchor_ok or ans_work_ok):
-                logger.info("[FINAL GROUNDED ANSWER] mode=explain_answer_rescue entity=%s answer=%s", entity_l, ans_rescue[:260])
-                return ans_rescue
-        logger.info("[FINAL FALLBACK NOT_FOUND] query=%s entity=%s", str(query or "")[:140], entity_l)
-        return not_found
-
-    if _looks_cut_ending(str(primary[4] or "")):
-        for u in uniq:
-            if u == primary:
-                continue
-            if _is_weak_entity_mention_sentence(u[4]):
-                continue
-            if _quality_reject(u[4]):
-                continue
-            if _looks_cut_ending(u[4]):
-                continue
-            primary = u
-            logger.info("[EXPLAIN PRIMARY REPLACED] entity=%s reason=cut_primary chunk=%s sentence=%s", entity_l, u[3], u[4][:180])
-            break
-
-    stitched = []
-    first_seg = re.sub(r"\s+", " ", str(primary[4] or "").strip())
-    if first_seg:
-        if not re.search(r"[.!?]\s*$", first_seg):
-            first_seg = first_seg.rstrip(" ,;:-") + "."
-        stitched.append(first_seg)
-
-    p_doc_rank = primary[1]
-    p_sent_idx = primary[2]
-    p_chunk = primary[3]
-    key = (p_doc_rank, str(p_chunk))
-    same_chunk_sents = sentence_map.get(key, [])
-    if is_explain_mode and same_chunk_sents and len(stitched) < 2:
-        for nxt_idx in range(p_sent_idx + 1, min(len(same_chunk_sents), p_sent_idx + 3)):
-            nxt = re.sub(r"\s+", " ", str(same_chunk_sents[nxt_idx] or "").strip())
-            if not nxt:
-                continue
-            if _contains_entity(nxt) and _is_weak_entity_mention_sentence(nxt):
-                logger.info("[EXPLAIN WEAK ENTITY REJECT] entity=%s chunk=%s sentence=%s", entity_l, p_chunk, nxt[:180])
-                continue
-            if not _is_same_chunk_explain_continuation(nxt):
-                continue
-            if re.search(r"\b(?:table|schedule|applications?\s+of)\b", nxt.lower()):
-                continue
-            if _looks_cut_ending(nxt):
-                continue
-            if not re.search(r"[.!?]\s*$", nxt):
-                nxt = nxt.rstrip(" ,;:-") + "."
-            stitched.append(nxt)
-            logger.info("[EXPLAIN SAME_CHUNK CONTINUATION ACCEPT] entity=%s chunk=%s sentence=%s", entity_l, p_chunk, nxt[:180])
-            if entity_l == "structuralism":
-                logger.info("[STRUCTURALISM SUPPORT PASS] mode=continuation chunk=%s sentence=%s", p_chunk, nxt[:180])
-            if len(stitched) >= 2:
-                break
-
-    if not stitched:
-        logger.info("[FINAL FALLBACK NOT_FOUND] query=%s entity=%s", str(query or "")[:140], entity_l)
-        return not_found
-
-    if len(stitched) >= 2:
-        a = re.sub(r"^\s*(if\s+)?", "", stitched[0].lower())
-        b = re.sub(r"^\s*(if\s+)?", "", stitched[1].lower())
-        if a == b:
-            stitched = [stitched[0]]
-
-    if stitched and _looks_cut_ending(stitched[-1]) and same_chunk_sents and len(stitched) < 2:
-        for nxt_idx in range(p_sent_idx + 1, min(len(same_chunk_sents), p_sent_idx + 4)):
-            nxt = re.sub(r"\s+", " ", str(same_chunk_sents[nxt_idx] or "").strip())
-            if not nxt:
-                continue
-            if _quality_reject(nxt) or _is_weak_entity_mention_sentence(nxt) or _looks_cut_ending(nxt):
-                continue
-            if not _is_same_chunk_explain_continuation(nxt):
-                continue
-            if not re.search(r"[.!?]\s*$", nxt):
-                nxt = nxt.rstrip(" ,;:-") + "."
-            stitched[-1] = stitched[-1].rstrip(" ,;:-") + "."
-            stitched.append(nxt)
-            logger.info("[EXPLAIN CUT ENDING FIX] entity=%s chunk=%s sentence=%s", entity_l, p_chunk, nxt[:180])
-            break
-
-    if len(stitched) > 2:
-        stitched = stitched[:2]
-    final_ans = _final_clean(" ".join(stitched))
-    final_sents = [s.strip() for s in _split_text_into_sentences(final_ans) if str(s or "").strip()]
-    if is_definition_mode and len(final_sents) > 2:
-        final_ans = _final_clean(" ".join(final_sents[:2]))
-    if is_explain_mode and len(final_sents) > 2:
-        final_ans = _final_clean(" ".join(final_sents[:2]))
-    logger.info("[FINAL GROUNDED ANSWER] mode=explain entity=%s answer=%s", entity_l, final_ans[:260])
-    return final_ans
-
-    def _is_explanatory(s: str) -> bool:
-        sl = s.lower()
-        if any(k in sl for k in explain_terms):
-            return True
-        return bool(re.search(r"\b(?:learning\s+in\s+which|learning\s+through|forms\s+an\s+association|associates|reinforcement|punishment|consequence|focuses\s+on|involves)\b", sl))
-
-    def _is_definition_like(s: str) -> bool:
-        sl = s.lower()
-        return any(k in sl for k in definition_terms) or bool(re.search(r"\b(?:is|refers\s+to|means|defined\s+as)\b", sl))
-
-    def _starts_with_entity(s: str) -> bool:
-        if not entity_l:
-            return False
-        sl = s.lower().strip()
-        if re.match(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\b", sl):
-            return True
-        return False
-
-    def _final_clean(t: str) -> str:
-        out = re.sub(r"\s+", " ", str(t or "").strip())
-        out = re.sub(r"\b(\w+)\s+\1\b", r"\1", out, flags=re.IGNORECASE)
-        if out and not re.search(r"[.!?]\s*$", out):
-            out = out.rstrip(" ,;:-") + "."
-        out = re.sub(r"\s+([,.;:!?])", r"\1", out)
-        return out
-
-    def _apply_structuralism_cleanup(text_in: str) -> str:
-        out = str(text_in or "")
-        before = out
-        out = re.sub(r"\bStructuralism\s+It\s+", "Structuralism ", out, flags=re.IGNORECASE)
-        out = re.sub(r"\bemoti\s+ons\b", "emotions", out, flags=re.IGNORECASE)
-        out = re.sub(r"\bmental\s+states\s+and\s+activities\s+and\b", "mental states and activities.", out, flags=re.IGNORECASE)
-        out = re.sub(r"\s+", " ", out).strip()
-        out = _final_clean(out)
-        if out != _final_clean(before):
-            logger.info("[STRUCTURALISM CLEANUP APPLIED] before=%s after=%s", str(before)[:180], str(out)[:180])
-        return out
-
-    def _entity_coverage_ok(s: str) -> bool:
-        if not entity_toks:
-            return True
-        sl = s.lower()
-        phrase_hit = bool(entity_l and re.search(rf"\b{re.escape(entity_l)}\b", sl))
-        tok_hits = sum(1 for t in entity_toks if re.search(rf"\b{re.escape(t)}\b", sl))
-        if phrase_hit:
-            return True
-        need = max(1, min(2, len(entity_toks)))
-        return tok_hits >= need
-
-    max_sentences = 2
-
-    candidates: list[tuple[float, int, int, list[str], str | int | None]] = []
-    ranked_docs = sorted(list(docs or []), key=lambda x: float((x or {}).get("score", 0.0) or 0.0), reverse=True)
-    for doc_idx, d in enumerate(ranked_docs[:5]):
-        txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
-        if not txt.strip():
-            continue
-        md = dict((d or {}).get("metadata") or {})
-        chunk_idx = md.get("chunk_index")
-        sents = [_clean_definition_like_sentence(s) for s in _split_text_into_sentences(txt)[:24]]
-        sents = [s for s in sents if s]
-        for idx, sent in enumerate(sents):
-            rej, reason = _is_question_or_heading(sent)
-            if rej:
-                logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", reason, sent[:180])
-                continue
-
-            if entity_l == "structuralism":
-                sent_l = sent.lower()
-                prev_l = sents[idx - 1].lower() if idx > 0 else ""
-                has_direct_structuralism = bool(re.search(r"\bstructuralism\b", sent_l))
-                has_prev_anchor = bool(re.search(r"\bstructuralism\b", prev_l) and re.match(r"^\s*(it|this|the\s+approach|the\s+school)\b", sent_l))
-                if not (has_direct_structuralism or has_prev_anchor):
-                    logger.info("[STRUCTURALISM ENTITY REJECT] sentence=%s", sent[:180])
-                    continue
-                logger.info("[STRUCTURALISM ENTITY PASS] sentence=%s", sent[:180])
-                if re.search(r"\b(functionalism|behaviorism|gestalt)\b", sent_l):
-                    logger.info("[SCHOOL CROSS-CONCEPT REJECT] reason=other_school sentence=%s", sent[:180])
-                    continue
-                if re.search(r"\bdeveloped\s+as\s+a\s+reaction\s+to\s+structuralism\b", sent_l):
-                    logger.info("[SCHOOL CROSS-CONCEPT REJECT] reason=reaction_to_structuralism sentence=%s", sent[:180])
-                    continue
-
-            if is_explain_mode and (not _is_explanatory(sent)):
-                continue
-            if is_definition_mode and (not _is_definition_like(sent)):
-                continue
-
-            sl = sent.lower()
-            term_hits = sum(1 for k in explain_terms if k in sl)
-            token_hits = sum(1 for t in entity_toks if re.search(rf"\b{re.escape(t)}\b", sl))
-            if entity_toks and (not _entity_coverage_ok(sent)):
-                continue
-
-            picked = [sent]
-            for nxt in sents[idx + 1: idx + 3]:
-                rej2, reason2 = _is_question_or_heading(nxt)
-                if rej2:
-                    logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", reason2, nxt[:180])
-                    continue
-                if is_explain_mode and _is_explanatory(nxt):
-                    if not _entity_coverage_ok(nxt):
-                        continue
-                    picked.append(nxt)
-                if is_definition_mode and _is_definition_like(nxt):
-                    if not _entity_coverage_ok(nxt):
-                        continue
-                    picked.append(nxt)
-                if len(picked) >= max_sentences:
-                    break
-
-            starts_entity_bonus = 1.5 if _starts_with_entity(sent) else 0.0
-            definition_bonus = 1.2 if _is_definition_like(sent) else 0.0
-            explain_bonus = 1.0 if _is_explanatory(sent) else 0.0
-            score = (term_hits * 2.0) + (token_hits * 2.0) + starts_entity_bonus + definition_bonus + explain_bonus + float((d or {}).get("score", 0.0) or 0.0) - (0.01 * idx)
-            candidates.append((score, doc_idx, idx, picked, chunk_idx))
+                    score -= 0.8
+                if re.search(r"\b(?:forensic|clinical|social|educational|industrial|organizational)\b", s, flags=re.IGNORECASE):
+                    score -= 1.5
+            candidates.append((score, s, doc_rank, sent_idx))
 
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        best = candidates[0]
-        picked_sents = best[3][:max_sentences]
-        stitched: list[str] = []
-        for s in picked_sents:
-            s2 = re.sub(r"\s+", " ", s).strip()
-            if stitched and not re.search(r"[.!?]\s*$", stitched[-1]):
-                stitched[-1] = stitched[-1].rstrip(" ,;:-") + "."
-            stitched.append(s2)
-        answer_text = _final_clean(" ".join(stitched))
+        best_score, best_sent, best_doc_rank, best_sent_idx = candidates[0]
+        out_parts = [best_sent]
+
         if is_explain_mode:
-            logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=%.3f answer=%s", best[4], float(best[0]), answer_text[:220])
-        if entity_l == "structuralism":
-            answer_text = _apply_structuralism_cleanup(answer_text)
-        return answer_text
-
-    rej_ans, reason_ans = _is_question_or_heading(ans)
-    ans_bad = rej_ans or (ans and (is_explain_mode and (not _is_explanatory(ans)))) or (ans and (is_definition_mode and (not _is_definition_like(ans))))
-    if ans_bad and docs:
-        logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", reason_ans, ans[:180])
-        if entity_l:
-            term_rescue, _term_md = _best_term_explanation_from_docs(entity_l, docs or [])
-            if term_rescue:
-                term_rescue = _final_clean(term_rescue)
-                rej_tr, rsn_tr = _is_question_or_heading(term_rescue)
-                if (not rej_tr) and _entity_coverage_ok(term_rescue) and ((is_explain_mode and _is_explanatory(term_rescue)) or (is_definition_mode and _is_definition_like(term_rescue))):
-                    if is_explain_mode:
-                        logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=0.002 answer=%s", "term_rescue", term_rescue[:220])
-                    if entity_l == "structuralism":
-                        term_rescue = _apply_structuralism_cleanup(term_rescue)
-                    return term_rescue
-                if rej_tr:
-                    logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", rsn_tr, term_rescue[:180])
-
-        scored_rescue = _extract_best_scored_concept_sentence_from_docs(query, docs or [], max_docs=5)
-        if scored_rescue:
-            scored_rescue = re.sub(r"\s+", " ", str(scored_rescue)).strip()
-            rej_sr, rsn_sr = _is_question_or_heading(scored_rescue)
-            sr_ok = (not rej_sr) and _entity_coverage_ok(scored_rescue) and ((is_explain_mode and _is_explanatory(scored_rescue)) or (is_definition_mode and _is_definition_like(scored_rescue)))
-            if sr_ok:
-                cleaned_sr = _final_clean(scored_rescue)
-                if is_explain_mode:
-                    logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=0.001 answer=%s", "scored_rescue", cleaned_sr[:220])
-                if entity_l == "structuralism":
-                    cleaned_sr = _apply_structuralism_cleanup(cleaned_sr)
-                return cleaned_sr
-            if rej_sr:
-                logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", rsn_sr, scored_rescue[:180])
-        fallback = _definition_explanation_fallback(query, docs, entity_l)
-        if fallback:
-            fallback = _final_clean(str(fallback))
-            rej_fb, rsn_fb = _is_question_or_heading(fallback)
-            if rej_fb:
-                logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", rsn_fb, fallback[:180])
-            else:
-                if (not _entity_coverage_ok(fallback)) or (is_explain_mode and (not _is_explanatory(fallback))) or (is_definition_mode and (not _is_definition_like(fallback))):
-                    pass
-                else:
-                    if is_explain_mode:
-                        logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=0.000 answer=%s", "fallback", fallback[:220])
-                    if entity_l == "structuralism":
-                        fallback = _apply_structuralism_cleanup(fallback)
-                    return fallback
-
-        # Last grounded rescue: pull a mechanism sentence directly from docs.
-        for d in ranked_docs[:5]:
-            txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
-            if not txt.strip():
-                continue
-            md = dict((d or {}).get("metadata") or {})
-            chunk_idx = md.get("chunk_index")
+            txt = str((ranked_docs[best_doc_rank] or {}).get("page_content") or (ranked_docs[best_doc_rank] or {}).get("text") or (ranked_docs[best_doc_rank] or {}).get("content") or "")
             sents = [_clean_definition_like_sentence(s) for s in _split_text_into_sentences(txt)[:28]]
-            sents = [s for s in sents if s]
-            for idx, sent in enumerate(sents):
-                rej_last, rsn_last = _is_question_or_heading(sent)
-                if rej_last:
-                    logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", rsn_last, sent[:180])
-                    continue
-                if not _entity_coverage_ok(sent):
-                    continue
-                if not (_is_explanatory(sent) or _is_definition_like(sent)):
-                    continue
-                mechanism_hit = bool(re.search(r"\b(?:association|consequence|reinforcement|punishment|behavior|learning\s+through|learning\s+in\s+which)\b", sent.lower()))
-                if not mechanism_hit:
-                    continue
+            sents = [re.sub(r"\s+", " ", str(s or "").strip()) for s in sents if str(s or "").strip()]
+            for nxt in sents[best_sent_idx + 1: best_sent_idx + 3]:
+                if re.match(r"^\s*(it|this|these|they|the\s+concept)\b", nxt.lower()) and (_has_definition_signal(nxt) or _has_explain_signal(nxt)):
+                    out_parts.append(nxt)
+                    break
 
-                chosen = [sent]
-                for nxt in sents[idx + 1: idx + 3]:
-                    rej_n, rsn_n = _is_question_or_heading(nxt)
-                    if rej_n:
-                        logger.info("[REJECT QUESTION SENTENCE] reason=%s sentence=%s", rsn_n, nxt[:180])
-                        continue
-                    if _entity_coverage_ok(nxt) and (_is_explanatory(nxt) or _is_definition_like(nxt)):
-                        chosen.append(nxt)
-                    if len(chosen) >= max_sentences:
-                        break
-                stitched_last: list[str] = []
-                for s in chosen[:max_sentences]:
-                    s2 = re.sub(r"\s+", " ", s).strip()
-                    if stitched_last and not re.search(r"[.!?]\s*$", stitched_last[-1]):
-                        stitched_last[-1] = stitched_last[-1].rstrip(" ,;:-") + "."
-                    stitched_last.append(s2)
-                out_last = _final_clean(" ".join(stitched_last))
-                if is_explain_mode:
-                    logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=0.003 answer=%s", chunk_idx, out_last[:220])
-                if entity_l == "structuralism":
-                    out_last = _apply_structuralism_cleanup(out_last)
-                return out_last
+        final_out = _final_clean(" ".join(out_parts[:2]))
+        if strict_answer_lock and final_out and re.sub(r"\s+", " ", final_out).strip().lower() != re.sub(r"\s+", " ", ans).strip().lower():
+            logger.info("[LATE OVERRIDE BLOCKED] reason=strict_definition_priority kept=%s blocked=%s", str(ans)[:180], str(final_out)[:180])
+            return _cleanup_final_answer_text(_final_clean(ans))
+        logger.info("[FINAL GROUNDED ANSWER] mode=%s entity=%s score=%.3f answer=%s", "definition" if is_definition_mode else "explain", entity_l, best_score, final_out[:220])
+        return _cleanup_final_answer_text(final_out)
 
-        if entity_l == "operant conditioning":
-            canonical = "Operant conditioning forms an association between a behavior and a consequence. Consequences strengthen or weaken behavior through reinforcement or punishment."
-            if is_explain_mode:
-                logger.info("[EXPLAIN SENTENCE WINNER] chunk_index=%s score=0.004 answer=%s", "operant_canonical", canonical[:220])
-            return _final_clean(canonical)
+    if ans and ans.lower() != not_found.lower() and _entity_hit(ans):
+        if (is_definition_mode and _has_definition_signal(ans)) or (is_explain_mode and (_has_definition_signal(ans) or _has_explain_signal(ans))):
+            return _cleanup_final_answer_text(_final_clean(ans))
 
-    final_out = _cleanup_final_answer_text(_final_clean(ans))
-    if entity_l == "structuralism":
-        final_out = _apply_structuralism_cleanup(final_out)
-    return _cleanup_final_answer_text(final_out)
+    return not_found
 
 
 def _best_term_explanation_from_docs(term: str, docs: list[dict]) -> tuple[str, dict] | tuple[None, None]:
@@ -3673,8 +3026,6 @@ def _best_term_explanation_from_docs(term: str, docs: list[dict]) -> tuple[str, 
             if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
                 continue
             if re.search(r"\b(?:one\s+of\s+the\s+components?|listed\s+with|associating\s+model|the\s+answers\s+to\s+all\s+these\s+questions\s+can\s+be\s+found|answers\s+to\s+all\s+these\s+questions)\b", sl):
-                continue
-            if t not in {"psychology", "behavior and mental processes"} and "psychology is the scientific study of behavior and mental processes" in sl:
                 continue
             token_hits = sum(1 for tok in ttoks if re.search(rf"\b{re.escape(tok)}\b", sl))
             if token_hits < max(1, min(2, len(ttoks))):
@@ -3896,8 +3247,6 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
     if _is_fragment_like_compare_sentence(right, str(right_sent or "")):
         if right_rescue and not _is_fragment_like_compare_sentence(right, right_rescue):
             right_sent, right_md = right_rescue, right_rescue_md
-        elif right.lower() == "operant conditioning":
-            right_sent = "Operant conditioning forms an association between a behavior and its consequences, which strengthens or weakens that behavior."
 
     if not left_sent or not right_sent:
         return None
@@ -4030,7 +3379,7 @@ def _is_table_or_classification_sentence(sentence: str) -> bool:
         return False
     list_or_table_like_re = re.compile(r"^\s*(?:[-•*]|\d+[.)]|\|)|\t|\s{3,}")
     table_or_classification_re = re.compile(
-        r"\b(?:table|classification|major\s+classification|categories?|types?)\b",
+        r"\b(?:table|classification|major\s+classification|categories?)\b",
         re.IGNORECASE,
     )
     return bool(list_or_table_like_re.search(s) or table_or_classification_re.search(s))
@@ -4041,7 +3390,7 @@ def _is_classification_only_chunk(text: str) -> bool:
     if not src.strip():
         return True
     low = src.lower()
-    classification_terms = len(re.findall(r"\b(?:classification|classifications|categories?|types?|major\s+classification|contributors?)\b", low))
+    classification_terms = len(re.findall(r"\b(?:classification|classifications|categories?|major\s+classification|contributors?)\b", low))
     sentence_count = len(_split_text_into_sentences(src))
     if classification_terms >= 3 and sentence_count <= 4:
         return True
@@ -4453,7 +3802,7 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
             long_coherent_bonus += 0.6
 
         table_penalty = 3.4 if is_table_like else 0.0
-        label_penalty = 1.6 if re.search(r"^\s*(?:table|figure|classification|types?|categories?)\b", s_l, flags=re.IGNORECASE) else 0.0
+        label_penalty = 1.6 if re.search(r"^\s*(?:table|figure|classification|categories?)\b", s_l, flags=re.IGNORECASE) else 0.0
 
         comparison_re = re.compile(r"\b(?:improvement\s+over|improvements\s+over|unlike|compared\s+to)\b", re.IGNORECASE)
         comparison_penalty = 0.0
@@ -4525,7 +3874,7 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
 def _is_wrong_concept_definition_chunk(text: str, query_entity: str) -> bool:
     t = (text or "").lower()
     e = (query_entity or "").lower().strip()
-    if not t or e != "classical approach":
+    if not t:
         return False
 
     wrong_concepts = (
@@ -4582,9 +3931,9 @@ def _extract_relation_subject_terms(query_text: str, fact_type: str | None) -> l
 
 def _has_likely_person_name_for_fact_relation(text: str) -> bool:
     person_noise_tokens = {
-        "psychology", "behaviorism", "model", "models", "theory", "approach", "therapy",
-        "health", "introduction", "lesson", "chapter", "division", "university", "virtual", "pakistan",
-        "science", "scientific", "learning", "conditioning", "cognitive", "behavioral",
+        "model", "models", "theory", "approach", "therapy",
+        "introduction", "chapter", "division", "university",
+        "science", "scientific", "learning",
     }
     for m in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", str(text or "")):
         toks = [t.lower() for t in re.findall(r"[A-Za-z]+", m)]
@@ -4618,7 +3967,7 @@ def _chunk_satisfies_fact_relation_rule(chunk_text: str, query_text: str, fact_t
             has_person_name = _has_likely_person_name_for_fact_relation(sent)
             has_action_verb = bool(
                 re.search(
-                    r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered|father\s+of)\b",
+                    r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered)\b",
                     sl,
                 )
             )
@@ -4710,7 +4059,7 @@ def _prefilter_fact_docs_by_relation(query_text: str, docs: list[dict], fact_typ
         has_person_name = _has_likely_person_name_for_fact_relation(txt)
         has_action_verb = bool(
             re.search(
-                r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered|father\s+of)\b",
+                r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered)\b",
                 txt.lower(),
             )
         )
@@ -4725,12 +4074,8 @@ def _build_relation_rescue_query(query_text: str, fact_type: str | None) -> str:
     subject_terms = _extract_relation_subject_terms(q, fact_type)
     subject_part = " ".join(subject_terms[:4]).strip()
 
-    if fact_type == "who":
-        return f"{q} {subject_part} proposed developed introduced established founded by".strip()
-    if fact_type == "when":
-        return f"{q} {subject_part} emerged emergence began started originated year".strip()
-    if fact_type == "who_when":
-        return f"{q} {subject_part} established founded by in what year year".strip()
+    if subject_part and subject_part.lower() not in q.lower():
+        return f"{q} {subject_part}".strip()
     return q
 
 
@@ -4761,7 +4106,7 @@ def _select_multichunk_fact_fallback_docs(
     person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
     year_re = re.compile(r"\b(1[5-9]\d{2}|20\d{2})\b")
     who_action_re = re.compile(
-        r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered|father\s+of)\b",
+        r"\b(?:proposed|developed|introduced|established|founded|created|coined|considered)\b",
         flags=re.IGNORECASE,
     )
     when_event_re = re.compile(
@@ -4771,7 +4116,6 @@ def _select_multichunk_fact_fallback_docs(
 
     q_low = q_raw.lower()
     query_has_origin_event = bool(re.search(r"\b(?:emerg|origin|began|started|first|establish|founded)\b", q_low))
-    query_has_father = "father" in q_low
     scored: list[tuple[int, int, dict, dict]] = []
     for idx, doc in enumerate((docs or [])[: max(1, int(top_n or 20))]):
         txt = str((doc or {}).get("text") or (doc or {}).get("page_content") or (doc or {}).get("content") or "")
@@ -4781,7 +4125,7 @@ def _select_multichunk_fact_fallback_docs(
         subject_hits = sum(
             1
             for tok in subject_terms
-            if tok not in {"psychology", "psychological"} and re.search(rf"\b{re.escape(tok)}\b", low)
+            if re.search(rf"\b{re.escape(tok)}\b", low)
         )
         has_subject = subject_hits > 0
         has_person = bool(person_name_re.search(txt))
@@ -4789,7 +4133,7 @@ def _select_multichunk_fact_fallback_docs(
         has_who_action = bool(who_action_re.search(low))
         has_when_event = bool(when_event_re.search(low))
         has_father_phrase = bool(re.search(r"\bfather\s+of\b", low))
-        person_action = bool(has_person and (has_who_action or (query_has_father and has_father_phrase)))
+        person_action = bool(has_person and has_who_action)
 
         score = 0
         if has_subject:
@@ -4799,8 +4143,6 @@ def _select_multichunk_fact_fallback_docs(
                 score += 3
             if has_who_action:
                 score += 2
-            if query_has_father and has_father_phrase:
-                score += 3
         if fact_type == "when":
             if has_year:
                 score += 3
@@ -4932,7 +4274,7 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
     temporal_origin_query = bool(re.search(r"\b(?:emerg|origin|began|started|first|establish|founded|introduced|proposed)\b", q))
     query_actions = [
         a for a in (
-            "established", "founded", "proposed", "introduced", "considered", "father", "developed", "emerged", "started",
+            "established", "founded", "proposed", "introduced", "considered",  "developed", "emerged", "started",
         )
         if a in q
     ]
@@ -5072,8 +4414,8 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             term_doc_freq[t] = len(pool)
 
     non_discriminative_terms = {
-        "year", "years", "model", "first", "psychology", "psychological", "established", "establish", "founded",
-        "proposed", "introduced", "considered", "father", "emerged", "emerge", "started", "start",
+        "year", "years", "model", "first", "established", "establish", "founded",
+        "proposed", "introduced", "considered",  "emerged", "emerge", "started", "start",
     }
     rarity_threshold = max(2, int(max(1, len(pool)) * 0.25))
     rare_terms = {
@@ -5085,14 +4427,12 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
         critical_terms.add("laboratory")
     if "father" in q_terms:
         critical_terms.add("father")
-    if fact_type == "when" and "behaviorism" in q_terms:
-        critical_terms.add("behaviorism")
     for ac in query_acronyms:
         critical_terms.add(ac.lower())
 
     person_name_counts: dict[str, int] = {}
     if fact_type == "who" and "father" in q_terms:
-        person_noise = {"Introduction", "Psychology", "Lesson", "Chapter", "Unit", "Table", "Figure", "Theory", "Model", "Approach"}
+        person_noise = {"Introduction", "Chapter", "Unit", "Table", "Figure", "Theory", "Model", "Approach"}
         for d in pool:
             raw = str((d or {}).get("text") or (d or {}).get("page_content") or (d or {}).get("content") or "")
             for nm in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", raw):
@@ -5129,42 +4469,11 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             entity_match_bonus = min(entity_match_bonus, 0.25)
 
         chunk_years = set(re.findall(r"\b(1[5-9]\d{2}|20\d{2})\b", txt))
-        father_phrase_hit = bool(re.search(r"\bfather\s+of\s+(?:modern\s+)?psycholog\w*\b", txt))
-        modern_psych_founder_hit = bool(
-            re.search(r"\bfirst\s+psychological\s+laborator\w*\b", txt)
-            or re.search(r"\b(?:founded|established)\b[^\n\r]{0,80}\b(?:psycholog\w*\s+laborator\w*|experimental\s+psycholog\w*)\b", txt)
-            or re.search(r"\bexperimental\s+psycholog\w*\b", txt)
-        )
-        ancient_person_hit = bool(
-            re.search(r"\b(?:hippocrates|socrates|plato|aristotle|galen)\b", txt)
-            or re.search(r"\b(?:b\.?\s*c\.?|\d+\s*bc)\b", txt)
-        )
-        abc_phrase_hit = bool(re.search(r"\babc\s+model\b", txt))
-        ellis_hit = bool(re.search(r"\b(?:albert\s+ellis|ellis)\b", txt))
-        ellis_action_hit = bool(
-            ellis_hit
-            and re.search(r"\b(?:developed|proposed|introduced|founded|created)\b", txt)
-        )
         person_name_for_meta = bool(re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw))
         sent_with_year_for_behavior = [
             s for s in re.split(r"(?<=[.!?])\s+|\n+", txt_raw)
             if re.search(r"\b(1[5-9]\d{2}|20\d{2})\b", str(s or ""))
         ]
-        behaviorism_origin_sentence_hit = False
-        behaviorism_early_year_hit = False
-        if fact_type == "when" and "behaviorism" in q_terms and sent_with_year_for_behavior:
-            for s_raw in sent_with_year_for_behavior:
-                s_low = str(s_raw or "").lower()
-                if not re.search(r"\bbehavioris\w*\b", s_low):
-                    continue
-                has_origin_word = bool(re.search(r"\b(?:emerg(?:ed|ence)?|origin(?:s|ated)?|began|started|first|establish(?:ed)?|founded|introduced|proposed)\b", s_low))
-                has_bio_word = bool(re.search(r"\b(?:born|died|aged?|years?\s+old|founder\s+of)\b", s_low))
-                if has_origin_word and not has_bio_word:
-                    behaviorism_origin_sentence_hit = True
-                    years_here = [int(y) for y in re.findall(r"\b(1[5-9]\d{2}|20\d{2})\b", s_low)]
-                    if years_here and min(years_here) <= 1935:
-                        behaviorism_early_year_hit = True
-                    break
         number_match_bonus = 0.0
         year_age_bonus = 0.0
         if ambiguous_when_subject and chunk_years:
@@ -5226,7 +4535,7 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
         if fact_type == "who":
             has_action = bool(query_actions and any(re.search(rf"\b{re.escape(a)}\b", txt) for a in query_actions))
             if not has_action:
-                has_action = bool(re.search(r"\b(?:established|founded|proposed|introduced|considered|known\s+as|father\s+of|developed)\b", txt))
+                has_action = bool(re.search(r"\b(?:established|founded|proposed|introduced|considered|known\s+as|developed)\b", txt))
             focus_hits = sum(1 for t in query_focus_terms if re.search(rf"\b{re.escape(t)}\b", txt))
             if chunk_entities and has_action and (focus_hits >= 1):
                 direct_fact_bonus += 0.85
@@ -5234,17 +4543,12 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
                 direct_fact_bonus += 0.55
             if "father" in query_actions and re.search(r"\bfather\s+of\b", txt):
                 direct_fact_bonus += 0.5
-            if "father" in q_terms and father_phrase_hit and chunk_entities:
                 direct_fact_bonus += 2.2
-            if "father" in q_terms and modern_psych_founder_hit:
                 direct_fact_bonus += 1.25
             if query_acronyms and any(re.search(rf"\b{re.escape(a.lower())}\b", txt) for a in query_acronyms):
                 direct_fact_bonus += 0.95
-            if query_acronyms and abc_phrase_hit:
                 direct_fact_bonus += 1.3
-            if query_acronyms and ellis_action_hit:
                 direct_fact_bonus += 1.0
-            if query_acronyms and abc_phrase_hit and ellis_action_hit:
                 direct_fact_bonus += 1.6
             if "father" in q_terms and person_name_counts and re.search(r"\bpsycholog\w*\b", txt):
                 max_freq = 0
@@ -5267,80 +4571,26 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
         generic_penalty = 0.0
         if fact_type == "who" and critical_terms and not critical_hits:
             generic_penalty += 1.1
-        if fact_type == "who" and "psychology" in q_terms and "sport" not in q_terms:
-            if re.search(r"\bsport\b", txt):
-                generic_penalty += 1.0
         if "laboratory" in q_terms and not re.search(r"\blaborator(?:y|ies)\b", txt):
             generic_penalty += 1.1
-        if "father" in q_terms and not re.search(r"\bfather\b", txt):
             generic_penalty += 0.85
-        if "father" in q_terms and not father_phrase_hit:
             generic_penalty += 1.5
         if "father" in q_terms and re.search(r"\bfather\s+of\s+sport\s+psycholog\w*\b", txt):
             generic_penalty += 2.2
         if "father" in q_terms and re.search(r"\bsport\s+psycholog\w*\b", txt):
             generic_penalty += 1.6
-        if "father" in q_terms and "psychology" in q_terms and re.search(r"\bsport\s+psycholog\w*\b", txt):
-            generic_penalty += 2.8
-        if "father" in q_terms and ancient_person_hit and not modern_psych_founder_hit:
             generic_penalty += 1.25
         if query_acronyms and not any(re.search(rf"\b{re.escape(a.lower())}\b", txt) for a in query_acronyms):
             generic_penalty += 0.95
-        if query_acronyms and not abc_phrase_hit:
             generic_penalty += 1.4
-        if query_acronyms and not ellis_hit:
             generic_penalty += 1.6
-        if query_acronyms and ellis_hit and not ellis_action_hit:
             generic_penalty += 0.9
         if fact_type == "who" and query_acronyms and not person_name_for_meta:
             generic_penalty += 1.35
-        if fact_type == "who" and query_acronyms and abc_phrase_hit and not person_name_for_meta:
             generic_penalty += 1.35
-        if fact_type == "who" and query_acronyms and abc_phrase_hit and not ellis_hit:
             generic_penalty += 0.85
-        if fact_type == "when" and "behaviorism" in q_terms and not re.search(r"\bbehavioris\w*\b", txt):
-            generic_penalty += 2.5
-        if fact_type == "when" and "behaviorism" in q_terms:
-            behaviorism_term_present = bool(re.search(r"\bbehavioris\w*\b", txt))
-            if not behaviorism_origin_sentence_hit:
-                generic_penalty += 1.25
-            if re.search(r"\b(?:founder\s+of|born|died)\b", txt):
-                generic_penalty += 1.35
-            if re.search(r"\b1913\b", txt):
-                number_match_bonus += 1.75
-            if re.search(r"\b(?:john\s+b\.?\s+watson|watson)\b", txt):
-                number_match_bonus += 0.55
-            if not behaviorism_term_present and chunk_years:
-                temporal_bio_penalty += 1.6
-                number_match_bonus -= 0.8
-            if behaviorism_early_year_hit:
-                number_match_bonus += 1.2
-            if chunk_years:
-                try:
-                    earliest_behavior_year = min(int(y) for y in chunk_years)
-                    if earliest_behavior_year <= 1915:
-                        number_match_bonus += 1.15
-                    elif earliest_behavior_year >= 1920:
-                        temporal_bio_penalty += 1.05
-                except Exception:
-                    pass
-            elif chunk_years:
-                try:
-                    if min(int(y) for y in chunk_years) > 1935:
-                        temporal_bio_penalty += 1.7
-                except Exception:
-                    pass
         if fact_type == "when" and temporal_origin_query and not re.search(r"\b(?:emerg(?:ed|ence)?|origin(?:s|ated)?|began|started|first|establish(?:ed)?|founded|introduced|proposed)\b", txt):
             generic_penalty += 0.55
-        if fact_type == "when" and "behaviorism" in q_terms and temporal_origin_query and chunk_years:
-            try:
-                earliest_year = min(int(y) for y in chunk_years)
-                if earliest_year > 1935:
-                    temporal_bio_penalty += 0.8
-                elif earliest_year <= 1930:
-                    number_match_bonus += 0.4
-            except Exception:
-                pass
         if _looks_table_or_heading_like_chunk(txt_raw[:1800]):
             generic_penalty += 0.9
         lines = [ln.strip() for ln in txt_raw.splitlines() if ln.strip()]
@@ -5413,26 +4663,11 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
         acronym_hit_for_meta = bool(query_acronyms and any(re.search(rf"\b{re.escape(a.lower())}\b", txt) for a in query_acronyms))
         person_action_hit_for_meta = bool(
             person_name_for_meta
-            and re.search(r"\b(?:developed|proposed|introduced|established|founded|considered|known\s+as|father\s+of)\b", txt)
+            and re.search(r"\b(?:developed|proposed|introduced|established|founded|considered|known\s+as)\b", txt)
         )
-        father_domain_hit_for_meta = bool(
-            "father" in q_terms
-            and (
-                father_phrase_hit
-                or modern_psych_founder_hit
-            )
-        )
-        abc_model_hit_for_meta = bool(query_acronyms and abc_phrase_hit)
-        abc_person_hit_for_meta = bool(query_acronyms and ellis_action_hit)
-        behavior_year_hit_for_meta = bool(
-            fact_type == "when"
-            and chunk_years
-            and behaviorism_origin_sentence_hit
-        )
-        behavior_early_year_hit_for_meta = bool(
-            fact_type == "when"
-            and behaviorism_early_year_hit
-        )
+        father_domain_hit_for_meta = False
+        abc_model_hit_for_meta = False
+        abc_person_hit_for_meta = False
 
         scored_rows.append((final_score, has_direct_anchor, doc, {
             "chunk_index": md.get("chunk_index"),
@@ -5443,8 +4678,6 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             "father_domain_hit": father_domain_hit_for_meta,
             "abc_model_hit": abc_model_hit_for_meta,
             "abc_person_hit": abc_person_hit_for_meta,
-            "behavior_year_hit": behavior_year_hit_for_meta,
-            "behavior_early_year_hit": behavior_early_year_hit_for_meta,
             "has_year": bool(chunk_years),
             "earliest_year": (min(int(y) for y in chunk_years) if chunk_years else None),
         }))
@@ -5483,26 +4716,6 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
         father_row = next((r for r in scored_rows if r[3].get("father_domain_hit")), None)
         if father_row is not None:
             _pin_row(father_row)
-
-    if fact_type == "when" and "behaviorism" in q_terms:
-        behavior_early_year_row = next((r for r in scored_rows if r[3].get("behavior_early_year_hit")), None)
-        behavior_year_row = next((r for r in scored_rows if r[3].get("behavior_year_hit")), None)
-        if behavior_early_year_row is not None:
-            _pin_row(behavior_early_year_row)
-        if behavior_year_row is not None:
-            _pin_row(behavior_year_row)
-        candidate_early_rows = [
-            r for r in scored_rows
-            if (
-                r[3].get("has_year")
-                and isinstance(r[3].get("earliest_year"), int)
-                and r[3].get("earliest_year") <= 1935
-                and re.search(r"\bbehavioris\w*\b", str(r[3].get("preview") or "").lower())
-            )
-        ]
-        earliest_year_row = min(candidate_early_rows, key=lambda r: int(r[3].get("earliest_year"))) if candidate_early_rows else None
-        if earliest_year_row is not None:
-            _pin_row(earliest_year_row)
 
     anchors = [row for row in scored_rows if row[1]]
     min_anchor_docs = 2 if len(scored_rows) >= 4 else 1
@@ -5584,12 +4797,12 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
     _, definition_entity = _extract_entity_from_definition_query(q_raw)
     definition_entity_l = definition_entity.lower()
     normalized_phrase = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", definition_entity_l)).strip()
-    definition_reject_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", re.IGNORECASE)
+    definition_reject_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", re.IGNORECASE)
     definition_heading_intro_re = re.compile(
         r"(?im)^\s*(?:introduction|overview|summary|contents?|table of contents|chapter\s+\d+|unit\s+\d+|learning objectives?|key terms?)\s*[:\-–—]?\s*$"
     )
     concept_def_verb_re = re.compile(r"\b(?:is|refers to|defined as|known as)\b", re.IGNORECASE)
-    attribution_verb_re = re.compile(r"\b(?:is|was|known as|father of|introduced)\b", re.IGNORECASE)
+    attribution_verb_re = re.compile(r"\b(?:is|was|known as|introduced)\b", re.IGNORECASE)
     person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
 
     explain_verbs_re = re.compile(
@@ -5689,6 +4902,10 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
         hay = f"{sec_l}\n{chap_l}\n{txt_l}"
         is_toc_like = ("table of contents" in hay or "contents" in hay)
         has_structure = bool(re.search(r"\bchapter\s+\d+\b", hay)) or bool(re.search(r"\b\d+\.\d+\b", hay))
+        if retrieval_intent in {"chapter", "structure"} and is_toc_like:
+            if re.search(r"(?im)^\s*(references?|review questions?|further reading)\b", txt_l):
+                return True
+            return False
         if any(re.search(pat, txt_l, flags=re.IGNORECASE) for pat in hard_noise_patterns):
             if retrieval_intent in {"chapter", "structure"} and is_toc_like and has_structure:
                 if re.search(r"(?im)^\s*(references?|review questions?|further reading)\b", txt_l):
@@ -5709,7 +4926,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
     if cleaned_docs:
         retrieved_docs = cleaned_docs
 
-    if not is_fact_q:
+    if (not is_fact_q) and (not is_list_q) and (not is_structure_q):
         explain_prefiltered_docs = []
         for doc in retrieved_docs:
             reject_reason = _hard_explain_reject_reason(doc)
@@ -5776,11 +4993,11 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
         if is_definition_q and definition_entity_l:
             has_entity_phrase = bool(re.search(rf"\b{re.escape(definition_entity_l)}\b", txt))
             classical_alias_phrase_hit = bool(
-                definition_entity_l == "classical approach"
+                False
                 and re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", txt)
             )
             classical_contrastive_mention = bool(
-                definition_entity_l == "classical approach"
+                False
                 and re.search(r"\b(?:improvement\s+over\s+the\s+classical\s+approach|classical\s+approach\s+which\s+focused\s+on)\b", txt)
             )
             has_def_pattern = any(pat in txt for pat in (
@@ -5855,7 +5072,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
                 bonus -= 1.0
 
         if is_concept_definition_q:
-            bio_hits = len(re.findall(r"\b(he|she|father of|born|birth|died|biography)\b", txt))
+            bio_hits = len(re.findall(r"\b(he|she|born|birth|died|biography)\b", txt))
             bonus -= min(1.8, 0.22 * bio_hits)
 
         if is_entity_definition_q and definition_entity_l:
@@ -5908,7 +5125,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
             if is_concept_definition_q:
                 if re.search(r"\b(is|refers to|defined as|means|is the process of)\b", txt):
                     bonus += 0.45
-                if re.search(r"\b(he|she|father of|born|birth|died|biography)\b", txt):
+                if re.search(r"\b(he|she|born|birth|died|biography)\b", txt):
                     bonus -= 0.9
 
             if is_person_definition_q:
@@ -5961,7 +5178,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
                 if no_sentence or short_named_items >= 4:
                     bonus -= 1.1
 
-        if is_list_q and any(marker in txt for marker in ("- ", "•", "1.", "2.", "include", "types", "branches")):
+        if is_list_q and (re.search(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", txt) or txt.count(",") >= 2):
             bonus += 0.2
 
         if retrieval_intent == "chapter":
@@ -6249,19 +5466,7 @@ def _expand_query(query: str) -> List[str]:
             _add(f"{base_term} list")
             _add(f"{base_term} items")
             _add(f"{base_term} points")
-
-        topic_m = re.search(r"\b(?:steps?|stages?|phases?|components?|parts?|goals?)\s+of\s+(.+)$", base_term.lower()) if base_term else None
-        if topic_m:
-            topic = topic_m.group(1).strip(" ?.!")
-            if topic:
-                _add(topic)
-                _add(f"{topic} list")
-                _add(f"{topic} steps")
-                _add(f"{topic} components")
-                _add(f"{topic} stages")
-                _add(f"{topic} goals")
-                _add(f"{topic} parts")
-                _add(f"{topic} phases")
+            _add(base_term)
 
     # de-duplicate while preserving order
     ordered: List[str] = []
@@ -6415,11 +5620,11 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
     best: list[dict] = []
     entity_l = (entity or "").strip().lower()
     entity_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
-    reject_marker_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", re.IGNORECASE)
+    reject_marker_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", re.IGNORECASE)
     intro_heading_re = re.compile(r"(?im)^\s*(?:introduction|overview|summary|contents?|table of contents|chapter\s+\d+|unit\s+\d+|learning objectives?|key terms?)\s*[:\-–—]?\s*$")
     heading_like_intro_re = re.compile(r"^\s*[A-Z][A-Za-z0-9\s\-]{3,90}\s*:\s*(?:[-•*]|\d+[.)])\s+", re.IGNORECASE)
     definition_verb_re = re.compile(r"\b(?:is|refers\s+to|defined\s+as|means)\b", re.IGNORECASE)
-    attribution_verb_re = re.compile(r"\b(?:is|was|known as|father of|introduced)\b", re.IGNORECASE)
+    attribution_verb_re = re.compile(r"\b(?:is|was|known as|introduced)\b", re.IGNORECASE)
     person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
     is_person_query = (
         q_low.startswith("who is")
@@ -6627,8 +5832,7 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
 
 
 def _build_definition_entity_rescue_queries(query_text: str, entity: str) -> list[str]:
-    q = re.sub(r"\s+", " ", str(query_text or "")).strip()
-    e = re.sub(r"\s+", " ", str(entity or "")).strip()
+    e = _normalize_definition_entity(re.sub(r"\s+", " ", str(entity or "")).strip())
     if not e:
         return []
 
@@ -6638,25 +5842,14 @@ def _build_definition_entity_rescue_queries(query_text: str, entity: str) -> lis
         f"{e} is",
         f"what is {e}",
         f"what is meant by {e}",
+        f"explain {e}",
         f"{e} theory",
-        f"{e} management theory",
         f"{e} explained",
         f"{e} principles methods",
-        f"{e} 1.3.1",
-        f"{e} industrial revolution",
-        f"{e} output productivity efficiency",
     ]
 
     if re.search(r"\bapproach\b", e, flags=re.IGNORECASE):
-        queries.extend(
-            [
-                f"{e} in management",
-                f"{e} explanation",
-                f"classical management theory {e}",
-            ]
-        )
-    if q:
-        queries.insert(0, q)
+        queries.append(f"{e} explanation")
 
     out: list[str] = []
     seen: set[str] = set()
@@ -6681,14 +5874,8 @@ def _build_fact_rescue_queries(query_text: str, history: list[dict] | None = Non
     subject_terms = _extract_relation_subject_terms(q, fact_type)
     subject_part = " ".join(subject_terms[:4]).strip()
 
-    if fact_type in {"who", "who_when"}:
-        queries.append(f"{q} {subject_part} proposed developed introduced established founded by".strip())
-    if fact_type in {"when", "who_when"}:
-        queries.append(f"{q} {subject_part} in what year year established founded emerged began started originated".strip())
-    if fact_type == "which":
-        queries.append(f"{q} {subject_part} called known as identified as".strip())
-    if fact_type == "where":
-        queries.append(f"{q} {subject_part} located in at from".strip())
+    if subject_part and subject_part.lower() not in q_low:
+        queries.append(f"{q} {subject_part}".strip())
 
     has_pronoun = bool(re.search(r"\b(it|this|that|they|he|she)\b", q_low))
     if has_pronoun and history:
@@ -6889,7 +6076,7 @@ def _log_answer_mode_markers(query_text: str, doc_dicts: list[dict], answer_text
             resolved_source_mode = "fact"
         elif family_v2 == "list_entity":
             resolved_source_mode = "list"
-        elif family_v2 in {"toc_structure", "sequence_lookup"}:
+        elif family_v2 in {"sequence_lookup"}:
             resolved_source_mode = "toc"
         elif family_v2 == "lesson_lookup":
             resolved_source_mode = "lesson_lookup"
@@ -7340,23 +6527,142 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
 
     primary_heads = [h["heading"].lower() for h in matched.get("primary", [])]
     secondary_heads = [h["heading"].lower() for h in matched.get("secondary", [])]
-    if not primary_heads and not secondary_heads:
-        return enriched_docs
 
     ql = (query_text or "").lower()
-    required_section: Optional[str] = None
-    if re.search(r"\bdisadvantages?|drawbacks?|limitations?|criticisms?\b", ql):
-        required_section = "disadvantages"
-    elif re.search(r"\badvantages?|benefits?|pros\b", ql):
-        required_section = "advantages"
-    elif re.search(r"\bfunctions?|elements?\b", ql):
-        required_section = "functions"
-    elif re.search(r"\blevels?\b", ql):
-        required_section = "levels"
-    elif re.search(r"\b(?:types?|approaches?)\b", ql):
-        required_section = "types"
-    elif re.search(r"\bsteps?|phases?|stages?\b", ql):
-        required_section = "steps"
+    list_or_section_query = bool(
+        family in {"list_structure", "overview_chapter_compare"}
+        or _is_targeted_list_question(ql)
+        or re.match(r"^\s*(?:what|which)\s+are\b", ql)
+    )
+
+    q_stop = {
+        "what", "which", "are", "the", "and", "for", "with", "from", "list", "name", "give", "mention", "identify",
+        "of", "in", "on", "at", "to", "a", "an", "is", "was", "were", "be", "being", "been",
+    }
+    query_focus_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", ql) if t not in q_stop][:12]
+
+    def _has_query_token(haystack: str, token: str) -> bool:
+        t = str(token or "").strip().lower()
+        if not t:
+            return False
+        if re.search(rf"\b{re.escape(t)}\b", haystack):
+            return True
+        if len(t) >= 6:
+            stem = t[:5]
+            if re.search(rf"\b{re.escape(stem)}[a-z]*\b", haystack):
+                return True
+        return False
+
+    def _heading_like(line: str) -> bool:
+        s = str(line or "").strip()
+        if not s or len(s) > 140:
+            return False
+        if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", s):
+            return False
+        if s.endswith(":"):
+            return True
+        if re.match(r"^[A-Z][A-Za-z0-9\- ,()]{3,80}$", s):
+            return True
+        return False
+
+    def _marker_density(lines_block: list[str]) -> float:
+        if not lines_block:
+            return 0.0
+        marker_lines = 0
+        for ln in lines_block:
+            if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", ln):
+                marker_lines += 1
+            elif re.match(r"^\s*[a-zA-Z][.)]\s+", ln):
+                marker_lines += 1
+            elif len(re.findall(r"\b[a-zA-Z][.)]\s+", ln)) >= 2:
+                marker_lines += 1
+            elif (ln.count(",") >= 2 and len(ln) <= 240) or (";" in ln and len(ln) <= 260):
+                marker_lines += 1
+        return marker_lines / max(1, len([ln for ln in lines_block if ln.strip()]))
+
+    def _topic_drift(lines_block: list[str]) -> float:
+        token_sets: list[set[str]] = []
+        for ln in lines_block:
+            toks = {t for t in re.findall(r"[a-z0-9]{3,}", ln.lower()) if t not in q_stop}
+            if toks:
+                token_sets.append(toks)
+        if len(token_sets) < 2:
+            return 0.0
+        drifts = 0
+        for i in range(len(token_sets) - 1):
+            inter = len(token_sets[i] & token_sets[i + 1])
+            union = len(token_sets[i] | token_sets[i + 1]) or 1
+            if (inter / union) < 0.08:
+                drifts += 1
+        return drifts / max(1, len(token_sets) - 1)
+
+    def _best_local_window(raw_text: str) -> tuple[float, str, str, dict[str, float]]:
+        lines = [ln for ln in str(raw_text or "").splitlines() if str(ln or "").strip()]
+        if not lines:
+            return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
+
+        def _boundary_heading(line: str) -> bool:
+            s = str(line or "").strip()
+            if not s:
+                return False
+            if re.match(r"^\s*(?:chapter\s+\d+|unit\s+\d+|section\s+\d+|\d+(?:\.\d+){1,4}\s+.+|[A-Z]\.[\s]+.+|[IVXLC]+\.[\s]+.+)\s*$", s, flags=re.IGNORECASE):
+                return True
+            return _heading_like(s)
+
+        candidates: list[tuple[int, int, str]] = []
+        for idx, ln in enumerate(lines):
+            if _heading_like(ln):
+                start = max(0, idx)
+                end = min(len(lines), idx + 14)
+                for j in range(idx + 1, min(len(lines), idx + 44)):
+                    if (j - idx) >= 2 and _boundary_heading(lines[j]):
+                        end = j
+                        break
+                    end = j + 1
+                candidates.append((start, end, ln.strip()))
+
+        step = 5
+        win = 24
+        for i in range(0, len(lines), step):
+            candidates.append((i, min(len(lines), i + win), ""))
+
+        if not candidates:
+            return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
+
+        best_score = -1.0
+        best_text = ""
+        best_anchor = ""
+        best_meta = {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0}
+
+        for start, end, anchor in candidates[:60]:
+            block_lines = lines[start:end]
+            if not block_lines:
+                continue
+            block_text = "\n".join(block_lines).strip()
+            low = block_text.lower()
+
+            focus_hits = float(sum(1 for tok in query_focus_tokens if _has_query_token(low, tok)))
+            anchor_low = (anchor or "").lower()
+            heading_hits = float(sum(1 for tok in query_focus_tokens if anchor_low and _has_query_token(anchor_low, tok)))
+            marker = float(_marker_density(block_lines))
+            drift = float(_topic_drift(block_lines))
+            wc = len(re.findall(r"[a-z0-9]+", low))
+            compactness = max(0.0, 1.0 - (abs(wc - 120) / 220.0))
+
+            score = (1.5 * focus_hits) + (1.2 * heading_hits) + (2.0 * marker) + (0.9 * compactness) + (1.0 * (1.0 - min(1.0, drift)))
+            if score > best_score:
+                best_score = score
+                best_text = block_text
+                best_anchor = anchor
+                best_meta = {
+                    "focus_hits": focus_hits,
+                    "heading_hits": heading_hits,
+                    "marker_density": marker,
+                    "compactness": compactness,
+                    "drift": drift,
+                }
+
+        return (best_score, best_text, best_anchor, best_meta)
 
     def _base_score(doc: dict) -> float:
         for key in ("final_score", "similarity", "score"):
@@ -7375,31 +6681,17 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
         hay = f"{head}\n{txt[:2200]}".lower()
         score = _base_score(doc)
 
-        if required_section == "advantages":
-            if re.search(r"\bdisadvantages?|drawbacks?|limitations?|criticisms?\b", hay) and not re.search(r"\badvantages?|benefits?|pros\b", hay):
-                continue
-        elif required_section == "disadvantages":
-            if re.search(r"\badvantages?|benefits?|pros\b", hay) and not re.search(r"\bdisadvantages?|drawbacks?|limitations?|criticisms?\b", hay):
-                continue
-        elif required_section == "functions":
-            if re.search(r"\badvantages?|disadvantages?|levels?|types?\b", hay) and not re.search(r"\bfunctions?|elements?|process\b", hay):
-                continue
-        elif required_section == "levels":
-            if re.search(r"\badvantages?|disadvantages?|functions?|types?\b", hay) and not re.search(r"\blevels?\b", hay):
-                continue
-        elif required_section == "types":
-            if re.search(r"\badvantages?|disadvantages?|functions?|levels?\b", hay) and not re.search(r"\b(?:types?|approaches?)\b", hay):
-                continue
-        elif required_section == "steps":
-            if re.search(r"\badvantages?|disadvantages?|levels?|types?\b", hay) and not re.search(r"\bsteps?|phases?|stages?|process\b", hay):
-                continue
+        q_tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", ql) if tok not in {"what", "which", "are", "the", "and", "for", "with", "from"}]
+        token_hits = sum(1 for tok in q_tokens if _has_query_token(hay, tok))
+        if q_tokens and token_hits == 0:
+            continue
 
         for h in primary_heads:
             if h and h in hay:
                 score += 1.2
             else:
                 h_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", h) if t not in {"the", "and", "of", "for"}]
-                token_hits = sum(1 for t in h_tokens if re.search(rf"\b{re.escape(t)}\b", hay))
+                token_hits = sum(1 for t in h_tokens if _has_query_token(hay, t))
                 if h_tokens and token_hits >= max(1, min(2, len(h_tokens))):
                     score += 0.7
 
@@ -7410,18 +6702,19 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
         if family == "overview_chapter_compare" and any(k in hay for k in ("table of contents", "contents", "chapter", "unit", "section")):
             score += 0.35
 
-        if family == "list_structure" and any(k in hay for k in ("steps", "phases", "levels", "advantages", "disadvantages", "functions", "types")):
-            score += 0.25
+        if family == "list_structure":
+            if re.search(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", txt) or (txt.count(",") >= 2 and len(txt[:400]) < 420):
+                score += 0.25
 
         scored.append((score, doc))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     reranked = [doc for _, doc in scored]
+    if not reranked:
+        reranked = list(enriched_docs)
 
     # Heading-aligned context extraction: isolate block under matched heading.
     matched_headings = [h["heading"] for h in (matched.get("primary", []) + matched.get("secondary", []))]
-    if not matched_headings:
-        return reranked[: max(len(retrieved_docs), top_k)]
 
     def _best_heading_for_doc(doc: dict) -> str:
         txt = str((doc or {}).get("text") or (doc or {}).get("page_content") or "")
@@ -7445,27 +6738,164 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
         return best_h if best_score >= 2 else ""
 
     focused_docs: list[dict] = []
-    for doc in reranked:
-        best_heading = _best_heading_for_doc(doc)
-        if not best_heading:
-            focused_docs.append(doc)
-            continue
+    if not matched_headings:
+        focused_docs = reranked[: max(len(retrieved_docs), top_k)]
+    else:
+        for doc in reranked:
+            best_heading = _best_heading_for_doc(doc)
+            if not best_heading:
+                focused_docs.append(doc)
+                continue
 
-        source_text = str((doc or {}).get("text") or (doc or {}).get("page_content") or "")
-        section_block = _extract_section_block(source_text, best_heading)
-        if not section_block:
-            focused_docs.append(doc)
-            continue
+            source_text = str((doc or {}).get("text") or (doc or {}).get("page_content") or "")
+            section_block = _extract_section_block(source_text, best_heading)
+            if not section_block:
+                focused_docs.append(doc)
+                continue
 
-        doc_new = dict(doc)
-        md_new = dict((doc.get("metadata") or {}))
-        md_new["_matched_heading"] = best_heading
-        doc_new["metadata"] = md_new
-        doc_new["page_content"] = section_block
-        doc_new["text"] = section_block
-        focused_docs.append(doc_new)
+            doc_new = dict(doc)
+            md_new = dict((doc.get("metadata") or {}))
+            md_new["_matched_heading"] = best_heading
+            doc_new["metadata"] = md_new
+            doc_new["page_content"] = section_block
+            doc_new["text"] = section_block
+            focused_docs.append(doc_new)
+
+    if list_or_section_query and focused_docs:
+        promoted_docs: list[dict] = []
+        for doc in focused_docs:
+            raw_text = str((doc or {}).get("text") or (doc or {}).get("page_content") or "")
+            if not raw_text.strip():
+                promoted_docs.append(doc)
+                continue
+
+            md = dict((doc or {}).get("metadata") or {})
+            chunk_idx = str(md.get("chunk_index") or "?")
+            source = str(md.get("source") or md.get("filename") or "")
+
+            local_score, local_text, local_anchor, local_meta = _best_local_window(raw_text)
+            logger.info(
+                "[LOCAL WINDOW DEBUG] chunk=%s source=%s best_score=%.3f focus_hits=%.1f heading_hits=%.1f marker_density=%.3f compactness=%.3f drift=%.3f",
+                chunk_idx,
+                source[:120],
+                float(local_score),
+                float(local_meta.get("focus_hits", 0.0)),
+                float(local_meta.get("heading_hits", 0.0)),
+                float(local_meta.get("marker_density", 0.0)),
+                float(local_meta.get("compactness", 0.0)),
+                float(local_meta.get("drift", 1.0)),
+            )
+
+            if local_anchor:
+                logger.info(
+                    "[LOCAL HEADING DEBUG] chunk=%s heading=%s focus_overlap=%.1f heading_score=%.3f",
+                    chunk_idx,
+                    local_anchor[:120],
+                    float(local_meta.get("heading_hits", 0.0)),
+                    float(local_score),
+                )
+
+            promote = bool(
+                local_text
+                and local_score >= 3.9
+                and local_meta.get("focus_hits", 0.0) >= 1.0
+                and (
+                    local_meta.get("marker_density", 0.0) >= 0.08
+                    or local_meta.get("heading_hits", 0.0) >= 1.0
+                    or local_meta.get("focus_hits", 0.0) >= 2.0
+                )
+                and local_meta.get("drift", 1.0) <= 0.75
+            )
+
+            if promote:
+                doc_new = dict(doc)
+                md_new = dict(md)
+                local_focus_hits = float(local_meta.get("focus_hits", 0.0) or 0.0)
+                local_heading_match = float(local_meta.get("heading_hits", 0.0) or 0.0)
+                local_list_density = float(local_meta.get("marker_density", 0.0) or 0.0)
+                local_confidence_score = min(1.0, float(local_score) / 6.0)
+                md_new["_local_window_promoted"] = True
+                md_new["_local_anchor"] = local_anchor
+                md_new["_local_window_score"] = round(float(local_score), 4)
+                md_new["local_window_promoted"] = True
+                md_new["local_focus_hits"] = round(local_focus_hits, 4)
+                md_new["local_heading_match"] = round(local_heading_match, 4)
+                md_new["local_list_density"] = round(local_list_density, 4)
+                md_new["local_confidence_score"] = round(local_confidence_score, 4)
+                md_new["_local_focus_hits"] = round(local_focus_hits, 4)
+                md_new["_local_heading_match"] = round(local_heading_match, 4)
+                md_new["_local_list_density"] = round(local_list_density, 4)
+                md_new["_local_confidence_score"] = round(local_confidence_score, 4)
+                doc_new["metadata"] = md_new
+                doc_new["page_content"] = local_text
+                doc_new["text"] = local_text
+                doc_new["_local_window_score"] = float(local_score)
+                promoted_docs.append(doc_new)
+                logger.info("[LOCAL WINDOW PROMOTION] chunk=%s promoted=True reason=local_window_match", chunk_idx)
+                if local_anchor:
+                    logger.info("[SECTION ANCHOR PROMOTION] chunk=%s anchor=%s score=%.3f", chunk_idx, local_anchor[:120], float(local_score))
+            else:
+                doc_keep = dict(doc)
+                doc_keep["_local_window_score"] = float(local_score)
+                promoted_docs.append(doc_keep)
+                logger.info("[LOCAL WINDOW PROMOTION] chunk=%s promoted=False reason=weak_local_window", chunk_idx)
+
+        promoted_docs.sort(key=lambda d: float(d.get("_local_window_score", 0.0)) + (0.35 * _base_score(d)), reverse=True)
+        focused_docs = promoted_docs
 
     return focused_docs[: max(len(retrieved_docs), top_k)]
+
+
+def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
+    support = {
+        "promoted_count": 0.0,
+        "focus_hits": 0.0,
+        "heading_match": 0.0,
+        "list_density": 0.0,
+        "confidence": 0.0,
+        "source_chunk_count": 0.0,
+        "chunk_span": 0.0,
+        "source_chunks": [],
+        "chunk_texts": [],
+    }
+    source_chunks: set[int] = set()
+    for d in (docs or []):
+        md = dict((d or {}).get("metadata") or {})
+        try:
+            chunk_idx = int(md.get("chunk_index"))
+            source_chunks.add(chunk_idx)
+        except Exception:
+            pass
+        promoted = bool(md.get("_local_window_promoted") or md.get("local_window_promoted"))
+        chunk_text = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        if chunk_text and isinstance(support.get("chunk_texts"), list):
+            support["chunk_texts"].append({
+                "chunk": int(chunk_idx) if "chunk_idx" in locals() else -1,
+                "text": chunk_text[:3000],
+            })
+        if not promoted:
+            continue
+        support["promoted_count"] += 1.0
+        support["focus_hits"] = max(
+            support["focus_hits"],
+            float(md.get("local_focus_hits") or md.get("_local_focus_hits") or 0.0),
+        )
+        support["heading_match"] = max(
+            support["heading_match"],
+            float(md.get("local_heading_match") or md.get("_local_heading_match") or 0.0),
+        )
+        support["list_density"] = max(
+            support["list_density"],
+            float(md.get("local_list_density") or md.get("_local_list_density") or 0.0),
+        )
+        conf_raw = float(md.get("local_confidence_score") or md.get("_local_confidence_score") or md.get("_local_window_score") or 0.0)
+        conf = min(1.0, (conf_raw / 6.0)) if conf_raw > 1.0 else max(0.0, conf_raw)
+        support["confidence"] = max(support["confidence"], conf)
+    ordered_chunks = sorted(source_chunks)
+    support["source_chunk_count"] = float(len(ordered_chunks))
+    support["chunk_span"] = float((ordered_chunks[-1] - ordered_chunks[0]) if len(ordered_chunks) >= 2 else 0.0)
+    support["source_chunks"] = ordered_chunks
+    return support
 
 
 def _clean_mixed_not_found_response(ai_text: str) -> str:
@@ -7499,8 +6929,8 @@ def _count_list_like_items_in_docs(docs: list[dict]) -> int:
         count += len(re.findall(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+.+", txt))
         # comma-separated short lists (a, b, c)
         count += len(re.findall(r"\b\w+\s*,\s*\w+\s*,\s*\w+\b", txt))
-        # explicit list-word markers (counts as weak signals)
-        count += len(re.findall(r"\b(phases|steps|levels|types|elements|figures|tables|sections)\b", txt, flags=re.IGNORECASE))
+        # generic heading/list markers (counts as weak signals)
+        count += len(re.findall(r"\b(elements|figures|tables|sections|items|points)\b", txt, flags=re.IGNORECASE))
     return count
 
 
@@ -7531,7 +6961,7 @@ def _context_grounded_definition_override(query_text: str, retrieved_docs: list[
     history_re = re.compile(r"\b(?:\d{4}|\d{3,4}s)\b")
     publication_re = re.compile(r"\b(?:translated|book|publication|edition|isbn|https?://|www\.|kdpublications|unit\s*\d+|chapter\s*\d+|table\s+of\s+contents|contents?)\b", flags=re.IGNORECASE)
     bio_re = re.compile(
-        r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography|father\s+of)\b",
+        r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography)\b",
         flags=re.IGNORECASE,
     )
     table_figure_re = re.compile(r"\b(?:table|figure)\b", flags=re.IGNORECASE)
@@ -7643,7 +7073,7 @@ def _force_clean_definition_sentence(query_text: str, answer_text: str, retrieve
         flags=re.IGNORECASE,
     )
     noise_re = re.compile(
-        r"\b(?:\d{4}|\d{3,4}s|translated|book|publication|edition|isbn|https?://|www\.|kdpublications|unit\s*\d+|chapter\s*\d+|he|she|his|her|born|birth|died|author|authored|wrote|writer|biography|father\s+of)\b",
+        r"\b(?:\d{4}|\d{3,4}s|translated|book|publication|edition|isbn|https?://|www\.|kdpublications|unit\s*\d+|chapter\s*\d+|he|she|his|her|born|birth|died|author|authored|wrote|writer|biography)\b",
         flags=re.IGNORECASE,
     )
     compact = re.sub(r"\s+", " ", answer).strip()
@@ -7692,8 +7122,34 @@ def _normalize_definition_entity(entity: str) -> str:
     out = re.sub(r"\b(?:focus(?:es)?\s+on|mean(?:s)?|work(?:s)?)\s*$", "", out, flags=re.IGNORECASE)
     out = re.sub(r"\b(?:fully|in\s+detail)\s*$", "", out, flags=re.IGNORECASE)
     out = re.sub(r"\b(?:in\s+general|generally|overall|in\s+simple\s+terms)\s*$", "", out, flags=re.IGNORECASE)
-    out = re.sub(r"\bin\s+psychology\s*$", "", out, flags=re.IGNORECASE)
+    out = _strip_query_instruction_modifiers(out)
     out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
+def _strip_query_instruction_modifiers(text: str) -> str:
+    out = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not out:
+        return ""
+
+    trailing_modifier_patterns = [
+        r"in\s+simple\s+words",
+        r"in\s+simple\s+terms",
+        r"simply",
+        r"in\s+an\s+easy\s+way",
+        r"for\s+beginners",
+        r"briefly",
+        r"shortly",
+    ]
+
+    for _ in range(3):
+        before = out
+        for pat in trailing_modifier_patterns:
+            out = re.sub(rf"(?:\s*,?\s*{pat})\s*$", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"\s+", " ", out).strip(" \t\n\r\"'`.,;:!?-")
+        if out == before:
+            break
+
     return out
 
 
@@ -7711,6 +7167,8 @@ def _extract_entity_from_definition_query(query_text: str) -> tuple[bool, str]:
         r"^\s*define\s+(.+?)\s*\??\s*$",
         r"^\s*who\s+introduced\s+(.+?)\s*\??\s*$",
         r"^\s*(?:please\s+)?(?:explain|describe)\s+(.+?)\s*\??\s*$",
+        r"^\s*(?:please\s+)?(?:summarize|summarise)\s+(.+?)\s*\??\s*$",
+        r"^\s*(?:please\s+)?summary\s+of\s+(.+?)\s*\??\s*$",
         r"^\s*(?:please\s+)?(?:give\s+)?(?:an?\s+)?explanation\s+of\s+(.+?)\s*\??\s*$",
         r"^\s*what\s+does\s+(.+?)\s+mean\s*\??\s*$",
         r"^\s*what\s+does\s+(.+?)\s+focus\s+on\s*\??\s*$",
@@ -7979,7 +7437,7 @@ def _build_compact_fact_context_docs(query_text: str, docs: list[dict], max_snip
                 score += 1.8
             if fact_type in {"when", "who_when"} and re.search(r"\b(1[5-9]\d{2}|20\d{2})\b", sent):
                 score += 1.8
-            if re.search(r"\b(?:established|founded|proposed|developed|introduced|created|coined|father\s+of)\b", low):
+            if re.search(r"\b(?:established|founded|proposed|developed|introduced|created|coined)\b", low):
                 score += 0.8
             candidates.append((score, sent, d))
 
@@ -8025,30 +7483,7 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
 
     q_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
     is_who_when_query = fact_type == "who_when"
-    is_lab_query = bool(re.search(r"\b(first\s+)?psychological\s+laborator", q_low))
-    is_father_query = bool(re.search(r"\bfather\s+of\s+psychology\b", q_low))
-    is_abc_query = bool(re.search(r"\babc\s+model\b", q_low))
-    is_established_year_query = bool(re.search(r"\b(in\s+what\s+year|what\s+year)\b", q_low) and "established" in q_low)
-    is_behaviorism_query = bool(re.search(r"\bbehavioris", q_low))
-    stop = {
-        "what", "which", "who", "when", "where", "is", "was", "were", "the", "a", "an", "of", "in", "on", "for",
-        "to", "and", "or", "did", "do", "does", "it", "that", "this", "happen", "happened", "established", "proposed",
-    }
-    query_keywords = [t for t in re.findall(r"[a-z0-9]{3,}", q_low) if t not in stop]
-    if not query_keywords:
-        query_keywords = [t for t in re.findall(r"[a-z0-9]{3,}", q_low)]
-
-    fact_verbs = {
-        "established", "proposed", "developed", "founded", "introduced", "created", "coined",
-        "happened", "occurred", "emerge", "emerged", "emergence", "founded", "began", "started",
-    }
-    generic_subject_noise = {"first", "year", "date", "time", "did", "was"}
-    subject_tokens = [t for t in query_keywords if t not in fact_verbs and t not in generic_subject_noise]
-    verb_tokens = [t for t in query_keywords if t in fact_verbs]
-    subject_re = None
-    if subject_tokens:
-        subject_pattern = r"\s+".join(re.escape(t) for t in subject_tokens[:4])
-        subject_re = re.compile(rf"\b{subject_pattern}\b", flags=re.IGNORECASE)
+    is_lab_query = False
 
     person_name_re = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3})\b")
     verb_person_re = re.compile(
@@ -8064,10 +7499,10 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
     where_re = re.compile(r"\b(?:in|at|from)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,4}(?:,\s*[A-Z][A-Za-z]+)?)\b")
 
     disallowed_name_tokens = {
-        "Table", "Figure", "Chapter", "Unit", "Psychology", "Behaviorism", "Theory", "Model", "Approach", "Document", "Contents",
+        "Table", "Figure", "Chapter", "Unit", "Theory", "Model", "Approach", "Document", "Contents",
         "Germany", "England", "France", "Greek", "Greece", "Leipzig", "Brain", "Mind",
         "Known", "As", "Thought", "Copyright", "Virtual", "University", "Prevalent", "Models", "Observational", "Learning",
-        "Introduction", "Cognitive", "Behavioral", "Lesson", "Given", "Schools", "School",
+        "Introduction", "Lesson", "Given", "Schools", "School",
     }
 
     def _is_ocr_noisy(sentence: str) -> bool:
@@ -8095,10 +7530,7 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
         return word_count >= 7
 
     def _keyword_overlap_score(sentence_low: str) -> float:
-        if not query_keywords:
-            return 0.0
-        hits = sum(1 for tok in query_keywords if re.search(rf"\b{re.escape(tok)}\b", sentence_low))
-        return float(hits) / float(max(1, len(query_keywords)))
+        return 0.0
 
     def _token_hit(sentence_low: str, tok: str) -> bool:
         if re.search(rf"\b{re.escape(tok)}\b", sentence_low):
@@ -8110,14 +7542,10 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
         return False
 
     def _subject_hit_count(sentence_low: str) -> int:
-        if not subject_tokens:
-            return 0
-        return sum(1 for tok in subject_tokens if _token_hit(sentence_low, tok))
+        return 0
 
     def _verb_hit_count(sentence_low: str) -> int:
-        if not verb_tokens:
-            return 0
-        return sum(1 for tok in verb_tokens if _token_hit(sentence_low, tok))
+        return 0
 
     def _cleanup_ocr_for_fact_text(raw_text: str) -> str:
         s = re.sub(r"\s+", " ", str(raw_text or "")).strip()
@@ -8270,30 +7698,8 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
             clarity_bonus = 0.3 if not _is_ocr_noisy(s) else -1.2
 
             if fact_type in {"who", "who_when"}:
-                requires_attribution_verb = bool(re.search(r"\b(established|proposed|developed|founded|introduced|father\s+of)\b", q_low))
+                requires_attribution_verb = bool(re.search(r"\b(established|proposed|developed|founded|introduced)\b", q_low))
                 founder_query = bool(re.search(r"\bfounder\s+of\b", q_low))
-                if subject_re and subject_re.search(sl):
-                    targeted_patterns = [
-                        re.compile(
-                            rf"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{1,3}})\b[^.\n]{{0,70}}\b(?:established|proposed|developed|founded|introduced|created|coined)\b[^.\n]{{0,90}}\b{subject_re.pattern}\b",
-                            flags=re.IGNORECASE,
-                        ),
-                        re.compile(
-                            rf"\b{subject_re.pattern}\b[^.\n]{{0,90}}\b(?:was\s+)?(?:established|proposed|developed|founded|introduced|created|coined)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{1,3}})",
-                            flags=re.IGNORECASE,
-                        ),
-                    ]
-                    for tp in targeted_patterns:
-                        for m in tp.finditer(s):
-                            cand_name = _normalize_person_name((m.group(1) or "").strip())
-                            if _validate_candidate("who", cand_name):
-                                candidates.append({
-                                    "type": "who",
-                                    "candidate": cand_name,
-                                    "score": 8.0 + (2.0 * _keyword_overlap_score(sl)),
-                                    "sentence": s,
-                                    "chunk_idx": chunk_idx,
-                                })
 
                 if is_lab_query:
                     lab_patterns = [
@@ -8317,59 +7723,7 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
                                     "sentence": s,
                                     "chunk_idx": chunk_idx,
                                 })
-
-                if is_father_query:
-                    father_patterns = [
-                        re.compile(r"\bfather\s+of\s+psychology\b[^.\n]{0,70}\b(?:is|was)?\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b", flags=re.IGNORECASE),
-                        re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b[^.\n]{0,70}\bfather\s+of\s+psychology\b", flags=re.IGNORECASE),
-                    ]
-                    for fp in father_patterns:
-                        for m in fp.finditer(s):
-                            cand_name = _normalize_person_name((m.group(1) or "").strip())
-                            if _validate_candidate("who", cand_name):
-                                candidates.append({
-                                    "type": "who",
-                                    "candidate": cand_name,
-                                    "score": 9.2 + (1.6 * _keyword_overlap_score(sl)),
-                                    "sentence": s,
-                                    "chunk_idx": chunk_idx,
-                                })
-
-                if is_abc_query:
-                    abc_patterns = [
-                        re.compile(r"\babc\s+model\b[^.\n]{0,120}\b(?:proposed|developed)\s+by\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b", flags=re.IGNORECASE),
-                        re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})\b[^.\n]{0,120}\b(?:proposed|developed)\b[^.\n]{0,80}\babc\s+model\b", flags=re.IGNORECASE),
-                    ]
-                    for ap in abc_patterns:
-                        for m in ap.finditer(s):
-                            cand_name = _normalize_person_name((m.group(1) or "").strip())
-                            if _validate_candidate("who", cand_name):
-                                candidates.append({
-                                    "type": "who",
-                                    "candidate": cand_name,
-                                    "score": 9.1 + (1.8 * _keyword_overlap_score(sl)),
-                                    "sentence": s,
-                                    "chunk_idx": chunk_idx,
-                                })
-
-                found_names: List[Tuple[str, float]] = []
-                for m in verb_person_re.finditer(s):
-                    found_names.append((_normalize_person_name(m.group(1).strip()), 2.6))
-                for m in passive_person_re.finditer(s):
-                    found_names.append((_normalize_person_name(m.group(1).strip()), 2.4))
-                for m in father_re.finditer(s):
-                    found_names.append((_normalize_person_name(m.group(1).strip()), 2.3))
-                if not found_names:
-                    for m in person_name_re.finditer(s):
-                        n = _normalize_person_name(m.group(1).strip())
-                        if len(n.split()) >= 2:
-                            found_names.append((n, 0.7))
-
-                subj_hits = _subject_hit_count(sl)
-                if subject_tokens and subj_hits == 0 and overlap < 0.15:
-                    continue
-                if founder_query:
-                    has_founder_signal = bool(re.search(r"\b(founder\s+of|father\s+of|considered\s+the\s+founder)\b", sl))
+                    has_founder_signal = bool(re.search(r"\b(founder\s+of|considered\s+the\s+founder)\b", sl))
                     if not has_founder_signal:
                         continue
                     if re.search(r"\bstudent\s+of\b", sl):
@@ -8378,44 +7732,9 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
                 if requires_attribution_verb and verb_hits == 0 and not re.search(r"\bfather\s+of\b", sl):
                     continue
 
-                for name, pattern_score in found_names:
-                    if not _validate_candidate("who", name):
-                        continue
-                    score = pattern_score + (2.2 * overlap) + completeness_bonus + clarity_bonus + (0.9 * float(subj_hits))
-                    if verb_tokens:
-                        score += 0.6 * float(verb_hits)
-                    if "father of psychology" in q_low:
-                        if "father of psychology" in sl:
-                            score += 2.2
-                        if "sport psychology" in sl:
-                            score -= 3.0
-                        if not re.search(r"\b(wundt|father\s+of\s+psychology|first\s+psychological\s+laboratory|foundations\s+of\s+psychology)\b", sl):
-                            score -= 1.3
-                    if re.search(r"\b(established|proposed|developed|founded|introduced|father\s+of)\b", sl):
-                        score += 1.1
-                    candidates.append({
-                        "type": "who",
-                        "candidate": name,
-                        "score": float(score),
-                        "sentence": s,
-                        "chunk_idx": chunk_idx,
-                    })
-
             if fact_type in {"when", "who_when"}:
                 subj_hits = _subject_hit_count(sl)
-                if subject_tokens and subj_hits == 0:
-                    continue
                 verb_hits = _verb_hit_count(sl)
-                if subject_re and subject_re.search(sl):
-                    for m in re.finditer(r"\b(1[5-9]\d{2}|20\d{2})\b", s):
-                        y = m.group(1)
-                        candidates.append({
-                            "type": "when",
-                            "candidate": y,
-                            "score": 6.8 + (1.4 * float(subj_hits)) + (0.8 * float(verb_hits)),
-                            "sentence": s,
-                            "chunk_idx": chunk_idx,
-                        })
                 years = [m.group(1) for m in year_re.finditer(s)]
                 dates = [m.group(1) for m in date_re.finditer(s)]
                 for y in years:
@@ -8424,18 +7743,7 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
                     if re.search(r"\b\d{4}\s*[-–]\s*\d{4}\b", s) or re.search(r"\(\s*\d{4}\s*[-–]", s):
                         continue
                     score = 2.0 + (2.0 * overlap) + completeness_bonus + clarity_bonus + (1.1 * float(subj_hits))
-                    if verb_tokens:
-                        score += 0.8 * float(verb_hits)
-                    if is_established_year_query:
-                        if re.search(r"\b(first\s+psy\s*chological\s+laboratory|foundations\s+of\s+psychology|wilhelm\s+wundt)\b", sl):
-                            score += 4.5
-                        if re.search(r"\b(division\s*38|health\s+psychology|sport\s+psychology\s+laboratory)\b", sl):
-                            score -= 3.8
-                    if is_behaviorism_query:
-                        if re.search(r"\b(founder\s+of\s+the\s+behavioristic\s+school|\d{4}\)\s*:\s*the\s+founder)\b", sl):
-                            score -= 3.5
-                        if re.search(r"\b(watson|behaviorism\s+emerged|emergence\s+of\s+behaviorism|in\s+1913)\b", sl):
-                            score += 2.4
+                    score += 0.8 * float(verb_hits)
                     if "emerge" in q_low:
                         if re.search(r"\b(emerge|emerged|emergence|began|started)\b", sl):
                             score += 1.8
@@ -8631,12 +7939,13 @@ def _query_requires_structure(query_text: str) -> bool:
     q = (query_text or "").strip().lower()
     if not q:
         return False
-    structure_terms = (
-        "chapter", "section", "list", "topics", "table of contents", "contents",
-        "unit", "units", "module", "modules", "lesson", "lessons",
-        "steps", "phases", "levels", "types", "advantages", "disadvantages", "functions", "process",
-    )
-    return any(term in q for term in structure_terms)
+    if re.search(r"\blist\b", q):
+        return True
+    if re.match(r"^\s*(?:what|which)\s+are\b", q):
+        return True
+    if re.search(r"\b(?:chapter|section|unit|module|lesson|table of contents|contents|topics)\b", q):
+        return True
+    return False
 
 
 def _is_overview_query(query_text: str) -> bool:
@@ -8688,16 +7997,16 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
     query_core_vocab = {
         "what", "who", "define", "tell", "about", "explain", "overview", "summary",
         "chapter", "section", "list", "compare", "difference", "between", "process",
-        "steps", "phases", "levels", "types", "advantages", "disadvantages", "principles",
+        "principles",
         "management",
-        "general", "meaning", "definition", "introduced", "known", "father",
-        "when", "year", "emerge", "emerged", "behaviorism", "watson",
+        "general", "meaning", "definition", "introduced", "known", 
+        "when", "year", "emerge", "emerged",
         "abc", "rebt", "ellis",
     }
 
     preserve_short_terms = {
         "abc", "rebt", "cbt", "dbt", "ocd", "ptsd", "adhd", "ssri",
-        "watson", "ellis", "wundt", "emerge", "emerged",
+        "ellis", "emerge", "emerged",
     }
 
     def _edit_distance_leq(word_a: str, word_b: str, cap: int = 2) -> int:
@@ -8841,9 +8150,7 @@ def _normalize_definition_query_before_retrieval(query_text: str) -> tuple[str, 
         corrected_entity = re.sub(r"\s+", " ", str(corrected_entity or "").strip())
         if not corrected_entity:
             corrected_entity = entity_l
-        concept_aliases = {
-            "bureaucracy": "bureaucratic management",
-        }
+        concept_aliases = {}
         corrected_entity = concept_aliases.get(corrected_entity, corrected_entity)
 
         normalized_query = f"what is {corrected_entity}".strip()
@@ -8869,9 +8176,7 @@ def _normalize_definition_query_before_retrieval(query_text: str) -> tuple[str, 
     corrected_entity = re.sub(r"\s+", " ", str(corrected_entity or "").strip())
     if not corrected_entity:
         corrected_entity = entity_l
-    concept_aliases = {
-        "bureaucracy": "bureaucratic management",
-    }
+    concept_aliases = {}
     corrected_entity = concept_aliases.get(corrected_entity, corrected_entity)
 
     normalized_query = f"{starter} {corrected_entity}".strip()
@@ -9119,9 +8424,9 @@ def _is_list_or_process_query(query_text: str) -> bool:
         return False
     if _is_targeted_list_question(q):
         return True
-    if re.search(r"\bwhat\s+happens\s+in\b", q):
+    if re.match(r"^\s*how\b", q):
         return True
-    return bool(re.search(r"\b(steps?|advantages?|disadvantages?|functions?|process|processes|phases?|levels?|types?|list|stages?)\b", q))
+    return False
 
 def _is_compare_query(query_text: str) -> bool:
     q = (query_text or "").strip().lower()
@@ -9204,47 +8509,7 @@ def _is_feature_only_definition_sentence(sentence: str) -> bool:
 
 
 def _concept_specific_signal_terms(entity_l: str) -> List[str]:
-    ent = re.sub(r"\s+", " ", str(entity_l or "").strip().lower())
-    if not ent:
-        return []
-    if "scientific management" in ent:
-        return [
-            "scientific principles",
-            "scientific",
-            "science",
-            "efficiency",
-            "standardization",
-            "standards",
-            "best way",
-            "work methods",
-            "work",
-            "planning work",
-            "planning",
-            "time study",
-            "method study",
-            "trial and error",
-        ]
-    if "bureaucracy" in ent or "bureaucratic management" in ent:
-        return [
-            "hierarchy",
-            "authority",
-            "rules",
-            "division of labor",
-            "division of work",
-            "technical competence",
-            "impersonality",
-        ]
-    if "administrative management" in ent:
-        return [
-            "administration",
-            "managerial functions",
-            "organizational administration",
-            "planning",
-            "organizing",
-            "organising",
-            "coordinating",
-            "controlling",
-        ]
+    return []
     return []
 
 
@@ -9294,7 +8559,7 @@ def _is_over_generic_definition_template(sentence: str, entity_l: str) -> bool:
     return True
 
 
-def _score_concept_definition_sentence(sentence: str, entity_l: str, entity_tokens: List[str]) -> int:
+def _s_definition_sentence(sentence: str, entity_l: str, entity_tokens: List[str]) -> int:
     s = re.sub(r"\s+", " ", str(sentence or "")).strip()
     if not s:
         return -99
@@ -9346,9 +8611,6 @@ def _score_concept_definition_sentence(sentence: str, entity_l: str, entity_toke
     if re.search(r"\b(involves|focuses on|aims to|includes|consists of|characterized by|grew\s+out\s+of)\b", low):
         score += 2
 
-    if entity_l == "classical approach" and re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", low):
-        score += 3
-
     specific_signal_count = _count_concept_specific_signals(s, entity_l)
 
     if not concept_clear and specific_signal_count < 2:
@@ -9390,7 +8652,7 @@ def _score_concept_definition_sentence(sentence: str, entity_l: str, entity_toke
     if re.match(r"^\s*(he|she|they|it|this)\b", low):
         score -= 8
 
-    if re.search(r"\b(father\s+of|known\s+as\s+the\s+father\s+of|born|biography|worked\s+as)\b", low):
+    if re.search(r"\b(known\s+as\s+the\s+born|biography|worked\s+as)\b", low):
         score -= 10
 
     rubric_score = 0
@@ -9427,84 +8689,60 @@ def _extract_best_scored_concept_sentence_from_docs(query_text: str, docs: list[
     q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
     if not (q.startswith("what is") or q.startswith("define")):
         return None
+
     has_entity, entity = _extract_entity_from_definition_query(query_text)
     entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower())
     if not has_entity or not entity_l:
         return None
+
     entity_tokens = [
         t for t in re.findall(r"[a-z0-9]{2,}", entity_l)
-        if t not in {"the", "a", "an", "of", "and", "in", "to"}
+        if t not in {"the", "a", "an", "of", "and", "in", "to", "is", "are"}
     ]
-    reject_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape|table|figure|isbn|contents?)\b", flags=re.IGNORECASE)
-    strict_definition_verb_re = re.compile(r"\b(?:is|refers\s+to|means|defined\s+as|includes|involves|consists\s+of|characterized\s+by|focuses\s+on|focused\s+on|focused\s+upon|grew\s+out\s+of)\b", flags=re.IGNORECASE)
-    concept_person_name_re = re.compile(
-        r"\b(?:taylor|fayol|weber|drucker|maslow|mcgregor|mintzberg|barnard|gulick|urwick|gantt|gilbreth|ford|emerson|simon|mayo)\b",
+
+    reject_re = re.compile(
+        r"\b(?:criticism|criticisms|limitations?|drawbacks?|table|figure|isbn|contents?)\b",
         flags=re.IGNORECASE,
     )
-    concept_bio_signal_re = re.compile(
-        r"\b(?:he|she|his|her|who|father\s+of|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b",
+    definition_verb_re = re.compile(
+        r"\b(?:is|refers\s+to|means|defined\s+as|includes|involves|consists\s+of|characterized\s+by|focuses\s+on)\b",
         flags=re.IGNORECASE,
     )
 
     best: Tuple[float, str] | None = None
-    aspect_terms = [
-        "labor division", "division of work", "hierarchy", "authority", "responsibility",
-        "rules", "procedures", "specialization", "specialisation", "coordination", "formal structure",
-    ]
-    collected_aspects: List[str] = []
     for d in (docs or [])[:max(1, min(5, int(max_docs)))]:
         src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
         if not src:
             continue
-        for s in [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", src) if p.strip()][:40]:
-            s = re.sub(r",\s*in\s+the\s+words\s+of\s+[^,]{1,120},\s*", " ", s, flags=re.IGNORECASE)
-            s = re.sub(r'\b([A-Za-z][A-Za-z0-9\- ]{2,90})\s*["“”]\s*(is|refers\s+to|means|defined\s+as|is\s+defined\s+as|is\s+considered)\b', r'\1 \2', s, flags=re.IGNORECASE)
-            s = re.sub(r"\s+", " ", s).strip()
+
+        for s in [x.strip() for x in re.split(r"(?<=[.!?])\s+|\n+", src) if x.strip()][:8]:
             low = s.lower()
             if reject_re.search(low):
                 continue
             if _looks_table_or_heading_like_chunk(s):
                 continue
-            if concept_person_name_re.search(low) or concept_bio_signal_re.search(low):
-                continue
             if defines_other_concept(low, entity_l):
                 continue
-            if not strict_definition_verb_re.search(low):
-                continue
-            if re.search(r"[•ò]\s*[A-Za-z]", s):
+            if not definition_verb_re.search(low):
                 continue
 
             token_hits = sum(1 for t in entity_tokens if re.search(rf"\b{re.escape(t)}\b", low))
-            root_hits = 0
-            for t in entity_tokens:
-                if len(t) >= 6 and re.search(rf"\b{re.escape(t[:6])}[a-z]*\b", low):
-                    root_hits += 1
-            if token_hits > 0 or root_hits > 0:
-                for term in aspect_terms:
-                    if re.search(rf"\b{re.escape(term)}\b", low) and term not in collected_aspects:
-                        collected_aspects.append(term)
+            if token_hits < max(1, min(2, len(entity_tokens))):
+                continue
 
-            if _is_feature_only_definition_sentence(s):
+            score = float(_s_definition_sentence(s, entity_l, entity_tokens))
+            if score <= 0:
                 continue
-            if _is_over_generic_definition_template(s, entity_l):
-                continue
-            quality = _score_concept_definition_sentence(s, entity_l, entity_tokens)
-            if quality <= 0:
-                continue
-            if not _has_required_concept_specific_signal(s, entity_l):
-                continue
-            score = float(quality)
-            if re.search(r"\b(is|refers to|defined as|means)\b", low):
+            if re.search(rf"\b{re.escape(entity_l)}\b", re.sub(r"[^a-z0-9 ]+", " ", low)):
                 score += 1.0
+
+            cleaned = re.sub(r"\s+", " ", s).strip()
             if best is None or score > best[0]:
-                best = (score, re.sub(r"\s+", " ", s).strip())
+                best = (score, cleaned)
 
     if not best:
-        if len(collected_aspects) >= 2:
-            concept_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l))
-            a1, a2 = collected_aspects[0], collected_aspects[1]
-            return f"{concept_title} refers to an organizational concept that includes {a1} and {a2}."
         return None
+
     sentence = best[1]
     if not re.search(r"[.!?]$", sentence):
         sentence += "."
@@ -9520,7 +8758,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
     is_who_query = q.startswith("who is") or q.startswith("who was") or q.startswith("who introduced")
     is_who_identity_query = q.startswith("who is") or q.startswith("who was")
     is_concept_query = q.startswith("what is") or q.startswith("define")
-    is_person_attribution_query = bool(re.match(r"^who\s+is\s+considered\s+the\s+father\s+of\b", q)) or q.startswith("who introduced")
+    is_person_attribution_query = q.startswith("who introduced") or q.startswith("who developed")
 
     has_entity, entity = _extract_entity_from_definition_query(query_text)
     entity_l = (entity or "").strip().lower()
@@ -9591,9 +8829,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             return True
         if re.search(r"\b(one\s+of\s+the\s+components?|listed\s+with|associating\s+model)\b", low):
             return True
-        if ("psychology is the scientific study of behavior and mental processes" in low) and (not str(entity_l or "").startswith("psychology")):
-            return True
-        if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", low):
+        if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", low):
             return True
         if re.search(r"\b(?:table|figure)\b", low):
             return True
@@ -9687,12 +8923,12 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
         definition_verbs = re.compile(r"\b(is|was|refers to|can be defined as|defined as|known as|introduced|means|consists of|includes|involves|characterized by|grew out of)\b")
         concept_definition_verbs = re.compile(r"\b(is\s+defined\s+as|refers\s+to|means|is\s+considered|is|includes|involves|consists\s+of|characterized\s+by|grew\s+out\s+of)\b", flags=re.IGNORECASE)
         concept_explanatory_verbs = re.compile(r"\b(focuses\s+on|involves|aims\s+to|uses|applies)\b", flags=re.IGNORECASE)
-        attribution_verbs = re.compile(r"\b(father of|introduced|developed|known as)\b")
-        who_definition_verbs = re.compile(r"\b(is|was|known as|father of|introduced|developed)\b")
+        attribution_verbs = re.compile(r"\b(introduced|developed|known as)\b")
+        who_definition_verbs = re.compile(r"\b(is|was|known as|introduced|developed)\b")
         # PATCH 2: action verbs for entity query fallback
         who_action_verbs = re.compile(r"\b(said|proposed|described|developed|argued|believed|established|founded|formulated|advocated|contributed|emphasized|suggested|coined)\b")
         concept_person_attribution_re = re.compile(
-            r"\b(?:father of|introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b",
+            r"\b(?:introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b",
             flags=re.IGNORECASE,
         )
         hard_def_verbs_re = re.compile(r"\b(?:is|refers to|defined as)\b", flags=re.IGNORECASE)
@@ -9704,7 +8940,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             flags=re.IGNORECASE,
         )
         concept_person_bio_re = re.compile(
-            r"\b(?:he|she|his|her|who|father\s+of|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b",
+            r"\b(?:he|she|his|her|who|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b",
             flags=re.IGNORECASE,
         )
         concept_example_or_list_re = re.compile(
@@ -9746,7 +8982,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 compact_phrase_hit = bool(entity_compact and entity_compact in sentence_compact)
                 classical_alias_hit = bool(
                     is_concept_query
-                    and entity_l == "classical approach"
+                    and False
                     and re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", low)
                 )
                 phrase_hit = full_entity_hit or compact_phrase_hit or classical_alias_hit
@@ -9818,7 +9054,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     if _is_over_generic_definition_template(s, entity_l):
                         continue
 
-                    concept_quality_score = _score_concept_definition_sentence(s, entity_l, entity_tokens)
+                    concept_quality_score = _s_definition_sentence(s, entity_l, entity_tokens)
                     if concept_quality_score <= 0:
                         continue
 
@@ -9860,7 +9096,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 concept_ok = _concept_in_sentence(low, strict_mode=strict_zone)
                 has_def_verb = bool(definition_verbs.search(low))
 
-                bio_fragment = bool(re.search(r"\b(he|she|his|her)\b", low)) or bool(re.search(r"\b(born|worked as|engineer|biography|father of)\b", low))
+                bio_fragment = bool(re.search(r"\b(he|she|his|her)\b", low)) or bool(re.search(r"\b(born|worked as|engineer|biography)\b", low))
                 alias_style = bool(re.search(r"\b(you can also call it|also called|also known as)\b", low))
                 generic_management_without_phrase = is_concept_query and ("management" in low) and (not phrase_hit)
 
@@ -9918,7 +9154,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                         score += 1.8
                     elif re.search(rf"\b{re.escape(entity_l)}\b\s+(?:focuses\s+on|involves|aims\s+to|uses|applies)\b", low):
                         score += 0.8
-                    concept_quality_score = _score_concept_definition_sentence(s, entity_l, entity_tokens)
+                    concept_quality_score = _s_definition_sentence(s, entity_l, entity_tokens)
                     if concept_quality_score <= 0:
                         continue
                     local_concept_candidates.append({
@@ -10130,15 +9366,15 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     continue
                 if re.search(r"\b(table\s*\d+|isbn|https?://|unit\s+\d+)\b", low):
                     continue
-                if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", low):
+                if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", low):
                     continue
-                if re.search(r"\b(?:he|she|his|her|who|father\s+of|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b", low):
+                if re.search(r"\b(?:he|she|his|her|who|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b", low):
                     continue
                 if re.search(r"\b(?:taylor|fayol|weber|drucker|maslow|mcgregor|mintzberg|barnard|gulick|urwick|gantt|gilbreth|ford|emerson|simon|mayo)\b", low):
                     continue
                 if re.search(r"^\s*[A-Z][A-Za-z0-9\s\-]{3,90}\s*:\s*(?:[-•*]|\d+[.)])\s+", clean):
                     continue
-                if _score_concept_definition_sentence(clean, entity_l, concept_tokens) <= 0:
+                if _s_definition_sentence(clean, entity_l, concept_tokens) <= 0:
                     continue
                 if not _has_required_concept_specific_signal(clean, entity_l):
                     continue
@@ -10252,7 +9488,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 if _looks_table_or_heading_like_chunk(p):
                     continue
                 low = p.lower()
-                if re.search(r"\b(?:he|she|his|her|father\s+of|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b", low):
+                if re.search(r"\b(?:he|she|his|her|born|known\s+as|was\s+a|said|proposed|developed|introduced)\b", low):
                     continue
                 for sig in signals:
                     sig_re = re.escape(sig).replace("\\ ", r"\\s+")
@@ -10342,12 +9578,8 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                         continue
                     if any(t in role_tokens for t in mapped_name_tokens):
                         continue
-                    if "father of" in q:
-                        return f"{mapped_name} is considered the father of {concept_title}."
-                    if q.startswith("who introduced") or q.startswith("who is associated with"):
-                        return f"{mapped_name} is associated with {concept_title}."
-                    if allow_concept_fallback and is_concept_query:
-                        return f"{entity_title} is associated with {mapped_name}."
+                    if q.startswith("who introduced"):
+                        return f"{mapped_name} introduced {concept_title}."
 
             # Same-line loose fallback: concept tokens and person name in one line/chunk only.
             person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
@@ -10383,10 +9615,8 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 if not mapped_name:
                     continue
                 concept_title = _title_case_entity(entity_l) or entity
-                if q.startswith("who introduced") or q.startswith("who is associated with"):
-                    return f"{mapped_name} is associated with {concept_title}."
-                if allow_concept_fallback and is_concept_query:
-                    return f"{concept_title} is associated with {mapped_name}."
+                if q.startswith("who introduced"):
+                    return f"{mapped_name} introduced {concept_title}."
             # FINAL FIX: no prose inference for attribution queries; same-line mapping only.
         return None
 
@@ -10482,7 +9712,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
         best_sentence = None
         best_score = -1.0
         concept_person_attribution_re = re.compile(
-            r"\b(?:father of|introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with|known\s+as\s+the\s+father\s+of)\b",
+            r"\b(?:introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b",
             flags=re.IGNORECASE,
         )
         concept_valid_verb_re = re.compile(
@@ -10499,7 +9729,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     continue
                 if _looks_table_or_heading_like_chunk(p):
                     continue
-                if _score_concept_definition_sentence(p, entity_l, entity_tokens) <= 0:
+                if _s_definition_sentence(p, entity_l, entity_tokens) <= 0:
                     continue
                 low = p.lower()
                 if concept_person_attribution_re.search(low):
@@ -10568,7 +9798,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     continue
                 if re.search(r"\b(?:table|figure|classification|contributors?|contents?)\b", low):
                     continue
-                if _score_concept_definition_sentence(p, entity_l, entity_tokens) < 0:
+                if _s_definition_sentence(p, entity_l, entity_tokens) < 0:
                     continue
                 if not _has_required_concept_specific_signal(p, entity_l):
                     continue
@@ -10577,7 +9807,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     sent += "."
                 return sent
 
-    if is_concept_query and has_entity and entity_l == "classical approach":
+    if False:
         strict_classical_re = re.compile(
             r"\bclassical\s+management\s+theory\b.{0,120}\bgrew\s+out\s+of\b.{0,180}\b(?:industrial\s+revolution|classical\s+method)\b",
             flags=re.IGNORECASE,
@@ -10595,7 +9825,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 if strict_classical_re.search(low):
                     clean = re.sub(r"\s+", " ", p).strip().strip('"“”')
                     clean = clean.rstrip(".")
-                    return f"Classical Approach refers to {clean}."
+                    return None
             flat_low = re.sub(r"\s+", " ", txt.lower())
             if (
                 re.search(r"\bclassical\s+management\s+theory\b", flat_low)
@@ -10605,7 +9835,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     or re.search(r"\bclassical\s+method\b", flat_low)
                 )
             ):
-                return "Classical Approach refers to classical management theory that grew out of the industrial revolution and the classical method."
+                return None
 
     if dense_answer and (not _is_weak_definition_answer(dense_answer)) and _passes_fast_path_definition_validation(query_text, dense_answer):
         return dense_answer
@@ -10642,11 +9872,10 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 return f"{person_cell} is associated with {concept_title}."
 
     def _extract_related_concept_sentence_from_docs(source_docs: list[dict]) -> str | None:
-        if not (is_concept_query and has_entity and entity_l):
-            return None
+        return None
 
         relation_kw_re = re.compile(
-            r"\b(?:includes?|including|consists\s+of|types?|classification|approach)\b",
+            r"\b(?:includes?|including|consists\s+of|classification|approach)\b",
             flags=re.IGNORECASE,
         )
         split_item_re = re.compile(r"\s*(?:,|;|\band\b|\bor\b)\s*", flags=re.IGNORECASE)
@@ -10724,7 +9953,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
 
                 # Ensure same-sentence related concept list exists around relation cue.
                 right = low
-                km = re.search(r"\b(?:includes?|including|consists\s+of|types?|classification|approach)\b", low)
+                km = re.search(r"\b(?:includes?|including|consists\s+of|classification|approach)\b", low)
                 if km:
                     right = low[km.end():]
                 rel_items = [
@@ -10745,7 +9974,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
 
                 parent = ""
                 pm = re.search(
-                    r"\b([a-z][a-z0-9\s\-]{2,90}?)\s+(?:includes?|including|consists\s+of|types?|classification|approach)\b",
+                    r"\b([a-z][a-z0-9\s\-]{2,90}?)\s+(?:includes?|including|consists\s+of|classification|approach)\b",
                     low,
                     flags=re.IGNORECASE,
                 )
@@ -10772,12 +10001,9 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                         continue
                     entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
                     contributor = _find_contributor_for_entity(txt)
-                    has_classical_parent = bool(re.search(r"\bclassical\s+app(?:ro|ra)ach\b", txt.lower()))
                     logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, s[:220])
-                    if contributor and has_classical_parent:
-                        return f"{entity_title} is presented in the document as one of the management thoughts under the classical approach and is associated with {contributor}."
                     if contributor:
-                        return f"{entity_title} is presented in the document as one of the management thoughts and is associated with {contributor}."
+                        return f"{entity_title} is listed with {other_comp} and mentions {contributor}."
                     return f"{entity_title} is one of the components listed with {other_comp}."
                 if len(re.findall(r"[a-z0-9]{2,}", parent)) < 2:
                     continue
@@ -10785,10 +10011,8 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
                 contributor = _find_contributor_for_entity(txt)
                 logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, s[:220])
-                if contributor and re.search(r"\bclassical\s+app(?:ro|ra)ach\b", parent):
-                    return f"{entity_title} is presented in the document as one of the management thoughts under the {parent} and is associated with {contributor}."
                 if contributor:
-                    return f"{entity_title} is presented in the document as one of the management thoughts under the {parent} and is associated with {contributor}."
+                    return f"{entity_title} is one of the components of the {parent} and mentions {contributor}."
                 return f"{entity_title} is one of the components of the {parent}."
 
             low_txt = re.sub(r"\s+", " ", txt.lower())
@@ -10805,12 +10029,9 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
                     other = next((t for t in found_terms if t != entity_l), "related concepts")
                     contributor = _find_contributor_for_entity(txt)
-                    has_classical_parent = bool(re.search(r"\bclassical\s+app(?:ro|ra)ach\b", low_txt))
                     logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, (txt or "")[:220].replace("\n", " "))
-                    if contributor and has_classical_parent:
-                        return f"{entity_title} is presented in the document as one of the management thoughts under the classical approach and is associated with {contributor}."
                     if contributor:
-                        return f"{entity_title} is presented in the document as one of the management thoughts and is associated with {contributor}."
+                        return f"{entity_title} is listed with {other} and mentions {contributor}."
                     return f"{entity_title} is one of the components listed with {other}."
 
         return None
@@ -11017,9 +10238,9 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
             return None
         if re.match(r"^\d+(?:\.\d+)+", item):
             return None
-        if re.match(r"^(advantages?|disadvantages?|steps?|phases?|stages?|process)\b", item, flags=re.IGNORECASE) and len(item.split()) <= 6:
+        if re.match(r"^[A-Za-z\s]{2,20}$", item, flags=re.IGNORECASE) and len(item.split()) <= 2:
             return None
-        if re.search(r"\b(introduction\s+concepts?|types?\s+of\s+plans?)\b", item, flags=re.IGNORECASE):
+        if re.search(r"\b(introduction\s+concepts?|\w+\s+of\s+\w+)\b", item, flags=re.IGNORECASE):
             return None
         if is_advantages_query and re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|disciplinarian|time\s+and\s+cost\s+clerk|table|figure)\b", item, flags=re.IGNORECASE):
             return None
@@ -11030,11 +10251,11 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
     def _list_topic_gate(text: str) -> bool:
         low = (text or "").lower()
         if "advantage" in ql:
-            if re.search(r"\bdisadvantages?|criticisms?|limitations?|drawbacks?\b", low):
+            if re.search(r"\bcriticisms?|limitations?|drawbacks?\b", low):
                 return False
-            return bool(re.search(r"\badvantages?|benefits?|merits?|pros|scientific\s+management|efficien|productiv\b", low))
+            return bool(re.search(r"\bbenefits?|merits?|pros|scientific\s+management|efficien|productiv\b", low))
         if ("planning" in ql) and ("process" in ql):
-            return bool(re.search(r"\bplanning\b", low) and re.search(r"\bprocess|steps?|phases?|stages?|objectives?|premises?|alternatives?\b", low))
+            return bool(re.search(r"\bplanning\b", low) and re.search(r"\bprocess|objectives?|premises?|alternatives?\b", low))
         if "principle" in ql:
             return bool(re.search(r"\bprinciples?\b", low))
         return True
@@ -11127,7 +10348,7 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
         if len(final_items) >= 3:
             return "\n".join(f"- {it}" for it in final_items)
 
-    # FINAL TUNING: relaxed advantages fallback from keyword-grounded prose fragments.
+    # FINAL TUNING: relaxed evidence fallback from prose fragments.
     if is_advantages_query:
         keyword_items: List[str] = []
         keyword_seen: set[str] = set()
@@ -11163,7 +10384,7 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
                 return "\n".join(f"- {it}" for it in final_items)
 
     # Inline numbered list extraction: handles "1. Item one. 2. Item two. 3. Item three."
-    # appearing as continuous text within a paragraph or after a heading like "Table 2.1: Steps..."
+    # appearing as continuous text within a paragraph or after a table/figure heading.
     inline_items: List[str] = []
     for d in docs[:3]:
         src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
@@ -11201,9 +10422,8 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
 
     list_mode = bool(
         _is_targeted_list_question(q)
-        or re.search(r"\b(?:list|tell me about|what are|principles?)\b", q)
-        or re.search(r"\b(?:steps?|phases?|stages?|components?|goals?|parts?|levels?|types?|functions?|elements?|process|processes|advantages?|disadvantages?)\b", q)
-        or re.search(r"\b[a-z]{4,}s\b", q)
+        or re.match(r"^\s*(?:what|which)\s+are\b", q)
+        or (bool(re.search(r"\b(?:what|which|name|give|mention|identify)\b", q)) and bool(re.search(r"\b[a-z]{4,}s\b", q)))
     )
     if not list_mode:
         return None
@@ -11214,7 +10434,7 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     if not raw.strip():
         return None
 
-    bullet_num_re = re.compile(r"^\s*(?:[-•*]|\d+[.)])\s*(.+)$")
+    bullet_num_re = re.compile(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*(.+)$", re.IGNORECASE)
     stopwords = {
         "the", "a", "an", "of", "and", "or", "to", "in", "on", "for", "with", "by", "from", "at",
         "is", "are", "was", "were", "be", "been", "being", "this", "that", "these", "those",
@@ -11237,7 +10457,7 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         return False
 
     def _clean_item(s: str) -> str:
-        x = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", s or "")
+        x = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*", "", s or "", flags=re.IGNORECASE)
         x = re.sub(r"^[\W_]+|[\W_]+$", "", x)
         x = re.sub(r"\s+", " ", x).strip(" ,;:-")
         return x
@@ -11266,6 +10486,8 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
 
     cleaned: List[str] = []
     seen: Set[str] = set()
+    # Sentence-fragment filter: items with verbs + high word count are not list labels
+    _sent_verb_re = re.compile(r"\b(?:is|are|was|were|will|not|should|can|may|would|could|must|shall|do|does|did)\b", re.IGNORECASE)
     for cand in raw_candidates:
         split_parts = [cand]
         if principles_query and re.search(r"\band\b", cand, flags=re.IGNORECASE):
@@ -11291,6 +10513,16 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 # Keep compact, meaningful list labels (e.g., Planning, Organizing).
                 if not all(len(w) >= 4 for w in words):
                     continue
+            # Reject sentence fragments: 5+ words with common verbs are not list items
+            if wc >= 5 and _sent_verb_re.search(item):
+                continue
+            # Reject mid-sentence fragments (start with lowercase, suggesting they were
+            # split mid-sentence rather than being actual list labels)
+            if wc >= 3 and item[0].islower() and not item[0].isdigit():
+                continue
+            # Reject multi-sentence items (contain '. ' mid-text)
+            if ". " in item and len(item) > 20:
+                continue
             low_words = [w.lower() for w in words]
             if all(w in stopwords for w in low_words):
                 continue
@@ -11300,10 +10532,190 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             seen.add(norm)
             cleaned.append(item)
 
+
     logger.info("[LIST CLEAN] before=%d after=%d", len(raw_candidates), len(cleaned))
     if len(cleaned) < 2:
         return None
     return "\n".join(f"- {it}" for it in cleaned)
+
+
+def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool = False, local_support: dict[str, float] | None = None) -> tuple[bool, str, str | None]:
+    def _is_broken_fragment(s: str) -> bool:
+        low = str(s or "").strip().lower()
+        if not low:
+            return True
+        if re.search(r"\b(?:and|or|to|of|for|with|by|in|on|at|from|because|however|therefore|thus|then)\b\s*$", low):
+            return True
+        if re.match(r"^\s*(?:and|or|to|of|for|with|by|in|on|at|from|because|however|therefore|thus|then)\b", low):
+            return True
+        return False
+
+    shaped = _sanitize_list_answer_text(query_text, answer_text)
+    if not shaped:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=sanitize_failed")
+        return (False, "sanitize_failed", None)
+
+    raw_items = [re.sub(r"^\s*[-•*]\s+", "", ln).strip() for ln in shaped.splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
+    total_items = len(raw_items)
+    if total_items < 2:
+        logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, 0, total_items, 0, 0.0, 0.0)
+        logger.info("[LIST FINAL DECISION] accepted=False reason=insufficient_items")
+        return (False, "insufficient_items", None)
+
+    cleaned_items: list[str] = []
+    rejected_items = 0
+    seen_norm: set[str] = set()
+    for item in raw_items:
+        x = re.sub(r"\s+", " ", str(item or "")).strip(" -•*\t\r\n")
+        if not x:
+            rejected_items += 1
+            continue
+        if len(x) > 200:
+            rejected_items += 1
+            continue
+        if not re.search(r"[A-Za-z]", x):
+            rejected_items += 1
+            continue
+        if _is_broken_fragment(x):
+            rejected_items += 1
+            continue
+        norm = re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
+        if not norm or norm in seen_norm:
+            rejected_items += 1
+            continue
+        seen_norm.add(norm)
+        cleaned_items.append(x)
+
+    if len(cleaned_items) < 3:
+        logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(cleaned_items), rejected_items, 0, 0.0, 0.0)
+        logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
+        return (False, "min_quality_failed", None)
+
+    q_family_v2 = _classify_query_family_v2(query_text)
+    q_context_tokens, q_focus_tokens = _split_query_context_focus_tokens(query_text, q_family_v2)
+    query_tokens = list(dict.fromkeys([t for t in (q_focus_tokens + q_context_tokens) if len(str(t or "").strip()) >= 3]))
+
+    def _item_alignment(item_text: str) -> bool:
+        low_item = item_text.lower()
+        if not query_tokens:
+            return True
+        return any(_token_match_light(low_item, tok) for tok in query_tokens)
+
+    aligned_items = [it for it in cleaned_items if _item_alignment(it)]
+    alignment_score = float(len(aligned_items)) / float(max(1, len(cleaned_items)))
+    if (len(aligned_items) < 3 or alignment_score < 0.70) and strict_fast and len(cleaned_items) >= 3:
+        aligned_items = list(cleaned_items)
+        alignment_score = max(0.70, alignment_score)
+    if len(aligned_items) < 3 or alignment_score < 0.70:
+        logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
+        logger.info("[LIST FINAL DECISION] accepted=False reason=alignment_failed")
+        return (False, "alignment_failed", None)
+
+    sentence_verb_re = re.compile(r"\b(?:is|are|was|were|has|have|had|includes?|involves?|suggests?|indicates?|means|refers\s+to|contain|contains|describe|describes)\b", re.IGNORECASE)
+    connector_re = re.compile(r"\b(?:because|therefore|however|while|whereas|which|that|who|whom|whose|although|though)\b", re.IGNORECASE)
+
+    style_counts = {"noun_phrase": 0, "fragment": 0, "sentence": 0}
+    noise_items = 0
+    for item in aligned_items:
+        low = item.lower().strip()
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+        wc = len(words)
+        has_verb = bool(sentence_verb_re.search(item))
+        has_connector = bool(connector_re.search(item))
+
+        if has_verb and (wc >= 6 or re.search(r"[.!?]$", low)):
+            style_counts["sentence"] += 1
+        elif _is_broken_fragment(item) or has_connector or item.count(",") >= 2 or ";" in item:
+            style_counts["fragment"] += 1
+        else:
+            style_counts["noun_phrase"] += 1
+
+        punctuation_only_ratio = float(len(re.findall(r"[^A-Za-z0-9\s]", item))) / float(max(1, len(item)))
+        short_words = re.findall(r"\b[a-z]{1,2}\b", low)
+        if (
+            re.search(r"https?://|www\.", low)
+            or re.search(r"(?:[bcdfghjklmnpqrstvwxyz]{6,})", low)
+            or punctuation_only_ratio > 0.25
+            or (len(short_words) >= 4 and len(short_words) >= max(4, wc - 1))
+        ):
+            noise_items += 1
+
+    structure_score = float(max(style_counts.values())) / float(max(1, len(aligned_items)))
+    structure_ok = structure_score >= 0.70
+    noise_ok = noise_items == 0
+
+    source_chunks = []
+    source_chunk_count = 0.0
+    chunk_span = 0.0
+    local_confidence = 0.0
+    local_promoted = 0.0
+    if isinstance(local_support, dict):
+        raw_chunks = local_support.get("source_chunks", [])
+        if isinstance(raw_chunks, list):
+            source_chunks = [int(c) for c in raw_chunks if isinstance(c, (int, float))]
+        source_chunk_count = float(local_support.get("source_chunk_count", 0.0) or 0.0)
+        chunk_span = float(local_support.get("chunk_span", 0.0) or 0.0)
+        local_confidence = float(local_support.get("confidence", 0.0) or 0.0)
+        local_promoted = float(local_support.get("promoted_count", 0.0) or 0.0)
+
+    same_chunk_locality = bool(source_chunk_count <= 1.0)
+    same_window_locality = bool(local_promoted >= 1.0 and local_confidence >= 0.70 and chunk_span <= 1.0)
+    locality_ok = bool(same_chunk_locality or same_window_locality)
+
+    logger.info(
+        "[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f",
+        total_items,
+        len(aligned_items),
+        max(0, total_items - len(aligned_items)),
+        int(source_chunk_count),
+        structure_score,
+        alignment_score,
+    )
+
+    if not structure_ok:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=structure_failed")
+        return (False, "structure_failed", None)
+    if not locality_ok:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=locality_failed")
+        return (False, "locality_failed", None)
+    if not noise_ok:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=ocr_noise_detected")
+        return (False, "ocr_noise_detected", None)
+    if len(aligned_items) < 3:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
+        return (False, "min_quality_failed", None)
+
+    shaped_clean = "\n".join(f"- {it}" for it in aligned_items)
+    logger.info("[LIST FINAL DECISION] accepted=True reason=ok")
+    return (True, "ok", shaped_clean)
+
+
+def _preclean_list_answer_for_assessment(answer_text: str) -> str:
+    raw = str(answer_text or "")
+    if not raw.strip():
+        return ""
+
+    def _line_broken(line: str) -> bool:
+        low = line.lower().strip()
+        if not low:
+            return True
+        if re.match(r"^\s*(?:and|or|to|of|for|with|by|in|on|at|from|because|however|therefore|thus|then)\b", low):
+            return True
+        return False
+
+    kept: list[str] = []
+    for ln in raw.splitlines():
+        s = re.sub(r"\s+", " ", str(ln or "")).strip()
+        if not s:
+            continue
+        if len(s) > 200:
+            continue
+        if not re.search(r"[A-Za-z]", s):
+            continue
+        if _line_broken(s):
+            continue
+        kept.append(s)
+    return "\n".join(kept).strip()
 
 
 def _extract_simple_overview_from_docs(docs: list[dict]) -> str | None:
@@ -11345,19 +10757,19 @@ def _extract_candidate_definition_sentence_from_docs(query_text: str, docs: list
     ]
     weak_phrases = ("he thought", "it can be said", "in this way", "before we can")
     person_indicators = ("born", "known as", "considered", "introduced", "engineer", "theorist", "manager")
-    reject_marker_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", flags=re.IGNORECASE)
+    reject_marker_re = re.compile(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", flags=re.IGNORECASE)
     heading_intro_re = re.compile(
         r"^\s*(?:introduction|overview|summary|contents?|table of contents|chapter\s+\d+|unit\s+\d+|learning objectives?|key terms?)\s*[:\-–—]?\s*$",
         flags=re.IGNORECASE,
     )
     concept_def_verb_re = re.compile(r"\b(?:is|refers to|defined as|known as)\b", flags=re.IGNORECASE)
-    attribution_verb_re = re.compile(r"\b(?:father of|introduced|developed|known as)\b", flags=re.IGNORECASE)
+    attribution_verb_re = re.compile(r"\b(?:introduced|developed|known as)\b", flags=re.IGNORECASE)
     person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b")
     continuation_starts = re.compile(r"^\s*(and|but|or|so|because|therefore|thus|also|then|while|whereas)\b", flags=re.IGNORECASE)
     q_low = (query_text or "").strip().lower()
     is_who_query = q_low.startswith("who is") or q_low.startswith("who was")
     is_concept_query = q_low.startswith("what is") or q_low.startswith("define")
-    is_person_attribution_query = bool(re.match(r"^who\s+is\s+considered\s+the\s+father\s+of\b", q_low)) or q_low.startswith("who introduced")
+    is_person_attribution_query = q_low.startswith("who introduced") or q_low.startswith("who developed")
     early_exit_threshold = 8.0
     max_sentences_per_doc = 10
 
@@ -11405,7 +10817,7 @@ def _extract_candidate_definition_sentence_from_docs(query_text: str, docs: list
                 else:
                     score -= 6.5
 
-                concept_quality_score = _score_concept_definition_sentence(s, entity_l, entity_tokens)
+                concept_quality_score = _s_definition_sentence(s, entity_l, entity_tokens)
                 if concept_quality_score <= 0:
                     continue
                 if not _has_required_concept_specific_signal(s, entity_l):
@@ -11486,7 +10898,7 @@ def _passes_fast_path_definition_validation(query_text: str, answer_sentence: st
         return False
 
     s_low = sentence.lower()
-    if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|disadvantages?|red\s+tape)\b", s_low):
+    if re.search(r"\b(?:criticism|criticisms|limitations?|drawbacks?|red\s+tape)\b", s_low):
         return False
 
     if not re.search(r"\b(is|was|refers to|defined as|means|known as|considered|introduced)\b", s_low):
@@ -11503,7 +10915,7 @@ def _passes_fast_path_definition_validation(query_text: str, answer_sentence: st
 
     q_low = (query_text or "").strip().lower()
     is_concept_query = q_low.startswith("what is") or q_low.startswith("define")
-    is_person_attribution_query = bool(re.match(r"^who\s+is\s+considered\s+the\s+father\s+of\b", q_low)) or q_low.startswith("who introduced")
+    is_person_attribution_query = q_low.startswith("who introduced") or q_low.startswith("who developed")
 
     if is_concept_query:
         if defines_other_concept(s_low, norm_entity):
@@ -11529,7 +10941,7 @@ def _passes_fast_path_definition_validation(query_text: str, answer_sentence: st
     hits = sum(1 for t in entity_tokens if re.search(rf"\b{re.escape(t)}\b", norm_sentence))
     token_grounded = hits >= max(1, min(2, len(entity_tokens)))
     if is_person_attribution_query:
-        has_attr = bool(re.search(r"\b(father of|introduced|developed|known as)\b", s_low))
+        has_attr = bool(re.search(r"\b(introduced|developed|known as)\b", s_low))
         has_person_name = bool(re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", sentence))
         return token_grounded and has_attr and has_person_name
     return token_grounded
@@ -11597,17 +11009,8 @@ def _passes_strict_definition_relevance_guard(query_text: str, answer_sentence: 
         logger.info("[STRICT DEF PREF MISS] query=%s reason=empty_norm", q_low[:120])
         return False
 
-    if norm_entity == "reinforcement":
-        bad_reinforcement_fragments = (
-            "does learn or acquire a particular behavior",
-            "does not readily demonstrate it until reinforcement is provided",
-        )
-        if any(frag in norm_sentence for frag in bad_reinforcement_fragments):
-            logger.info("[STRICT DEF PREF MISS] entity=%s reason=known_bad_reinforcement_fragment", entity_l)
-            return False
-        if re.search(r"\bpunishment\b", s_low) and not re.search(r"\breinforcement\b.*\b(strengthens|increases|following|consequence)\b|\b(strengthens|increases)\b.*\breinforcement\b", s_low):
-            logger.info("[STRICT DEF PREF MISS] entity=%s reason=reinforcement_punishment_mix", entity_l)
-            return False
+    if False:
+        return False
 
     if re.search(rf"\b{re.escape(norm_entity)}\b", norm_sentence):
         logger.info("[STRICT DEF PREF PASS] entity=%s mode=exact_phrase", entity_l)
@@ -11703,7 +11106,7 @@ def _enrich_who_identity_answer(query_text: str, docs: list[dict], base_answer: 
         last = re.escape(entity_tokens[-1])
         full_name_re = re.compile(rf"\b{first}(?:\s+[a-z]{{2,}}){{0,3}}\s+{last}\b", flags=re.IGNORECASE)
 
-    rich_marker_re = re.compile(r"\b(father of|known as|introduced|developed)\b", flags=re.IGNORECASE)
+    rich_marker_re = re.compile(r"\b(known as|introduced|developed)\b", flags=re.IGNORECASE)
     association_re = re.compile(r"\bis\s+associated\s+with\b", flags=re.IGNORECASE)
 
     for d in (docs or [])[:5]:
@@ -11746,7 +11149,7 @@ def _extract_topic_pure_overview_from_docs(query_text: str, docs: list[dict]) ->
 
     requires_principles = "principle" in q or "principles" in q
     requires_planning_process = bool(re.search(r"\bplanning\b", q) and re.search(r"\bprocess\b", q))
-    requires_advantages = "advantage" in q or "advantages" in q or "benefits" in q
+    requires_polarity = bool(re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?)\b", q))
 
     def _topic_gate(s_low: str) -> bool:
         if requires_principles:
@@ -11757,10 +11160,10 @@ def _extract_topic_pure_overview_from_docs(query_text: str, docs: list[dict]) ->
             if re.match(r"^\s*principles\s+of\s+.*\b\d{1,3}\b", s_low):
                 return False
         if requires_planning_process:
-            if not (re.search(r"\bplanning\b", s_low) and (re.search(r"\bprocess\b", s_low) or re.search(r"\bsteps?|phases?|stages?\b", s_low))):
+            if not (re.search(r"\bplanning\b", s_low) and re.search(r"\bprocess\b", s_low)):
                 return False
-        if requires_advantages:
-            if not re.search(r"\badvantages?|benefits?|merits?|pros\b", s_low):
+        if requires_polarity:
+            if not re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?|merits?)\b", s_low):
                 return False
         return True
 
@@ -11787,7 +11190,7 @@ def _extract_topic_pure_overview_from_docs(query_text: str, docs: list[dict]) ->
                 score += 1.5
             if requires_planning_process and re.search(r"\bplanning\b", low):
                 score += 1.2
-            if requires_advantages and re.search(r"\badvantages?|benefits?|merits?|pros\b", low):
+            if requires_polarity and re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?|merits?)\b", low):
                 score += 1.2
             norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
             if not norm or norm in seen:
@@ -11955,16 +11358,7 @@ def _refine_concept_definition_answer(query_text: str, docs: list[dict], answer:
             return alt_rich
 
     if re.search(r"\bone\s+of\s+the\s+components\s+listed\s+with\b", low):
-        contributor = _extract_contributor_from_docs()
-        has_classical = any(
-            re.search(r"\bclassical\s+app(?:ro|ra)ach\b", str((d or {}).get("page_content") or (d or {}).get("text") or "").lower())
-            for d in (docs or [])[:5]
-        )
-        if contributor:
-            entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or str(entity or "").strip()
-            if has_classical:
-                return f"{entity_title} is presented in the document as one of the management thoughts under the classical approach and is associated with {contributor}."
-            return f"{entity_title} is presented in the document as one of the management thoughts and is associated with {contributor}."
+        return RAG_NO_MATCH_RESPONSE
 
     if feature_label and (not contains_entity):
         alt = _extract_concept_level_from_docs() or _extract_candidate_definition_sentence_from_docs(query_text, docs or [], max_docs=3)
@@ -11981,22 +11375,10 @@ def detect_query_intent(query: str) -> str:
     q = (query or "").strip().lower()
     if _detect_fact_query_type(q):
         return "fact"
-    if _is_targeted_list_question(q):
-        return "list"
     if _is_definition_style_query(q):
         return "definition"
-    if _is_force_overview_paragraph_query(q):
-        return "general"
-    if re.search(r"\bwhat\s+happens\s+in\b", q):
+    if _is_targeted_list_question(q):
         return "list"
-    if re.search(r"\b(tell me about|explain|describe|list)\b", q):
-        return "general"
-    if re.search(r"\b(steps?|phases?|levels?|types?|disadvantages?|advantages?|functions?|principles?|process|processes|list)\b", q):
-        return "list"
-    if "difference between" in q or "compare" in q:
-        return "general"
-    if q.startswith("what is") or q.startswith("define") or q.startswith("who is") or q.startswith("who was") or q.startswith("who introduced"):
-        return "definition"
     return "general"
 
 
@@ -12004,21 +11386,15 @@ def _is_targeted_list_question(query: str) -> bool:
     q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if not q:
         return False
-    patterns = [
-        r"\blist\b",
-        r"\bwhat\s+are(?:\s+the)?\b",
-        r"\bsteps?\s+of\b",
-        r"\bcomponents?\s+of\b",
-        r"\bstages?\s+of\b",
-        r"\bgoals?\s+of\b",
-        r"\bparts?\s+of\b",
-        r"\bphases?\s+of\b",
-        r"\bneeds?\s+must\s+be\s+met\s+before\b",
-        r"\b(?:steps?|components?|stages?|goals?|parts?|phases?)\b",
-    ]
-    if any(re.search(p, q) for p in patterns):
+    if re.search(r"\blist\b", q):
         return True
-    if re.search(r"\bdescribe\b", q) and re.search(r"\b(?:stages?|steps?|components?|goals?|parts?|phases?)\b", q):
+    if re.match(r"^\s*(?:what|which)\s+are\b", q):
+        return True
+    tokens = re.findall(r"[a-z]{3,}", q)
+    plural_tokens = [tok for tok in tokens if tok.endswith("s") and tok not in {"this", "was", "is", "does"}]
+    if re.match(r"^\s*(?:name|give|mention|identify)\b", q) and plural_tokens:
+        return True
+    if re.search(r"\b(?:what|which)\b", q) and plural_tokens and (" and " in q or " or " in q or q.endswith("?")):
         return True
     return False
 
@@ -12031,52 +11407,12 @@ def _classify_query_family(query: str) -> str:
     if _detect_fact_query_type(q):
         return "fact_entity"
 
-    if _is_targeted_list_question(q):
-        return "list_structure"
-
     if _is_definition_style_query(q):
         return "definition_entity"
 
-    if _is_targeted_list_question(q) or re.search(r"\b(steps?|phases?|levels?|functions?|types?|advantages?|disadvantages?|principles?|process|processes|list)\b", q):
+    if _is_targeted_list_question(q):
         return "list_structure"
-
-    if _is_force_overview_paragraph_query(q):
-        return "overview_chapter_compare"
-
-    if re.search(r"\bwhat\s+happens\s+in\b", q):
-        return "list_structure"
-
-    if re.search(r"\b(tell me about|explain|describe)\b", q):
-        return "overview_chapter_compare"
-
-    if "difference between" in q or "compare" in q:
-        return "overview_chapter_compare"
-
-    if (
-        "chapter" in q
-        or "main sections" in q
-        or "what does this document talk about" in q
-        or "document talk about" in q
-        or "discussed in" in q
-        or "topics are covered" in q
-        or "topics covered" in q
-        or "overview" in q
-    ):
-        return "overview_chapter_compare"
-
-    if re.search(
-        r"\b(machine\s+learning|artificial\s+intelligence|\bai\b|blockchain|cyber\s*security|elon\s+musk|bitcoin|ethereum|neural\s+network)\b",
-        q,
-    ):
-        return "out_of_scope_candidate"
-
-    if re.search(
-        r"^(what\s+is|define|who\s+is|who\s+was|who\s+introduced|who\s+is\s+considered)",
-        q,
-    ):
-        return "definition_entity"
-
-    return "general"
+    return "overview_chapter_compare"
 
 
 def _classify_query_family_v2(query: str) -> str:
@@ -12087,32 +11423,11 @@ def _classify_query_family_v2(query: str) -> str:
     if _detect_fact_query_type(q):
         return "fact_entity"
 
-    if _is_targeted_list_question(q):
-        return "list_entity"
-
     if _is_definition_style_query(q):
         return "definition_entity"
 
-    if re.search(r"\b(scene\s+[ivxlcdm]+|chapter\s+\d+)\b", q):
-        return "out_of_domain_or_format_mismatch"
-
-    if re.search(r"\b(machine\s+learning|artificial\s+intelligence|\bai\b|blockchain|quantum\s+psychology|cyber\s*security|bitcoin|ethereum|neural\s+network)\b", q):
-        return "out_of_domain_or_format_mismatch"
-
-    if re.search(r"\bwhat\s+comes\s+after\b", q):
-        return "sequence_lookup"
-
-    if re.search(r"\blesson\s*\d+\b", q):
-        return "lesson_lookup"
-
-    if re.search(r"\b(table of contents|contents|topics\s+covered|course\s+topics|document\s+talk\s+about|what topics)\b", q):
-        return "toc_structure"
-
-    if _is_targeted_list_question(q) or re.search(r"\b(list|what are|goals?|branches?|perspectives?|components?|steps?|phases?|levels?|types?|functions?)\b", q):
+    if _is_targeted_list_question(q):
         return "list_entity"
-
-    if re.search(r"^(what\s+is|define|who\s+is|who\s+was|who\s+founded|who\s+introduced|when\s+was\s+the\s+first\s+psychology\s+lab\s+established|what\s+is\s+tabula\s+rasa|what\s+is\s+phrenology)", q):
-        return "definition_entity"
 
     return "explanatory_compare"
 
@@ -12130,23 +11445,460 @@ def _doc_ocr_noise_score(text: str) -> float:
     return score
 
 
+def _light_normalize_query_token(token: str) -> str:
+    t = re.sub(r"[^a-z0-9]+", "", str(token or "").lower())
+    if len(t) <= 3:
+        return t
+    if t.endswith("ies") and len(t) > 5:
+        return t[:-3] + "y"
+    if re.search(r"(?:ches|shes|sses|xes|zes)$", t) and len(t) > 5:
+        return t[:-2]
+    if t.endswith("es") and len(t) > 6:
+        return t[:-2]
+    if t.endswith("s") and len(t) > 4 and (not t.endswith("ss")):
+        return t[:-1]
+    return t
+
+
+def _token_match_light(haystack: str, token: str) -> bool:
+    hs = str(haystack or "").lower()
+    if not hs:
+        return False
+    base = _light_normalize_query_token(token)
+    if not base:
+        return False
+    forms = {base}
+    if len(base) > 3:
+        forms.add(base + "s")
+        forms.add(base + "es")
+        if base.endswith("y") and len(base) > 4:
+            forms.add(base[:-1] + "ies")
+    for f in forms:
+        if re.search(rf"\b{re.escape(f)}\b", hs):
+            return True
+    if len(base) >= 4:
+        pref = re.escape(base[: min(6, len(base))])
+        if re.search(rf"\b{pref}[a-z]{{0,4}}\b", hs):
+            return True
+    return False
+
+
+def _query_section_tokens(query_text: str, family_v2: str = "") -> list[str]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return []
+    stop = {
+        "what", "which", "who", "when", "where", "why", "how", "is", "are", "was", "were", "the", "a", "an",
+        "of", "to", "in", "on", "for", "from", "with", "and", "or", "list", "name", "give", "mention", "identify",
+        "tell", "show", "me", "about", "explain", "define", "document", "chapter", "section", "mentioned",
+    }
+    toks = [t for t in re.findall(r"[a-z0-9]{3,}", q) if t not in stop]
+    out: list[str] = []
+    seen: set[str] = set()
+    for t in toks:
+        cand = _light_normalize_query_token(t)
+        if cand in seen:
+            continue
+        seen.add(cand)
+        out.append(cand)
+    if family_v2 in {"list_entity", "list_structure"}:
+        out = [t for t in out if t not in {"thing", "topic", "item", "point"}] or out
+    return out[:8]
+
+
+def _split_query_context_focus_tokens(query_text: str, family_v2: str = "") -> tuple[list[str], list[str]]:
+    all_tokens = _query_section_tokens(query_text, family_v2)
+    section_phrases = _query_section_phrases(query_text)
+    focus_tokens: list[str] = []
+    seen_focus: set[str] = set()
+    for ph in section_phrases:
+        for tok in re.findall(r"[a-z0-9]{3,}", str(ph or "").lower()):
+            norm = _light_normalize_query_token(tok)
+            if norm in seen_focus:
+                continue
+            seen_focus.add(norm)
+            focus_tokens.append(norm)
+    if not focus_tokens and all_tokens:
+        ql = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+        if re.match(r"^\s*(?:list|what\s+are|which\s+are|name|mention|identify|give)\b", ql):
+            focus_tokens = [all_tokens[0]]
+
+    context_tokens = [t for t in all_tokens if t not in set(focus_tokens)]
+    if not context_tokens and all_tokens and len(all_tokens) > 1:
+        context_tokens = all_tokens[1:]
+    return context_tokens[:8], focus_tokens[:8]
+
+
+def _has_strong_local_window_support(local_support: dict[str, float] | None, confidence_threshold: float = 0.58) -> bool:
+    support = dict(local_support or {})
+    promoted = float(support.get("promoted_count", 0.0) or 0.0)
+    conf = float(support.get("confidence", 0.0) or 0.0)
+    focus = float(support.get("focus_hits", 0.0) or 0.0)
+    density = float(support.get("list_density", 0.0) or 0.0)
+    return bool(
+        promoted >= 1.0
+        and conf >= confidence_threshold
+        and (focus >= 1.0 or density >= 0.10)
+    )
+
+
+def _list_query_alignment_metrics(query_text: str, answer_text: str) -> dict[str, float]:
+    q_family_v2 = _classify_query_family_v2(query_text)
+    context_tokens, focus_tokens = _split_query_context_focus_tokens(query_text, q_family_v2)
+    raw = str(answer_text or "")
+    items = [
+        re.sub(r"^\s*[-•*]\s+", "", ln).strip()
+        for ln in raw.splitlines()
+        if re.match(r"^\s*[-•*]\s+", ln)
+    ]
+    if not items:
+        compact = re.sub(r"\s+", " ", raw).strip()
+        if " - " in compact:
+            items = [p.strip(" ,;:-") for p in compact.split(" - ") if p.strip(" ,;:-")]
+
+    item_count = len(items)
+    if item_count <= 0:
+        return {
+            "item_count": 0.0,
+            "focus_hit_items": 0.0,
+            "context_hit_items": 0.0,
+            "focus_ratio": 0.0,
+            "mismatch_penalty": 2.0,
+        }
+
+    focus_hit_items = 0
+    context_hit_items = 0
+    avg_item_words = 0.0
+    label_like_items = 0
+    for item in items:
+        low_item = item.lower()
+        wc = len(re.findall(r"[a-z0-9]{2,}", low_item))
+        avg_item_words += float(wc)
+        has_link_verb = bool(re.search(r"\b(?:is|are|was|were|has|have|had|includes?|involves?|means|refers\s+to)\b", low_item))
+        if (not has_link_verb) and 1 <= wc <= 7:
+            label_like_items += 1
+        if focus_tokens and any(_token_match_light(low_item, tok) for tok in focus_tokens):
+            focus_hit_items += 1
+        if context_tokens and any(_token_match_light(low_item, tok) for tok in context_tokens):
+            context_hit_items += 1
+
+    avg_item_words = (avg_item_words / max(1.0, float(item_count))) if item_count else 0.0
+    structured_label_list = bool(
+        item_count >= 4
+        and avg_item_words <= 5.8
+        and label_like_items >= max(3, item_count - 1)
+    )
+
+    focus_ratio = float(focus_hit_items) / max(1.0, float(item_count))
+    mismatch_penalty = 0.0
+    if focus_tokens and focus_hit_items <= 0:
+        mismatch_penalty += 0.7 if structured_label_list else 2.2
+    elif focus_tokens and focus_ratio < 0.34:
+        mismatch_penalty += 1.1
+    if context_tokens and (focus_hit_items + context_hit_items) <= 0:
+        mismatch_penalty += 0.5 if structured_label_list else 1.6
+    if context_tokens and context_hit_items <= 0 and focus_hit_items <= 0:
+        mismatch_penalty += 0.3 if structured_label_list else 0.8
+
+    return {
+        "item_count": float(item_count),
+        "focus_hit_items": float(focus_hit_items),
+        "context_hit_items": float(context_hit_items),
+        "focus_ratio": float(focus_ratio),
+        "mismatch_penalty": float(mismatch_penalty),
+    }
+
+
+def _debug_section_confidence(sig: dict[str, float], local_score: float = 0.0) -> float:
+    local_focus_hits = float(sig.get("local_focus_hits", 0.0) or 0.0)
+    local_heading_match = float(sig.get("local_heading_match", 0.0) or 0.0)
+    local_list_density = float(sig.get("local_list_density", 0.0) or 0.0)
+    local_conf_score = float(sig.get("local_confidence_score", 0.0) or 0.0)
+    local_promoted = float(sig.get("local_promoted", 0.0) or 0.0)
+    score = (
+        (0.70 * float(sig.get("phrase_hits", 0.0)))
+        + (0.55 * float(sig.get("heading_hits", 0.0)))
+        + (0.35 * float(sig.get("marker_score", 0.0)))
+        + (0.45 * float(sig.get("focus_hits", 0.0)))
+        + (0.40 * local_focus_hits)
+        + (0.35 * local_heading_match)
+        + (0.55 * local_list_density)
+        + (0.75 * local_conf_score)
+        + (0.25 * local_promoted)
+        + (20.0 * float(sig.get("density", 0.0)))
+        - (0.40 * float(sig.get("missing_penalty", 0.0)))
+        - (0.55 * float(sig.get("generic_penalty", 0.0)))
+        + (0.18 * float(local_score or 0.0))
+    )
+    conf = float(max(0.0, min(1.0, score / 2.5)))
+    return float(max(0.0, min(1.0, conf)))
+
+
+def _query_section_phrases(query_text: str) -> list[str]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return []
+    phrases: list[str] = []
+
+    def _add_phrase(raw: str) -> None:
+        ph = re.sub(r"\s+", " ", str(raw or "").strip(" .,:;!?-–—"))
+        if not ph:
+            return
+        words = ph.split()
+        if len(words) < 2:
+            return
+        if len(words) > 10:
+            ph = " ".join(words[:10])
+        if ph not in phrases:
+            phrases.append(ph)
+
+    patterns = [
+        r"^\s*(?:list|name|mention|identify|give)\s+(?:all\s+|the\s+)?(.+?)(?:[?.!]|$)",
+        r"^\s*(?:what|which)\s+are\s+(?:all\s+|the\s+)?(.+?)(?:[?.!]|$)",
+    ]
+    for patt in patterns:
+        m = re.search(patt, q)
+        if not m:
+            continue
+        chunk = re.sub(r"\s+", " ", str(m.group(1) or "")).strip()
+        if not chunk:
+            continue
+        _add_phrase(chunk)
+        # Also keep a compact head phrase for partial heading matches.
+        if len(chunk.split()) >= 3:
+            _add_phrase(" ".join(chunk.split()[:4]))
+
+    return phrases[:4]
+
+
+def _list_marker_score(text: str) -> float:
+    t = str(text or "")
+    if not t:
+        return 0.0
+    score = 0.0
+    score += 0.35 * len(re.findall(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", t))
+    score += 0.25 * len(re.findall(r"(?:^|[\s,;])[a-z]\)\s", t, flags=re.IGNORECASE))
+    score += 0.20 * len(re.findall(r"\b(?:include|includes|consists\s+of|classified\s+as|are\s*:)\b", t, flags=re.IGNORECASE))
+    
+    # Heuristic: 3+ capitalized noun phrases close together -> treat as list region
+    if re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\s*(?:,\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*){2,}\b", t):
+        score += 0.65
+
+    short_non_sentence = [
+        ln.strip()
+        for ln in t.splitlines()
+        if ln.strip()
+        and len(re.findall(r"[A-Za-z0-9]+", ln)) <= 8
+        and not re.search(r"[.!?]$", ln.strip())
+    ]
+    if len(short_non_sentence) >= 4:
+        score += 0.45
+        
+    score += 0.15 * len(re.findall(r"\n", t[:1800]))
+    return min(2.5, score)
+
+
+def _normalize_phrase_text(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", str(text or "").lower())).strip()
+
+
+def _is_heading_candidate_line(line: str) -> bool:
+    s = re.sub(r"\s+", " ", str(line or "").strip())
+    if not s:
+        return False
+    word_count = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", s))
+    if word_count < 3 or word_count > 10:
+        return False
+    punct = re.findall(r"[,:;.!?]", s)
+    if len(punct) > 1:
+        return False
+    if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", s):
+        return False
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'\-]*", s)]
+    if not words:
+        return False
+    title_case_count = sum(1 for w in words if w[:1].isupper())
+    all_caps_count = sum(1 for w in words if w.isupper() and len(w) >= 2)
+    title_like = title_case_count >= max(2, int(0.5 * len(words)))
+    all_caps_like = all_caps_count >= max(2, int(0.5 * len(words)))
+    return bool(title_like or all_caps_like or s.endswith(":"))
+
+
+def _extract_heading_like_lines_from_chunk(text: str, max_lines: int = 24) -> list[str]:
+    lines = [re.sub(r"\s+", " ", ln).strip() for ln in str(text or "").splitlines()[: max(1, max_lines)] if str(ln or "").strip()]
+    out: list[str] = []
+    for ln in lines:
+        if len(ln) > 120:
+            continue
+        if _is_heading_candidate_line(ln):
+            out.append(ln)
+    return out[:10]
+
+
+def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict[str, float]:
+    tokens = _query_section_tokens(query_text, family_v2)
+    section_phrases = _query_section_phrases(query_text)
+    phrase_tokens: set[str] = set()
+    for ph in section_phrases:
+        for pt in re.findall(r"[a-z0-9]{3,}", ph.lower()):
+            phrase_tokens.add(pt[:-1] if pt.endswith("s") and len(pt) > 4 else pt)
+    md = dict((doc or {}).get("metadata") or {})
+    txt = str((doc or {}).get("page_content") or (doc or {}).get("text") or "")
+    low_txt = txt.lower()
+    norm_txt = _normalize_phrase_text(txt)
+    local_promoted = bool(md.get("_local_window_promoted") or md.get("local_window_promoted"))
+    local_focus_hits_raw = float(md.get("local_focus_hits") or md.get("_local_focus_hits") or 0.0)
+    local_heading_match_raw = float(md.get("local_heading_match") or md.get("_local_heading_match") or 0.0)
+    local_list_density_raw = float(md.get("local_list_density") or md.get("_local_list_density") or 0.0)
+    local_conf_raw = float(md.get("local_confidence_score") or md.get("_local_confidence_score") or md.get("_local_window_score") or 0.0)
+    local_conf_norm = min(1.0, (local_conf_raw / 6.0)) if local_conf_raw > 1.0 else max(0.0, local_conf_raw)
+    heading_parts = [str(md.get(k) or "") for k in ("heading", "section", "title", "chapter", "role")]
+    heading_lines = _extract_heading_like_lines_from_chunk(txt, max_lines=24)
+    heading_parts.extend(heading_lines)
+    heading_blob = " ".join(heading_parts).lower()
+    norm_heading = _normalize_phrase_text(" ".join(heading_parts))
+    heading_detected = bool(heading_lines)
+    toc_like = bool(re.search(r"\b(?:table\s+of\s+contents|contents?)\b", f"{heading_blob}\n{low_txt[:900]}"))
+
+    if not tokens:
+        return {
+            "token_hits": 0.0,
+            "heading_hits": 0.0,
+            "missing_penalty": 0.0,
+            "generic_penalty": 0.0,
+            "density": 0.0,
+        }
+
+    token_hits = 0.0
+    heading_hits = 0.0
+    focus_hits = 0.0
+    matched = 0
+    for tok in tokens:
+        tok_weight = 1.0
+        if family_v2 in {"list_entity", "list_structure"} and phrase_tokens:
+            tok_weight = 1.0 if tok in phrase_tokens else 0.25
+        in_heading_exact = bool(_token_match_light(heading_blob, tok))
+        in_heading_near = False
+        in_body_exact = bool(_token_match_light(low_txt, tok))
+        in_body_near = False
+        if in_heading_exact:
+            heading_hits += 1.0 * tok_weight
+        elif in_heading_near:
+            heading_hits += 0.65 * tok_weight
+        if in_body_exact:
+            token_hits += 1.0 * tok_weight
+        elif in_body_near:
+            token_hits += 0.55 * tok_weight
+        if tok in phrase_tokens and (in_heading_exact or in_heading_near or in_body_exact or in_body_near):
+            focus_hits += 1.0
+        if in_heading_exact or in_heading_near or in_body_exact or in_body_near:
+            matched += 1
+
+    missing = max(0, len(tokens) - matched)
+    words = re.findall(r"[a-z0-9]+", low_txt)
+    density = (token_hits + (1.2 * heading_hits)) / max(12.0, float(len(words)))
+
+    phrase_hits = 0.0
+    for ph in section_phrases:
+        ph_norm = _normalize_phrase_text(ph)
+        if not ph_norm:
+            continue
+        if ph_norm in norm_heading:
+            phrase_hits += 2.2
+            heading_hits += 0.9
+            heading_detected = True
+            continue
+        if ph_norm in norm_txt[:1800]:
+            phrase_hits += 1.4
+            continue
+
+        ph_toks = [t for t in re.findall(r"[a-z0-9]{3,}", ph_norm)]
+        if ph_toks:
+            heading_overlap = sum(1 for t in ph_toks if _token_match_light(heading_blob, t)) / max(1, len(ph_toks))
+            body_overlap = sum(1 for t in ph_toks if _token_match_light(low_txt[:1800], t)) / max(1, len(ph_toks))
+            if heading_overlap >= 0.60:
+                phrase_hits += 0.95
+                heading_hits += 0.55
+                heading_detected = True
+            elif body_overlap >= 0.60:
+                phrase_hits += 0.60
+
+    if tokens and heading_lines:
+        for ln in heading_lines[:6]:
+            ln_low = ln.lower()
+            overlap = sum(1 for tok in tokens if _token_match_light(ln_low, tok))
+            ratio = overlap / max(1, len(tokens))
+            if overlap >= 1 and ratio >= 0.35:
+                heading_hits += 0.65 + (0.25 * min(1.0, ratio))
+                heading_detected = True
+
+    marker_score = _list_marker_score(txt) if family_v2 in {"list_entity", "list_structure"} else 0.0
+    if local_promoted:
+        marker_score = max(marker_score, min(1.5, local_list_density_raw * 1.8))
+        focus_hits += max(0.0, 0.65 * local_focus_hits_raw)
+        heading_hits += max(0.0, 0.45 * local_heading_match_raw)
+        phrase_hits += max(0.0, 0.25 * local_heading_match_raw)
+
+    generic_penalty = 0.0
+    if family_v2 in {"list_entity", "list_structure"}:
+        if heading_hits <= 0.0 and token_hits <= 0.0:
+            generic_penalty += 0.9
+        if re.search(r"\b(?:introduction|overview|summary|historical\s+background|important\s+terminology|key\s+terms?)\b", heading_blob):
+            generic_penalty += 0.55
+        if marker_score <= 0.05:
+            generic_penalty += 0.35
+        if heading_hits <= 0.0 and marker_score <= 0.10 and phrase_hits <= 0.0:
+            generic_penalty += 0.85
+        if phrase_tokens and focus_hits <= 0.0:
+            generic_penalty += 0.75
+        if toc_like:
+            # Keep TOC chunks as heading hints, but lower content priority for answers.
+            generic_penalty += 0.45
+            if phrase_hits > 0.0 or heading_hits > 0.0:
+                heading_hits += 0.25
+                phrase_hits += 0.20
+            else:
+                generic_penalty += 0.55
+        if local_promoted:
+            generic_penalty -= (0.45 * local_conf_norm)
+            generic_penalty -= (0.20 * min(1.0, local_focus_hits_raw / 2.0))
+            generic_penalty -= (0.20 * min(1.0, local_list_density_raw / 0.2))
+            generic_penalty = max(0.0, generic_penalty)
+
+    return {
+        "token_hits": float(token_hits),
+        "heading_hits": float(heading_hits),
+        "phrase_hits": float(phrase_hits),
+        "focus_hits": float(focus_hits),
+        "marker_score": float(marker_score),
+        "missing_penalty": float(0.45 * missing),
+        "generic_penalty": float(generic_penalty),
+        "density": float(density),
+        "local_promoted": float(1.0 if local_promoted else 0.0),
+        "local_focus_hits": float(local_focus_hits_raw),
+        "local_heading_match": float(local_heading_match_raw),
+        "local_list_density": float(local_list_density_raw),
+        "local_confidence_score": float(local_conf_norm),
+        "toc_hint": float(1.0 if toc_like else 0.0),
+        "heading_detected": float(1.0 if heading_detected else 0.0),
+    }
+
+
 def _apply_heading_boost_for_family(query_text: str, family_v2: str, docs: list[dict]) -> list[dict]:
     if not docs:
         return docs
 
-    heading_terms = {
-        "definition_entity": ["definition", "historical roots of modern psychology", "scientific nature of psychology"],
-        "fact_entity": ["historical roots of modern psychology", "scientific nature of psychology", "first psychological laboratory", "behaviorism"],
-        "list_entity": ["goals of psychology", "popular areas of psychology", "theoretical perspectives of psychology", "scientific method"],
-        "toc_structure": ["table of contents", "lesson", "course", "introduction to psychology"],
-        "lesson_lookup": ["table of contents", "lesson"],
-        "sequence_lookup": ["table of contents", "lesson", "learning", "operant conditioning"],
-    }
-    penalties_for_definition = ["course objectives", "objectives", "students will", "main focus is to help students"]
-    terms = heading_terms.get(family_v2, [])
-    ql = (query_text or "").lower()
+
+    context_tokens, focus_tokens = _split_query_context_focus_tokens(query_text, family_v2)
+
+    def _doc_debug_key(doc: dict) -> str:
+        md_local = dict((doc or {}).get("metadata") or {})
+        src = str(md_local.get("source") or md_local.get("filename") or md_local.get("id") or "")
+        return f"{src}::{md_local.get('chunk_index')}"
 
     scored: list[tuple[float, dict, float, float]] = []
+    base_rank_items: list[tuple[float, str]] = []
+    heading_debug_rows: list[dict[str, Any]] = []
     for d in docs:
         md = dict((d or {}).get("metadata") or {})
         txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
@@ -12161,24 +11913,23 @@ def _apply_heading_boost_for_family(query_text: str, family_v2: str, docs: list[
                 except Exception:
                     base = 0.0
                 break
+        base_rank_items.append((base, _doc_debug_key(d)))
 
         boost = 0.0
-        if terms:
-            for t in terms:
-                if t in hay:
-                    boost += 0.55
-        if family_v2 in {"toc_structure", "lesson_lookup", "sequence_lookup"}:
-            if re.search(r"\blesson\s*\d+\b", hay):
-                boost += 0.65
+        sig = _doc_query_token_signals(query_text, family_v2, d)
+        boost += (0.75 * sig.get("heading_hits", 0.0))
+        boost += (0.45 * sig.get("token_hits", 0.0))
+        boost += (0.85 * sig.get("phrase_hits", 0.0))
+        boost += (0.35 * sig.get("marker_score", 0.0))
+        boost += (20.0 * sig.get("density", 0.0))
+        boost -= sig.get("missing_penalty", 0.0)
+        boost -= sig.get("generic_penalty", 0.0)
+        if family_v2 in {"toc_structure"}:
             if "table of contents" in hay:
                 boost += 0.85
         if family_v2 in {"definition_entity", "fact_entity"}:
-            if any(p in hay for p in penalties_for_definition):
-                boost -= 2.2
-            if re.search(r"\bpsychology\s+is\b|\bdefined\s+as\b|\brefers\s+to\b", hay):
+            if re.search(r"\bdefined\s+as\b|\brefers\s+to\b", hay):
                 boost += 1.1
-            if "scientific study of behavior and mental processes" in hay:
-                boost += 1.5
 
         noise = _doc_ocr_noise_score(txt)
         if noise > 0:
@@ -12189,10 +11940,109 @@ def _apply_heading_boost_for_family(query_text: str, family_v2: str, docs: list[
         d2["_heading_boost"] = round(boost, 4)
         d2["_noise_score"] = round(noise, 4)
         d2["_boosted_score"] = round(final_score, 4)
+        d2["_section_token_hits"] = round(sig.get("token_hits", 0.0), 4)
+        d2["_section_heading_hits"] = round(sig.get("heading_hits", 0.0), 4)
+        d2["_section_phrase_hits"] = round(sig.get("phrase_hits", 0.0), 4)
+        d2["_section_marker_score"] = round(sig.get("marker_score", 0.0), 4)
+        d2["_section_density"] = round(sig.get("density", 0.0), 6)
+        heading_candidates = [str(md.get(k) or "").strip() for k in ("heading", "section", "title", "chapter") if str(md.get(k) or "").strip()]
+        heading_line = heading_candidates[0] if heading_candidates else (_extract_heading_like_lines_from_chunk(txt, max_lines=8)[0] if _extract_heading_like_lines_from_chunk(txt, max_lines=8) else "")
+        heading_l = heading_line.lower()
+        heading_query_match = bool(any(re.search(rf"\b{re.escape(t)}\b", heading_l) for t in context_tokens)) if context_tokens else False
+        heading_focus_match = bool(any(re.search(rf"\b{re.escape(t)}\b", heading_l) for t in focus_tokens)) if focus_tokens else False
+        heading_bonus_component = (0.75 * sig.get("heading_hits", 0.0))
+        heading_debug_rows.append({
+            "key": _doc_debug_key(d),
+            "chunk": md.get("chunk_index"),
+            "heading": heading_line,
+            "query_match": heading_query_match,
+            "focus_match": heading_focus_match,
+            "heading_bonus": round(float(heading_bonus_component), 4),
+        })
         scored.append((final_score, d2, boost, noise))
 
     scored.sort(key=lambda x: x[0], reverse=True)
     boosted_docs = [x[1] for x in scored]
+
+    if family_v2 in {"list_entity", "list_structure"}:
+        base_rank_items.sort(key=lambda x: x[0], reverse=True)
+        base_rank_map = {key: idx for idx, (_base_score, key) in enumerate(base_rank_items)}
+        boosted_rank_map = {_doc_debug_key(d): idx for idx, d in enumerate(boosted_docs)}
+        heading_debug_map = {row.get("key"): row for row in heading_debug_rows}
+        for d in boosted_docs[: min(5, len(boosted_docs))]:
+            key = _doc_debug_key(d)
+            row = heading_debug_map.get(key) or {}
+            before_rank = base_rank_map.get(key, 999)
+            after_rank = boosted_rank_map.get(key, 999)
+            won_by_heading = bool(after_rank < before_rank)
+            logger.info(
+                "[HEADING DEBUG] chunk=%s heading=%s query_match=%s focus_match=%s heading_bonus=%.3f won_by_heading_boost=%s",
+                row.get("chunk"),
+                (row.get("heading") or "")[:120],
+                bool(row.get("query_match")),
+                bool(row.get("focus_match")),
+                float(row.get("heading_bonus", 0.0) or 0.0),
+                won_by_heading,
+            )
+
+    if family_v2 in {"list_entity", "list_structure", "toc_structure"} and len(boosted_docs) >= 2:
+        best_i = 0
+        best_cluster_score = -10**9
+        for i, d in enumerate(boosted_docs[: min(8, len(boosted_docs))]):
+            md = dict((d or {}).get("metadata") or {})
+            source_id = str(md.get("source") or md.get("filename") or md.get("id") or "")
+            chunk_idx = md.get("chunk_index")
+            try:
+                chunk_idx_int = int(chunk_idx)
+            except Exception:
+                chunk_idx_int = None
+
+            center = float((d or {}).get("_boosted_score", 0.0) or 0.0)
+            cluster = center
+            if source_id and chunk_idx_int is not None:
+                for j, dj in enumerate(boosted_docs[: min(12, len(boosted_docs))]):
+                    if j == i:
+                        continue
+                    mdj = dict((dj or {}).get("metadata") or {})
+                    source_j = str(mdj.get("source") or mdj.get("filename") or mdj.get("id") or "")
+                    if source_j != source_id:
+                        continue
+                    try:
+                        cj = int(mdj.get("chunk_index"))
+                    except Exception:
+                        continue
+                    if abs(cj - chunk_idx_int) <= 1:
+                        cluster += 0.45 * float((dj or {}).get("_boosted_score", 0.0) or 0.0)
+            if cluster > best_cluster_score:
+                best_cluster_score = cluster
+                best_i = i
+
+        if best_i > 0:
+            anchor = boosted_docs[best_i]
+            md_a = dict((anchor or {}).get("metadata") or {})
+            src_a = str(md_a.get("source") or md_a.get("filename") or md_a.get("id") or "")
+            try:
+                idx_a = int(md_a.get("chunk_index"))
+            except Exception:
+                idx_a = None
+            front: list[dict] = [anchor]
+            if src_a and idx_a is not None:
+                for d in boosted_docs:
+                    if d is anchor:
+                        continue
+                    md_d = dict((d or {}).get("metadata") or {})
+                    src_d = str(md_d.get("source") or md_d.get("filename") or md_d.get("id") or "")
+                    if src_d != src_a:
+                        continue
+                    try:
+                        idx_d = int(md_d.get("chunk_index"))
+                    except Exception:
+                        continue
+                    if abs(idx_d - idx_a) <= 1:
+                        front.append(d)
+            tail = [d for d in boosted_docs if d not in front]
+            boosted_docs = front + tail
+            logger.info("[SECTION CONSISTENCY] family=%s anchor_moved_from=%s cluster_docs=%s", family_v2, best_i, len(front))
 
     top_trace = []
     for idx, d in enumerate(boosted_docs[:3]):
@@ -12226,19 +12076,17 @@ def clean_ocr_noise(text: str) -> str:
         text,
     )
     text = re.sub(r"\b(\w+)\s+\1\b", r"\1", text, flags=re.IGNORECASE)
-    text = re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"[ \t]+", " ", text).strip()
 
     return text
 
 
 def _cleanup_final_answer_text(answer_text: str) -> str:
-    txt = clean_ocr_noise(re.sub(r"\s+", " ", str(answer_text or "")).strip())
+    txt = clean_ocr_noise(re.sub(r"[ \t]+", " ", str(answer_text or "")).strip())
     if not txt:
         return txt
 
     fixes = [
-        (r"\bWil\s*helm\b", "Wilhelm"),
-        (r"\bW\s*und\s*t\b", "Wundt"),
         (r"\bCont\s*rolling\b", "Controlling"),
         (r"\bme\s*mory\b", "memory"),
     ]
@@ -12274,268 +12122,7 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     return txt
 
 
-def _extract_lesson_lines_from_docs(docs: list[dict]) -> list[tuple[int, str]]:
-    rows: list[tuple[int, str]] = []
-    for d in (docs or [])[:6]:
-        txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
-        if not txt:
-            continue
-        txt_norm = re.sub(r"\s+", " ", txt)
-        for m in re.finditer(r"\blesson\s*(\d{1,2})\b\s*[:\-–—.]?\s*([A-Za-z][A-Za-z/&\-\s]{3,90}?)(?=\s+lesson\s*\d+\b|\s+\d{1,3}\b|$)", txt_norm, flags=re.IGNORECASE):
-            try:
-                n = int(m.group(1))
-            except Exception:
-                continue
-            topic = re.sub(r"\s+", " ", str(m.group(2) or "")).strip(" .:-")
-            if topic and len(topic) >= 3:
-                rows.append((n, topic))
-        for ln in txt.splitlines():
-            line = re.sub(r"\s+", " ", ln).strip(" \t-•")
-            if not line:
-                continue
-            m = re.search(r"\blesson\s*(\d{1,2})\b\s*[:\-–—.]?\s*(.*)$", line, flags=re.IGNORECASE)
-            if m:
-                n = int(m.group(1))
-                topic = re.sub(r"\s+", " ", m.group(2) or "").strip(" .:-")
-                if topic and len(topic) >= 3:
-                    rows.append((n, topic))
-                continue
-            m2 = re.search(r"^(\d{1,2})\s*[.)-]\s*(.+)$", line)
-            if m2 and ("psychology" in line.lower() or "conditioning" in line.lower() or "approach" in line.lower()):
-                rows.append((int(m2.group(1)), re.sub(r"\s+", " ", m2.group(2)).strip(" .:-")))
-
-    dedup: list[tuple[int, str]] = []
-    seen = set()
-    for n, topic in rows:
-        key = (n, topic.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-        dedup.append((n, topic))
-    dedup.sort(key=lambda x: x[0])
-    return dedup
-
-
-def _extract_lesson_lookup_answer(query_text: str, docs: list[dict]) -> str | None:
-    q = (query_text or "").lower()
-    m = re.search(r"\blesson\s*(\d{1,2})\b", q)
-    if not m:
-        return None
-    target = int(m.group(1))
-    lessons = _extract_lesson_lines_from_docs(docs)
-    if not lessons:
-        try:
-            rescue_docs = _search_fast_minimal("table of contents lesson psychology", top_k=10) or []
-        except Exception:
-            rescue_docs = []
-        lessons = _extract_lesson_lines_from_docs(rescue_docs)
-    ranked_lessons = sorted(lessons, key=lambda x: (x[0], len(x[1])))
-    for n, topic in ranked_lessons:
-        if n == target:
-            t_low = topic.lower()
-            if "psychodynamic" in t_low:
-                topic = "Psychodynamic Approach"
-            elif "learning" in t_low and "conditioning" in t_low:
-                topic = "Learning and Conditioning"
-            elif len(topic) > 140:
-                topic = re.split(r"[.;•\-]", topic, maxsplit=1)[0].strip()
-            return f"Lesson {target} is about {topic}."
-    if target == 5:
-        return "Lesson 5 is about Psychodynamic Approach."
-    return None
-
-
-def _extract_sequence_after_answer(query_text: str, docs: list[dict]) -> str | None:
-    q = re.sub(r"\s+", " ", str(query_text or "").lower())
-    if re.search(r"\bwhat\s+comes\s+after\s+learning\b", q):
-        return "After Learning, the course covers Operant Conditioning."
-    m = re.search(r"\bafter\s+(.+?)(?:\?|$)", q)
-    anchor = (m.group(1).strip(" .") if m else "")
-    lessons = _extract_lesson_lines_from_docs(docs)
-    if not lessons:
-        try:
-            rescue_docs = _search_fast_minimal("table of contents lesson psychology", top_k=10) or []
-        except Exception:
-            rescue_docs = []
-        lessons = _extract_lesson_lines_from_docs(rescue_docs)
-    if len(lessons) < 2 or not anchor:
-        if "learning" in q:
-            return "After Learning, the course covers Operant Conditioning."
-        return None
-
-    anchor_tokens = [t for t in re.findall(r"[a-z]{3,}", anchor) if t not in {"the", "course", "lesson"}]
-    if not anchor_tokens:
-        return None
-    for idx, (_, topic) in enumerate(lessons[:-1]):
-        tl = topic.lower()
-        hits = sum(1 for t in anchor_tokens if re.search(rf"\b{re.escape(t)}\b", tl))
-        if hits >= 1:
-            nxt = lessons[idx + 1][1]
-            return f"After {topic}, the course covers {nxt}."
-    if "learning" in q:
-        return "After Learning, the course covers Operant Conditioning."
-    return None
-
-
-def _extract_toc_topics_answer(docs: list[dict]) -> str | None:
-    lessons = sorted(_extract_lesson_lines_from_docs(docs), key=lambda x: (x[0], len(x[1])))
-    if not lessons:
-        try:
-            rescue_docs = _search_fast_minimal("table of contents lesson psychology", top_k=10) or []
-        except Exception:
-            rescue_docs = []
-        lessons = sorted(_extract_lesson_lines_from_docs(rescue_docs), key=lambda x: (x[0], len(x[1])))
-    if not lessons:
-        return None
-    topics: list[str] = []
-    seen = set()
-    for _, topic in lessons:
-        topic = re.sub(r"\s+", " ", str(topic or "")).strip(" .:-")
-        if not topic:
-            continue
-        if len(topic) > 70:
-            continue
-        if re.search(r"\blesson\s*\d+\b", topic, flags=re.IGNORECASE):
-            continue
-        if re.search(r"\d{2,}", topic):
-            continue
-        if topic.lower().startswith(("beginning with", "copyright", "course description")):
-            continue
-        key = topic.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        topics.append(topic)
-        if len(topics) >= 6:
-            break
-    if len(topics) >= 3:
-        return "This course covers: " + ", ".join(topics) + "."
-    fallback_topics = [
-        "Introduction to Psychology",
-        "Historical Roots of Modern Psychology",
-        "Theoretical Perspectives of Psychology",
-        "Research Methods in Psychology",
-        "Psychodynamic Approach",
-        "Learning and Conditioning",
-    ]
-    return "This course covers: " + ", ".join(fallback_topics) + "."
-
-
-def _docs_look_lesson_structured(docs: list[dict]) -> bool:
-    lesson_hits = 0
-    chapter_hits = 0
-    for d in (docs or [])[:6]:
-        txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")[:2200].lower()
-        lesson_hits += len(re.findall(r"\blesson\s*\d+\b", txt))
-        chapter_hits += len(re.findall(r"\bchapter\s*\d+\b", txt))
-    return lesson_hits >= 2 and chapter_hits <= 1
-
-
-def _extract_named_psychology_list(query_text: str, docs: list[dict]) -> str | None:
-    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
-    merged = "\n".join(str((d or {}).get("page_content") or (d or {}).get("text") or "") for d in (docs or [])[:6])
-    low = merged.lower()
-
-    wanted = None
-    seed_queries: list[str] = []
-    if "goals" in q:
-        wanted = ["observation", "description", "understanding", "explanation", "prediction", "control"]
-        seed_queries = ["goals of psychology", "main goals of psychology observation description understanding explanation prediction control"]
-    elif "branches" in q or "areas of psychology" in q or "areas" in q:
-        wanted = ["clinical", "industrial", "organizational", "health", "consumer", "environmental", "sport", "forensic"]
-        seed_queries = ["popular areas of psychology", "branches of psychology clinical industrial organizational health consumer environmental sport forensic"]
-    elif "theoretical perspectives" in q or "perspectives" in q:
-        wanted = ["biological", "behavioral", "psychoanalytic", "cognitive", "social", "cultural"]
-        seed_queries = ["theoretical perspectives of psychology", "biological behavioral psychoanalytic cognitive social cultural perspectives psychology"]
-    elif "components" in q and "scientific method" in q:
-        wanted = ["observation", "description", "control", "replication"]
-        seed_queries = ["scientific method components psychology", "observation description control replication"]
-
-    if not wanted:
-        return None
-
-    low_ns = re.sub(r"\s+", "", low)
-    found: list[str] = []
-    for token in wanted:
-        if re.search(rf"\b{re.escape(token)}\b", low) or (token.replace("/", "").replace("-", "") in low_ns):
-            label = token
-            if token == "organizational":
-                label = "Industrial/Organizational"
-            elif token == "social":
-                label = "Social-Cultural"
-            else:
-                label = token.capitalize()
-            if label not in found:
-                found.append(label)
-
-    if len(found) >= 3:
-        return "\n".join(f"- {x}" for x in found)
-
-    if seed_queries:
-        extra_text = []
-        for sq in seed_queries[:2]:
-            try:
-                extra_docs = _search_fast_minimal(sq, top_k=8) or []
-            except Exception:
-                extra_docs = []
-            for d in extra_docs:
-                extra_text.append(str((d or {}).get("text") or (d or {}).get("page_content") or ""))
-        if extra_text:
-            low2 = (low + "\n" + "\n".join(extra_text)).lower()
-            found2: list[str] = []
-            low2_ns = re.sub(r"\s+", "", low2)
-            for token in wanted:
-                if re.search(rf"\b{re.escape(token)}\b", low2) or (token.replace("/", "").replace("-", "") in low2_ns):
-                    label = token
-                    if token == "organizational":
-                        label = "Industrial/Organizational"
-                    elif token == "social":
-                        label = "Social-Cultural"
-                    else:
-                        label = token.capitalize()
-                    if label not in found2:
-                        found2.append(label)
-            if len(found2) >= 3:
-                return "\n".join(f"- {x}" for x in found2)
-
-    if "goals" in q:
-        return "\n".join([
-            "- Observation",
-            "- Description",
-            "- Understanding",
-            "- Prediction",
-            "- Control",
-        ])
-
-    if ("branches" in q) or ("areas of psychology" in q) or ("areas" in q):
-        return "\n".join([
-            "- Clinical",
-            "- Health",
-            "- Industrial/Organizational",
-            "- Consumer",
-            "- Forensic",
-            "- Sport",
-            "- Environmental",
-        ])
-
-    if "theoretical perspectives" in q or "perspectives" in q:
-        return "\n".join([
-            "- Biological",
-            "- Behavioral",
-            "- Psychoanalytic",
-            "- Cognitive",
-            "- Social-Cultural",
-        ])
-
-    if "components" in q and "scientific method" in q:
-        return "\n".join([
-            "- Observation",
-            "- Description",
-            "- Prediction",
-            "- Control",
-            "- Replication",
-        ])
-
+def _extract_fallback_list(query_text: str, docs: list[dict]) -> str | None:
     return None
 
 
@@ -12652,9 +12239,7 @@ def _smalltalk_response(text: str) -> str:
 
 
 def _not_found_response(query: str, confidence: str):
-    if (confidence or "").lower() == "out_of_scope":
-        return "That topic doesn’t appear to be covered in the current documents."
-    return "I couldn’t find specific information about that in the provided documents. You might try rephrasing your question."
+    return RAG_NO_MATCH_RESPONSE
 
 
 def _apply_not_found_ux(query: str, answer: str, doc_dicts: List[Dict[str, Any]]) -> str:
@@ -12670,95 +12255,9 @@ def _apply_not_found_ux(query: str, answer: str, doc_dicts: List[Dict[str, Any]]
         return cleaned
 
     ans = _finalize(ans)
-
-    q_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
-    logger.info("[CHEAT TEMPLATE REMOVED] function=_apply_not_found_ux")
-
-    def _strict_same_line_association_answer() -> str | None:
-        if not (q_low.startswith("who introduced") or q_low.startswith("who is associated with")):
-            return None
-        has_entity, entity = _extract_entity_from_definition_query(query)
-        entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower())
-        if not has_entity or not entity_l:
-            return None
-
-        entity_tokens = [
-            t for t in re.findall(r"[a-z0-9]{2,}", entity_l)
-            if t not in {"the", "a", "an", "of", "and", "in", "to"}
-        ]
-        if not entity_tokens:
-            return None
-        ent_need = max(1, min(2, len(entity_tokens)))
-
-        banned = {
-            "management", "theory", "ideas", "contributors", "table", "scientific", "administrative", "bureaucratic", "model",
-            "classical", "approach", "school", "company", "corporation", "corp", "inc", "ltd", "limited", "university", "college",
-            "states", "state", "industry", "industries", "steel", "chief", "engineer", "manager", "director", "officer", "president",
-            "professor", "doctor", "dr", "mr", "ms", "mrs",
-        }
-
-        person_name_re = re.compile(r"\b[A-Z][a-z]{2,}\s+[A-Z][a-z]{2,}\b")
-        concept_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l))
-        if not concept_title:
-            return None
-
-        best_assoc: tuple[int, str] | None = None
-        for d in (doc_dicts or [])[:5]:
-            txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
-            if not txt:
-                continue
-            for line in txt.splitlines():
-                line_norm = re.sub(r"\s+", " ", line or "").strip()
-                if not line_norm:
-                    continue
-                low_line = line_norm.lower()
-                norm_line = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9]+", " ", low_line)).strip()
-                has_exact_phrase = bool(re.search(rf"\b{re.escape(entity_l)}\b", norm_line))
-                token_hits = sum(1 for t in entity_tokens if re.search(rf"\b{re.escape(t)}\b", low_line))
-                if (not has_exact_phrase) and token_hits < ent_need:
-                    continue
-                phrase_match = re.search(rf"\b{re.escape(entity_l)}\b", norm_line)
-                phrase_start = phrase_match.start() if phrase_match else -1
-                phrase_end = phrase_match.end() if phrase_match else -1
-                for cand in person_name_re.findall(line_norm):
-                    toks = [t.lower() for t in re.findall(r"[A-Za-z]{2,}", cand)]
-                    if len(toks) < 2:
-                        continue
-                    if any(t in banned for t in toks):
-                        continue
-                    cand_pos = line_norm.find(cand)
-                    dist = abs(cand_pos - phrase_end) if phrase_end >= 0 else 9999
-                    after_phrase_bonus = -200 if (phrase_end >= 0 and cand_pos >= phrase_end) else 0
-                    score = dist + after_phrase_bonus
-                    if best_assoc is None or score < best_assoc[0]:
-                        best_assoc = (score, cand)
-        if best_assoc:
-            return f"{best_assoc[1]} is associated with {concept_title}."
-        return None
-
-    if _is_definition_style_query(q_low):
-        if ans.lower() != RAG_NO_MATCH_RESPONSE.lower() and not _passes_strict_definition_relevance_guard(query, ans):
-            logger.info("[STRICT DEF PREF MISS] query=%s reason=postprocess_preference_only", q_low[:120])
-
-    if q_low.startswith("who introduced") or q_low.startswith("who is associated with"):
-        assoc = _strict_same_line_association_answer()
-        if assoc:
-            assoc = _finalize(assoc)
-            logger.info("[POSTPROCESS FINAL ANSWER] %s", assoc[:280])
-            return assoc
-
     if ans.lower() != RAG_NO_MATCH_RESPONSE.lower():
         logger.info("[POSTPROCESS FINAL ANSWER] %s", ans[:280])
         return ans
-
-    if _is_definition_style_query(q_low) and bool(doc_dicts):
-        has_entity_local, entity_local = _extract_entity_from_definition_query(query)
-        if has_entity_local:
-            rescue_answer = _definition_explanation_fallback(query, doc_dicts or [], entity_local)
-            if rescue_answer:
-                rescue_answer = _finalize(rescue_answer)
-                logger.info("[POSTPROCESS FINAL ANSWER] %s", rescue_answer[:280])
-                return rescue_answer
 
     logger.info("[POSTPROCESS FINAL ANSWER] %s", RAG_NO_MATCH_RESPONSE)
     return RAG_NO_MATCH_RESPONSE
@@ -12838,7 +12337,7 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                 return True
             if re.search(r"\b\d{1,4}\b", low):
                 return True
-            if re.search(r"\b(criticism|criticized|limitations?|drawbacks?|disadvantages?)\b", low):
+            if re.search(r"\b(criticism|criticized|limitations?|drawbacks?)\b", low):
                 return True
             if re.search(r"\b(?:[A-Z][a-z]+\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b", s):
                 return True
@@ -12872,7 +12371,7 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                     score += 3.0
                 score += 1.5 * sum(1 for t in query_tokens if re.search(rf"\b{re.escape(t)}\b", low))
                 score += 2.0 * sum(1 for t in ("management", "principles", "process") if re.search(rf"\b{re.escape(t)}\b", low))
-                if re.search(r"\b(theory|theorist|coined|introduced|father of|known as)\b", low):
+                if re.search(r"\b(theory|theorist|coined|introduced|known as)\b", low):
                     score -= 3.5
                 if re.search(r"\b(organization|administration|planning|controlling|coordinating)\b", low):
                     score += 0.8
@@ -13218,7 +12717,7 @@ def _is_valid_overview_answer(answer: str, query: str = "") -> bool:
     a = (answer or "").strip()
     low = a.lower()
 
-    if any(k in low for k in (" born ", " father of ", " known as ", " biograph", " psychologist")):
+    if any(k in low for k in (" born ", " founder of ", " known as ", " biograph", " psychologist")):
         return False
 
     bullet_items = re.findall(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+(.+)", a)
@@ -13268,8 +12767,7 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
 
     person_indicators = ["born", "known", "considered", "introduced"]
     biography_indicators = ["engineer", "manager", "theorist", "founder"]
-    bad_markers = ["advantages", "disadvantages", "criticism", "steps", "example", "•"]
-    query_has_father = "father" in q_low
+    bad_markers = ["criticism", "example", "•", "items", "points"]
     is_person_q = _definition_mode_from_query(query) == "person"
 
     chunk_candidates = [c.strip() for c in re.split(r"\n\s*\n+", normalized) if c and c.strip()]
@@ -13321,7 +12819,7 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
     weak_definition_starts = re.compile(r"^\s*(before|after|when|if|during|for\s+example|this\s+leads)\b", flags=re.IGNORECASE)
     procedural_sentence_re = re.compile(r"\b(?:first|second|third|step\s+\d+|should|must|need\s+to|you\s+can|to\s+do\s+this|follow\s+these|start\s+by)\b", flags=re.IGNORECASE)
     concept_person_attribution_re = re.compile(
-        r"\b(?:father of|introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b",
+        r"\b(?:introduced by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b",
         flags=re.IGNORECASE,
     )
     concept_person_row_re = re.compile(
@@ -13459,9 +12957,6 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
 
         if " born " in low:
             score -= 3.0
-
-        if query_has_father and (" father " in low or " father of " in low):
-            score += 5.0
 
         first_alpha = next((ch for ch in s if ch.isalpha()), "")
         if first_alpha and first_alpha.islower():
@@ -13875,6 +13370,253 @@ def _is_bad_output_text(answer: str) -> bool:
     return False
 
 
+def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], retrieved_docs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    dec = dict(decision or {})
+
+    def _log_final_decision_debug(rejected: bool, rejection_reason: str = "") -> None:
+        logger.info(
+            "[FINAL DECISION DEBUG] answer_type=%s source_mode=%s used_llm=%s rejected=%s rejection_reason=%s",
+            dec.get("answer_type"),
+            dec.get("source_mode"),
+            dec.get("used_llm"),
+            rejected,
+            rejection_reason,
+        )
+
+    ans = dec.get("answer")
+    if ans is None:
+        dec["answer"] = RAG_NO_MATCH_RESPONSE
+        dec["used_llm"] = False
+        dec["answer_type"] = "none_answer_rejected"
+        dec["source_mode"] = "not_found_guard"
+        _log_final_decision_debug(rejected=True, rejection_reason="none_answer_rejected")
+        return dec
+
+    answer = re.sub(r"[ \t]+", " ", str(ans or "")).strip()
+    if not answer:
+        dec["answer"] = RAG_NO_MATCH_RESPONSE
+        dec["used_llm"] = False
+        dec["answer_type"] = "empty_answer_rejected"
+        dec["source_mode"] = "not_found_guard"
+        _log_final_decision_debug(rejected=True, rejection_reason="empty_answer_rejected")
+        return dec
+
+    family = str(dec.get("query_family") or _classify_query_family_v2(query) or "")
+    q_low = re.sub(r"\s+", " ", str(query or "")).strip().lower()
+    is_list_mode = bool(
+        family in {"list_entity", "list_structure"}
+        or _is_targeted_list_question(q_low)
+        or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
+    )
+    is_definition_mode = bool(
+        family == "definition_entity"
+        or q_low.startswith("what is")
+        or q_low.startswith("define")
+    )
+
+    def _fragmentary_ocr(text: str) -> bool:
+        s = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not s:
+            return True
+        if re.search(r"\b(?:www\.|https?://|isbn|copyright|table\s*\d+|figure\s*\d+)\b", s, flags=re.IGNORECASE):
+            return True
+        if re.search(r"(?:\b[A-Za-z]\s+){4,}\b", s):
+            return True
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+        if len(words) < 3:
+            return True
+        if len(words) >= 8 and (len(set(w.lower() for w in words)) / max(1, len(words))) < 0.35:
+            return True
+        return False
+
+    if answer == RAG_NO_MATCH_RESPONSE:
+        dec["answer"] = RAG_NO_MATCH_RESPONSE
+        _log_final_decision_debug(rejected=True, rejection_reason="not_found")
+        return dec
+
+    if _fragmentary_ocr(answer):
+        logger.info("[FINAL CANDIDATE REJECTED] reason=fragmentary_ocr answer=%s", answer[:220])
+        dec["answer"] = RAG_NO_MATCH_RESPONSE
+        dec["used_llm"] = False
+        dec["answer_type"] = "fragmentary_ocr_rejected"
+        dec["source_mode"] = "not_found_guard"
+        _log_final_decision_debug(rejected=True, rejection_reason="fragmentary_ocr")
+        return dec
+
+    if is_list_mode:
+        answer_type = str(dec.get("answer_type") or "")
+        fast_deterministic_mode = bool((not dec.get("used_llm", False)) and answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
+        list_support = _collect_local_window_support(retrieved_docs or [])
+        list_ok, list_reason, shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(answer), strict_fast=fast_deterministic_mode, local_support=list_support)
+        logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok), list_reason)
+        if fast_deterministic_mode:
+            logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(list_ok), list_reason)
+        if (not list_ok) or (not shaped):
+            logger.info("[LIST CANDIDATE REJECTED] reason=%s answer=%s", list_reason, answer[:220])
+            dec["answer"] = RAG_NO_MATCH_RESPONSE
+            dec["used_llm"] = False
+            dec["answer_type"] = "list_incoherent_rejected"
+            dec["source_mode"] = "not_found_guard"
+            _log_final_decision_debug(rejected=True, rejection_reason=f"list_{list_reason}")
+            return dec
+        align = _list_query_alignment_metrics(query, shaped)
+        mismatch_penalty = float(align.get("mismatch_penalty", 0.0) or 0.0)
+        _effective_mismatch_threshold = 1.5
+        if mismatch_penalty > _effective_mismatch_threshold:
+            logger.info("[LIST TOKEN MISMATCH] rejected=true penalty=%.3f threshold=%.1f focus_hits=%s context_hits=%s items=%s", mismatch_penalty, _effective_mismatch_threshold, int(align.get("focus_hit_items", 0.0)), int(align.get("context_hit_items", 0.0)), int(align.get("item_count", 0.0)))
+            dec["answer"] = RAG_NO_MATCH_RESPONSE
+            dec["used_llm"] = False
+            dec["answer_type"] = "list_query_token_mismatch_rejected"
+            dec["source_mode"] = "not_found_guard"
+            _log_final_decision_debug(rejected=True, rejection_reason="list_query_token_mismatch")
+            return dec
+
+        _candidate_docs = list(retrieved_docs or [])
+        _item_token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those","human", "behavior"}
+        _item_tokens: set[str] = set()
+        for ln in str(shaped or "").splitlines():
+            line = re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s+", "", ln).strip().lower()
+            if not line:
+                continue
+            for tok in re.findall(r"[a-z0-9]{4,}", line):
+                if tok not in _item_token_stop:
+                    _item_tokens.add(tok)
+
+        if _candidate_docs:
+            _q_family_for_docs = _classify_query_family_v2(query)
+            _q_ctx_for_docs, _q_focus_for_docs = _split_query_context_focus_tokens(query, _q_family_for_docs)
+
+            def _doc_relevance_for_list_guard(d: dict) -> float:
+                md = dict((d or {}).get("metadata") or {})
+                hay = (
+                    str((d or {}).get("page_content") or (d or {}).get("text") or "")[:1800]
+                    + "\n"
+                    + " ".join(str(md.get(k) or "") for k in ("heading", "section", "title", "chapter"))
+                ).lower()
+                if not hay.strip():
+                    return 0.0
+                q_hits = sum(1 for tok in (_q_focus_for_docs + _q_ctx_for_docs) if _token_match_light(hay, tok))
+                item_hits = sum(1 for tok in _item_tokens if _token_match_light(hay, tok))
+                return (2.0 * float(item_hits)) + float(q_hits)
+
+            _ranked_guard_docs = sorted(_candidate_docs, key=_doc_relevance_for_list_guard, reverse=True)
+            list_docs = _ranked_guard_docs[:4]
+        else:
+            list_docs = []
+        section_keys: set[str] = set()
+        chunk_idxs: list[int] = []
+        for d in list_docs:
+            md = dict((d or {}).get("metadata") or {})
+            source = str(md.get("source") or md.get("filename") or md.get("id") or "").strip().lower()
+            section = str(md.get("heading") or md.get("section") or md.get("title") or md.get("chapter") or "").strip().lower()
+            section_keys.add(f"{source}::{section}")
+            try:
+                chunk_idxs.append(int(md.get("chunk_index")))
+            except Exception:
+                pass
+        if len(section_keys) > 1 or (len(chunk_idxs) >= 2 and (max(chunk_idxs) - min(chunk_idxs) > 3)):
+            q_family_v2 = _classify_query_family_v2(query)
+            q_ctx_tokens, q_focus_tokens = _split_query_context_focus_tokens(query, q_family_v2)
+
+            source_counts: dict[str, int] = {}
+            doc_token_sets: list[set[str]] = []
+            token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those"}
+            query_hits_docs = 0
+
+            for d in list_docs:
+                md = dict((d or {}).get("metadata") or {})
+                src = str(md.get("source") or md.get("filename") or md.get("id") or "").strip().lower()
+                if src:
+                    source_counts[src] = source_counts.get(src, 0) + 1
+
+                hay = (
+                    str((d or {}).get("page_content") or (d or {}).get("text") or "")[:1500]
+                    + "\n"
+                    + " ".join(str(md.get(k) or "") for k in ("heading", "section", "title", "chapter"))
+                ).lower()
+                if any(_token_match_light(hay, tok) for tok in (q_focus_tokens + q_ctx_tokens)):
+                    query_hits_docs += 1
+
+                toks = {t for t in re.findall(r"[a-z0-9]{3,}", hay[:1200]) if t not in token_stop}
+                if toks:
+                    doc_token_sets.append(toks)
+
+            same_source_cluster = bool(source_counts) and (max(source_counts.values()) >= max(2, len(list_docs) - 1))
+            chunk_spread_ok = bool((not chunk_idxs) or (max(chunk_idxs) - min(chunk_idxs) <= 8))
+
+            topic_drift_pairs = 0
+            for i in range(len(doc_token_sets) - 1):
+                inter = len(doc_token_sets[i] & doc_token_sets[i + 1])
+                union = len(doc_token_sets[i] | doc_token_sets[i + 1])
+                overlap = (inter / union) if union else 0.0
+                if overlap < 0.05:
+                    topic_drift_pairs += 1
+            low_drift = bool(topic_drift_pairs <= 1)
+
+            same_section_same_source_allow = bool(
+                len(section_keys) == 1
+                and len(source_counts) == 1
+                and query_hits_docs >= 1
+                and low_drift
+            )
+
+            controlled_nearby_ok = bool(
+                same_source_cluster
+                and chunk_spread_ok
+                and query_hits_docs >= max(2, len(list_docs) - 1)
+                and low_drift
+            )
+            if same_section_same_source_allow:
+                controlled_nearby_ok = True
+
+            if not controlled_nearby_ok:
+                logger.info("[LIST CANDIDATE REJECTED] reason=multi_section_contamination keys=%s", list(section_keys)[:4])
+                dec["answer"] = RAG_NO_MATCH_RESPONSE
+                dec["used_llm"] = False
+                dec["answer_type"] = "list_multi_section_rejected"
+                dec["source_mode"] = "not_found_guard"
+                _log_final_decision_debug(rejected=True, rejection_reason="list_multi_section_contamination")
+                return dec
+
+            logger.info("[LIST NEARBY SECTION ALLOW] enabled=true reason=controlled_nearby_alignment")
+
+        if not _is_answer_grounded_in_docs(shaped, retrieved_docs or [], query_text=query):
+            logger.info("[LIST CANDIDATE REJECTED] reason=ungrounded answer=%s", shaped[:220])
+            dec["answer"] = RAG_NO_MATCH_RESPONSE
+            dec["used_llm"] = False
+            dec["answer_type"] = "list_ungrounded_rejected"
+            dec["source_mode"] = "not_found_guard"
+            _log_final_decision_debug(rejected=True, rejection_reason="list_ungrounded")
+            return dec
+        dec["answer"] = shaped
+
+    if is_definition_mode:
+        has_entity, entity = _extract_entity_from_definition_query(query)
+        entity_l = re.sub(r"\s+", " ", str(entity or "")).strip().lower() if has_entity else ""
+        ans_l = answer.lower()
+        has_def_cue = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|is\s+the\s+study\s+of)\b", ans_l))
+        entity_grounded = True
+        if entity_l:
+            if re.search(rf"\b{re.escape(entity_l)}\b", ans_l):
+                entity_grounded = True
+            else:
+                etoks = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
+                token_hits = sum(1 for t in etoks if re.search(rf"\b{re.escape(t)}\b", ans_l))
+                entity_grounded = token_hits >= max(1, min(2, len(etoks)))
+        if (not has_def_cue) or (not entity_grounded) or (not _passes_strict_definition_relevance_guard(query, answer)):
+            logger.info("[DEFINITION CANDIDATE REJECTED] reason=missing_definition_cue_or_entity answer=%s", answer[:220])
+            dec["answer"] = RAG_NO_MATCH_RESPONSE
+            dec["used_llm"] = False
+            dec["answer_type"] = "definition_candidate_rejected"
+            dec["source_mode"] = "not_found_guard"
+            _log_final_decision_debug(rejected=True, rejection_reason="definition_candidate_rejected")
+            return dec
+
+    logger.info("[FINAL ANSWER SOURCE] source_mode=%s answer_type=%s used_llm=%s", dec.get("source_mode"), dec.get("answer_type"), dec.get("used_llm"))
+    _log_final_decision_debug(rejected=False, rejection_reason="")
+    return dec
+
+
 def _shared_rag_final_answer_decision(
     query: str,
     doc_dicts: List[Dict[str, Any]],
@@ -13908,11 +13650,254 @@ def _shared_rag_final_answer_decision(
     family = family_v2
     fact_type = _detect_fact_query_type(query)
     logger.info("[QUERY FAMILY] legacy=%s v2=%s query=%s", family_legacy, family_v2, (query or "")[:140])
+    context_tokens_dbg, focus_tokens_dbg = _split_query_context_focus_tokens(query, family_v2)
+    if family_v2 in {"list_entity", "list_structure"}:
+        logger.info("[QUERY TOKEN DEBUG] query=%s", (query or "")[:220])
+        logger.info("[QUERY TOKEN DEBUG] context_tokens=%s", context_tokens_dbg)
+        logger.info("[QUERY TOKEN DEBUG] focus_tokens=%s", focus_tokens_dbg)
+    list_section_confident = True
+    list_debug_selected_chunks: list[Any] = []
+    list_debug_section_confidences: list[float] = []
+    list_debug_blocked_reason = ""
+    list_local_support = _collect_local_window_support(routed_docs or doc_dicts or [])
+    list_local_override = _has_strong_local_window_support(list_local_support, confidence_threshold=0.58)
+
+    if family_v2 in {"list_entity", "list_structure"} and (routed_docs or doc_dicts):
+        list_ranked: list[tuple[float, dict, dict]] = []
+        for d in (routed_docs or doc_dicts or [])[:10]:
+            sig = _doc_query_token_signals(query, family_v2, d)
+            local_priority_bonus = 0.0
+            if sig.get("local_promoted", 0.0) >= 0.5 and sig.get("local_confidence_score", 0.0) >= 0.58:
+                local_priority_bonus = 1.6 + (0.9 * sig.get("local_confidence_score", 0.0))
+            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.9 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus - sig.get("generic_penalty", 0.0) - (0.45 * sig.get("missing_penalty", 0.0))
+            list_ranked.append((float(local_score), d, sig))
+        list_ranked.sort(key=lambda x: x[0], reverse=True)
+
+        if list_ranked:
+            logger.info("[SECTION DEBUG] query=%s", (query or "")[:220])
+        for rank_idx, (cand_score, cand_doc, cand_sig) in enumerate(list_ranked[: min(5, len(list_ranked))], start=1):
+            md_c = dict((cand_doc or {}).get("metadata") or {})
+            cand_txt = str((cand_doc or {}).get("page_content") or (cand_doc or {}).get("text") or "")
+            heading_parts = [str(md_c.get(k) or "") for k in ("heading", "section", "title", "chapter", "role")]
+            heading_blob = " ".join(heading_parts).lower()
+            low_cand = cand_txt.lower()
+            query_hits = [
+                tok for tok in (context_tokens_dbg + focus_tokens_dbg)
+                if re.search(rf"\b{re.escape(tok)}\b", f"{heading_blob} {low_cand[:1800]}")
+            ]
+            focus_hits = [
+                tok for tok in focus_tokens_dbg
+                if re.search(rf"\b{re.escape(tok)}\b", f"{heading_blob} {low_cand[:1800]}")
+            ]
+            semantic_score = 0.0
+            for sk in ("similarity", "score", "final_score", "_boosted_score"):
+                if sk in (cand_doc or {}):
+                    try:
+                        semantic_score = float((cand_doc or {}).get(sk) or 0.0)
+                    except Exception:
+                        semantic_score = 0.0
+                    break
+            section_conf = _debug_section_confidence(cand_sig, cand_score)
+            preview = re.sub(r"\s+", " ", cand_txt).strip()[:160]
+            logger.info(
+                "[SECTION DEBUG] rank=%s chunk=%s source=%s semantic=%.4f final=%.4f query_hits=%s focus_hits=%s heading_hits=%.3f section_phrase_hits=%.3f list_density=%.3f generic_penalty=%.3f heading_detected=%s toc_hint=%s section_confidence=%.3f preview=%s",
+                rank_idx,
+                md_c.get("chunk_index"),
+                str(md_c.get("source") or md_c.get("filename") or md_c.get("id") or "")[:120],
+                semantic_score,
+                float(cand_score),
+                query_hits,
+                focus_hits,
+                float(cand_sig.get("heading_hits", 0.0) or 0.0),
+                float(cand_sig.get("phrase_hits", 0.0) or 0.0),
+                float(cand_sig.get("marker_score", 0.0) or 0.0),
+                float(cand_sig.get("generic_penalty", 0.0) or 0.0),
+                bool(cand_sig.get("heading_detected", 0.0) >= 0.5),
+                bool(cand_sig.get("toc_hint", 0.0) >= 0.5),
+                section_conf,
+                preview,
+            )
+
+        top_sig = list_ranked[0][2] if list_ranked else {}
+        top_score = float(list_ranked[0][0]) if list_ranked else -999.0
+        strong_anchor = bool(
+            top_sig.get("phrase_hits", 0.0) >= 0.55
+            or top_sig.get("heading_hits", 0.0) >= 0.65
+            or (top_sig.get("token_hits", 0.0) >= 1.2 and top_sig.get("marker_score", 0.0) >= 0.20)
+            or (top_sig.get("local_focus_hits", 0.0) >= 1.0 and top_sig.get("local_confidence_score", 0.0) >= 0.45)
+        )
+        list_section_confident = bool((top_score >= 1.15 or top_sig.get("local_confidence_score", 0.0) >= 0.55) and strong_anchor and top_sig.get("generic_penalty", 0.0) < 1.35)
+        selected_ranked = [
+            (score, d, sig)
+            for score, d, sig in list_ranked
+            if (score > 0.10)
+            or (sig.get("focus_hits", 0.0) >= 1.0)
+            or (sig.get("token_hits", 0.0) >= 0.75)
+            or (sig.get("marker_score", 0.0) >= 0.20)
+        ][:4]
+        if (not selected_ranked) and list_ranked:
+            selected_ranked = list_ranked[: min(3, len(list_ranked))]
+        elif (len(selected_ranked) == 1) and (len(list_ranked) >= 2) and (not list_section_confident):
+            selected_ranked = list_ranked[: min(3, len(list_ranked))]
+        list_docs = [d for score, d, sig in selected_ranked]
+
+        section_coherence_ok = False
+        section_coherence_reason = "no_ranked_candidates"
+        if selected_ranked:
+            section_scores = [_debug_section_confidence(sig, score) for score, _d, sig in selected_ranked]
+            max_section_score = max(section_scores) if section_scores else 0.0
+            avg_section_score = (sum(section_scores) / max(1, len(section_scores))) if section_scores else 0.0
+            heading_or_phrase_hits = sum(
+                1
+                for _score, _d, sig in selected_ranked
+                if (sig.get("heading_hits", 0.0) >= 0.35 or sig.get("phrase_hits", 0.0) >= 0.30)
+            )
+            marker_hits = sum(1 for _score, _d, sig in selected_ranked if sig.get("marker_score", 0.0) >= 0.12)
+            local_promoted_hits = sum(1 for _score, _d, sig in selected_ranked if sig.get("local_promoted", 0.0) >= 0.5)
+            local_focus_total = sum(float(sig.get("local_focus_hits", 0.0) or 0.0) for _score, _d, sig in selected_ranked)
+            local_list_total = sum(float(sig.get("local_list_density", 0.0) or 0.0) for _score, _d, sig in selected_ranked)
+
+            sources: list[str] = []
+            chunk_idxs: list[int] = []
+            for _score, d_sel, _sig in selected_ranked:
+                md_sel = dict((d_sel or {}).get("metadata") or {})
+                src_sel = str(md_sel.get("source") or md_sel.get("filename") or md_sel.get("id") or "")
+                if src_sel:
+                    sources.append(src_sel)
+                try:
+                    chunk_idxs.append(int(md_sel.get("chunk_index")))
+                except Exception:
+                    pass
+            single_source = bool(sources) and (len(set(sources)) == 1)
+            compact_window = bool(single_source and len(chunk_idxs) >= 2 and (max(chunk_idxs) - min(chunk_idxs) <= 3))
+
+            token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those"}
+            doc_token_sets: list[set[str]] = []
+            for _score, d_sel, _sig in selected_ranked:
+                txt_sel = str((d_sel or {}).get("page_content") or (d_sel or {}).get("text") or "")[:1200].lower()
+                toks_sel = {t for t in re.findall(r"[a-z0-9]{3,}", txt_sel) if t not in token_stop}
+                if toks_sel:
+                    doc_token_sets.append(toks_sel)
+            topic_drift_pairs = 0
+            for i in range(len(doc_token_sets) - 1):
+                inter = len(doc_token_sets[i] & doc_token_sets[i + 1])
+                union = len(doc_token_sets[i] | doc_token_sets[i + 1])
+                overlap = (inter / union) if union else 0.0
+                if overlap < 0.06:
+                    topic_drift_pairs += 1
+            low_drift = bool(topic_drift_pairs <= 1)
+
+            section_coherence_ok = bool(
+                (max_section_score >= 0.42 or (local_promoted_hits >= 1 and local_focus_total >= 1.0))
+                and (avg_section_score >= 0.28 or local_promoted_hits >= 1)
+                and (compact_window or heading_or_phrase_hits >= 1)
+                and (marker_hits >= 1 or heading_or_phrase_hits >= 2 or local_list_total >= 0.14)
+                and (low_drift or local_promoted_hits >= 1)
+            )
+            if section_coherence_ok:
+                section_coherence_reason = "coherent_local_window"
+            elif not (max_section_score >= 0.42 and avg_section_score >= 0.28):
+                section_coherence_reason = "low_section_confidence"
+            elif not (compact_window or heading_or_phrase_hits >= 1):
+                section_coherence_reason = "no_local_anchor"
+            elif not (marker_hits >= 1 or heading_or_phrase_hits >= 2):
+                section_coherence_reason = "weak_list_structure"
+            else:
+                section_coherence_reason = "high_topic_drift"
+
+        list_section_confident = bool(list_section_confident and section_coherence_ok)
+        logger.info("[SECTION COHERENCE DEBUG] coherent=%s reason=%s", bool(list_section_confident), section_coherence_reason)
+        if list_docs:
+            list_debug_selected_chunks = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in list_docs]
+            list_debug_section_confidences = [round(_debug_section_confidence(sig, score), 3) for score, d, sig in selected_ranked[: len(list_docs)]]
+            logger.info("[SECTION SELECT] family=%s selected_docs=%s top_score=%.3f confident=%s", family_v2, len(list_docs), top_score, list_section_confident)
+
+            if list_section_confident:
+                routed_docs = list_docs
+                focused_context = "\n\n".join((d.get("page_content") or d.get("text") or "") for d in list_docs)
+                list_context = focused_context
+                list_local_support = _collect_local_window_support(list_docs)
+                list_local_override = _has_strong_local_window_support(list_local_support, confidence_threshold=0.58)
+                logger.info("[LOCAL SIGNAL USE] promoted=%s focus=%.2f heading=%.2f density=%.3f confidence=%.3f", int(list_local_support.get("promoted_count", 0.0)), float(list_local_support.get("focus_hits", 0.0)), float(list_local_support.get("heading_match", 0.0)), float(list_local_support.get("list_density", 0.0)), float(list_local_support.get("confidence", 0.0)))
+            else:
+                logger.info("[SECTION SELECT] low_confidence_single_chunk=true action=keep_original_context")
 
     answer_source_mode = "prose"
 
     def _result(ans: str | None, used_llm: bool, answer_type: str, items_count: int = 0) -> Dict[str, Any]:
         nonlocal answer_source_mode
+
+        def _is_fragmentary_ocr(text: str) -> bool:
+            s = re.sub(r"\s+", " ", str(text or "")).strip()
+            if not s:
+                return True
+            if re.search(r"\b(?:www\.|https?://|isbn|copyright|table\s*\d+|figure\s*\d+)\b", s, flags=re.IGNORECASE):
+                return True
+            if re.search(r"(?:\b[A-Za-z]\s+){4,}\b", s):
+                return True
+            tokens = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+            if len(tokens) < 3:
+                return True
+            uniq_ratio = (len(set(t.lower() for t in tokens)) / max(1, len(tokens)))
+            if len(tokens) >= 8 and uniq_ratio < 0.35:
+                return True
+            return False
+
+        def _is_definition_answer_valid(ans_text: str) -> bool:
+            q_low = re.sub(r"\s+", " ", str(query or "")).strip().lower()
+            if not (q_low.startswith("what is") or q_low.startswith("define") or family_v2 == "definition_entity"):
+                return True
+            cand = re.sub(r"\s+", " ", str(ans_text or "")).strip()
+            if not cand or cand == RAG_NO_MATCH_RESPONSE:
+                return False
+            if _is_fragmentary_ocr(cand):
+                return False
+            has_entity, entity = _extract_entity_from_definition_query(query)
+            entity_l = re.sub(r"\s+", " ", str(entity or "")).strip().lower() if has_entity else ""
+            cand_l = cand.lower()
+            def_cue = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|is\s+the\s+study\s+of)\b", cand_l))
+            if not def_cue:
+                return False
+            if entity_l:
+                if re.search(rf"\b{re.escape(entity_l)}\b", cand_l):
+                    return _passes_strict_definition_relevance_guard(query, cand)
+                ent_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
+                token_hits = sum(1 for t in ent_tokens if re.search(rf"\b{re.escape(t)}\b", cand_l))
+                if token_hits < max(1, min(2, len(ent_tokens))):
+                    return False
+            if re.search(r"\bimportant\s+terminology\b", cand_l):
+                return False
+            return _passes_strict_definition_relevance_guard(query, cand)
+
+        def _is_coherent_list_answer(ans_text: str) -> tuple[bool, str | None]:
+            q_low = re.sub(r"\s+", " ", str(query or "")).strip().lower()
+            list_mode = bool(
+                family_v2 == "list_entity"
+                or family == "list_structure"
+                or _is_targeted_list_question(q_low)
+                or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
+            )
+            if not list_mode:
+                return True, re.sub(r"\s+", " ", str(ans_text or "")).strip()
+            answer_type_local = str(answer_type or "")
+            strict_fast = bool((not used_llm) and answer_type_local in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
+            list_ok_local, list_reason_local, shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(str(ans_text or "")), strict_fast=strict_fast, local_support=list_local_support)
+            logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok_local), list_reason_local)
+            if strict_fast:
+                logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(list_ok_local), list_reason_local)
+            if not list_ok_local or (not shaped):
+                return False, None
+            align = _list_query_alignment_metrics(query, shaped)
+            mismatch_penalty = float(align.get("mismatch_penalty", 0.0) or 0.0)
+            _inner_mismatch_threshold = 1.5
+            if mismatch_penalty > _inner_mismatch_threshold:
+                logger.info("[LIST TOKEN MISMATCH] rejected=true penalty=%.3f threshold=%.1f focus_hits=%s context_hits=%s items=%s", mismatch_penalty, _inner_mismatch_threshold, int(align.get("focus_hit_items", 0.0)), int(align.get("context_hit_items", 0.0)), int(align.get("item_count", 0.0)))
+                return False, None
+            lines = [ln for ln in shaped.splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
+            if len(lines) < 2:
+                return False, None
+            return True, shaped
+
         cleaned_ans = _cleanup_final_answer_text(ans or "") if ans is not None else ans
         if ans is not None and family_v2 == "fact_entity":
             cleaned_ans = _normalize_validated_fact_answer(fact_type, str(cleaned_ans or ""))
@@ -13920,8 +13905,47 @@ def _shared_rag_final_answer_decision(
             shaped = _sanitize_list_answer_text(query, str(cleaned_ans or ""))
             if shaped:
                 cleaned_ans = shaped
+        if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE:
+            list_ok, list_shaped = _is_coherent_list_answer(str(cleaned_ans))
+            if not list_ok:
+                logger.info("[LIST CANDIDATE REJECTED] reason=incoherent answer=%s", str(cleaned_ans)[:220])
+                cleaned_ans = RAG_NO_MATCH_RESPONSE
+                used_llm = False
+                answer_type = "list_incoherent_rejected"
+                answer_source_mode = "not_found_guard"
+            elif list_shaped and list_shaped != cleaned_ans:
+                cleaned_ans = list_shaped
+        if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE:
+            if not _is_definition_answer_valid(str(cleaned_ans)):
+                logger.info("[DEFINITION CANDIDATE REJECTED] reason=missing_entity_or_definition_cue answer=%s", str(cleaned_ans)[:220])
+                cleaned_ans = RAG_NO_MATCH_RESPONSE
+                used_llm = False
+                answer_type = "definition_candidate_rejected"
+                answer_source_mode = "not_found_guard"
+        if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and _is_fragmentary_ocr(str(cleaned_ans)):
+            logger.info("[FINAL CANDIDATE REJECTED] reason=fragmentary_ocr answer=%s", str(cleaned_ans)[:220])
+            cleaned_ans = RAG_NO_MATCH_RESPONSE
+            used_llm = False
+            answer_type = "fragmentary_ocr_rejected"
+            answer_source_mode = "not_found_guard"
         if ans is not None and cleaned_ans != ans:
             logger.info("[OCR CLEANUP APPLIED] before=%s | after=%s", str(ans)[:180], str(cleaned_ans)[:180])
+        rejected = bool(cleaned_ans == RAG_NO_MATCH_RESPONSE)
+        rejection_reason = ""
+        if rejected:
+            if "rejected" in str(answer_type or ""):
+                rejection_reason = str(answer_type)
+            elif str(answer_source_mode) == "not_found_guard":
+                rejection_reason = "not_found_guard"
+        logger.info("[FINAL ANSWER SOURCE] source_mode=%s answer_type=%s used_llm=%s", answer_source_mode, answer_type, used_llm)
+        logger.info(
+            "[FINAL DECISION DEBUG] answer_type=%s source_mode=%s used_llm=%s rejected=%s rejection_reason=%s",
+            answer_type,
+            answer_source_mode,
+            used_llm,
+            rejected,
+            rejection_reason,
+        )
         return {
             "intent": intent,
             "query_family": family_v2,
@@ -14037,46 +14061,12 @@ def _shared_rag_final_answer_decision(
         answer_source_mode = "not_found_guard"
         return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="format_or_domain_mismatch_guard", items_count=0)
 
-    lesson_structured = _docs_look_lesson_structured(routed_docs or doc_dicts or [])
-    q_low_guard = re.sub(r"\s+", " ", str(query or "").strip().lower())
-    if lesson_structured and re.search(r"\b(scene\s+[ivxlcdm]+|chapter\s+\d+)\b", q_low_guard):
-        logger.info("[FORMAT MISMATCH GUARD] lesson_structured=%s query=%s", lesson_structured, (query or "")[:120])
-        answer_source_mode = "not_found_guard"
-        return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="lesson_format_mismatch_guard", items_count=0)
-
-    if family == "lesson_lookup":
-        logger.info("[LESSON LOOKUP MODE] query=%s", (query or "")[:120])
-        answer_source_mode = "lesson_lookup"
-        lesson_ans = _extract_lesson_lookup_answer(query, routed_docs or doc_dicts or [])
-        if lesson_ans:
-            logger.info("[LIST WINNER] mode=lesson_lookup answer=%s", lesson_ans[:220])
-            return _result(lesson_ans, used_llm=False, answer_type="lesson_lookup_extractor", items_count=1)
-        return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="lesson_lookup_not_found", items_count=0)
-
-    if family == "sequence_lookup":
-        logger.info("[TOC MODE] mode=sequence_lookup query=%s", (query or "")[:120])
-        answer_source_mode = "toc"
-        seq_ans = _extract_sequence_after_answer(query, routed_docs or doc_dicts or [])
-        if seq_ans:
-            logger.info("[LIST WINNER] mode=sequence_lookup answer=%s", seq_ans[:220])
-            return _result(seq_ans, used_llm=False, answer_type="sequence_lookup_extractor", items_count=1)
-        return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="sequence_lookup_not_found", items_count=0)
-
-    if family == "toc_structure":
-        logger.info("[TOC MODE] mode=toc_structure query=%s", (query or "")[:120])
-        answer_source_mode = "toc"
-        toc_ans = _extract_toc_topics_answer(routed_docs or doc_dicts or [])
-        if toc_ans:
-            logger.info("[LIST WINNER] mode=toc_structure answer=%s", toc_ans[:220])
-            return _result(toc_ans, used_llm=False, answer_type="toc_structure_extractor", items_count=1)
-        return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="toc_structure_not_found", items_count=0)
-
     family = {
         "list_entity": "list_structure",
         "explanatory_compare": "overview_chapter_compare",
         "out_of_domain_or_format_mismatch": "out_of_scope_candidate",
         "toc_structure": "overview_chapter_compare",
-        "lesson_lookup": "overview_chapter_compare",
+        
         "sequence_lookup": "overview_chapter_compare",
     }.get(family_v2, family_v2)
 
@@ -14094,7 +14084,7 @@ def _shared_rag_final_answer_decision(
     def _extract_primary_simple_answer_from_top_docs(query_text: str, docs: List[Dict[str, Any]], family_name: str) -> Optional[str]:
         if not docs:
             return None
-        if family_name in {"list_entity", "overview_chapter_compare", "explanatory_compare", "toc_structure", "lesson_lookup", "sequence_lookup", "fact_entity"}:
+        if family_name in {"list_entity", "overview_chapter_compare", "explanatory_compare", "fact_entity"}:
             return None
 
         ql = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
@@ -14206,11 +14196,6 @@ def _shared_rag_final_answer_decision(
                     has_entity_tokens = bool(entity_tokens) and all(re.search(rf"\b{re.escape(t)}\b", low) for t in entity_tokens[:2])
                     if not (has_entity_phrase or has_entity_tokens):
                         continue
-                    if ent_l == "reinforcement":
-                        if re.search(r"\bpunishment\b", low):
-                            continue
-                        if not re.search(r"\b(reinforcement\b.*\b(strengthens|increases)\b|\b(strengthens|increases)\b.*\breinforcement\b)", low):
-                            continue
 
                 score, word_count, has_def_marker, has_query_keyword, starts_pronoun = _score_sentence(sent)
                 if is_definition_like and (not has_def_marker):
@@ -14303,10 +14288,6 @@ def _shared_rag_final_answer_decision(
                 candidate = f"{entity_title_local} is characterized by {found_signals[0]} and {found_signals[1]}."
                 if (not _is_over_generic_definition_template(candidate, entity_local_l)) and _has_required_concept_specific_signal(candidate, entity_local_l):
                     return candidate
-            if ("bureaucracy" in entity_local_l or "bureaucratic management" in entity_local_l) and len(found_signals) >= 1:
-                candidate = f"{entity_title_local} is characterized by {found_signals[0]} and a formal organizational structure."
-                if (not _is_over_generic_definition_template(candidate, entity_local_l)) and _has_required_concept_specific_signal(candidate, entity_local_l):
-                    return candidate
             return None
 
         candidate = f"{entity_title_local} is a concept discussed in the document."
@@ -14316,10 +14297,10 @@ def _shared_rag_final_answer_decision(
 
     q_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
     is_who_identity_query = bool(re.match(r"^who\s+(is|was)\b", q_low))
-    is_who_attribution_query = bool(re.match(r"^who\s+is\s+considered\s+the\s+father\s+of\b", q_low)) or q_low.startswith("who introduced")
+    is_who_attribution_query = q_low.startswith("who introduced") or q_low.startswith("who developed")
 
-    broad_conditioning_q = bool(re.match(r"^(?:what\s+is|explain)\s+conditioning\??$", q_low))
-    broad_conditioning_types_q = bool(re.match(r"^(?:types\s+of\s+conditioning|what\s+are\s+the\s+types\s+of\s+conditioning)\??$", q_low))
+    broad_conditioning_q = False
+    broad_conditioning_types_q = False
     if broad_conditioning_q or broad_conditioning_types_q:
         cond_simple = _extract_primary_simple_answer_from_top_docs(query, routed_docs or doc_dicts or [], family_v2)
         if cond_simple:
@@ -14334,59 +14315,6 @@ def _shared_rag_final_answer_decision(
         answer_source_mode = "definition"
         q_low_def = re.sub(r"\s+", " ", str(query or "").strip().lower())
         merged_def_ctx = "\n".join(str((d or {}).get("page_content") or (d or {}).get("text") or "") for d in (routed_docs or doc_dicts or [])[:5])
-
-        if "scientific method in psychology" in q_low_def:
-            sm_ans = "The scientific method in psychology is a systematic approach used to observe, measure, and predict behavior."
-            logger.info("[DEFINITION WINNER] mode=scientific_method_forced answer=%s", sm_ans[:220])
-            return _result(sm_ans, used_llm=False, answer_type="definition_scientific_method_forced", items_count=0)
-
-        if re.search(r"\bwhen\s+was\s+the\s+first\s+psychology\s+lab\s+established\b", q_low_def):
-            year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
-            if year_match_ctx:
-                year_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "."
-                logger.info("[DEFINITION WINNER] mode=lab_year_from_context answer=%s", year_ans[:220])
-                return _result(year_ans, used_llm=False, answer_type="definition_lab_year_from_context", items_count=0)
-
-        if q_low_def.startswith("what is psychology"):
-            m_psy = re.search(r"(psychology\s+is\s+the\s+scientific\s+study\s+of\s+behavior\s+and\s+mental\s+processes)", merged_def_ctx, flags=re.IGNORECASE)
-            if m_psy:
-                psy_ans = m_psy.group(1).strip().rstrip(".") + "."
-                logger.info("[DEFINITION WINNER] mode=canonical_psychology answer=%s", psy_ans[:220])
-                return _result(psy_ans, used_llm=False, answer_type="definition_canonical_psychology", items_count=0)
-
-        if "tabula rasa" in q_low_def:
-            if re.search(r"\btabula\s*rasa\b", merged_def_ctx, flags=re.IGNORECASE):
-                tr_ans = "Tabula rasa refers to the idea that the mind begins as a blank slate."
-                logger.info("[DEFINITION WINNER] mode=tabula_rasa_fallback answer=%s", tr_ans[:220])
-                return _result(tr_ans, used_llm=False, answer_type="definition_tabula_rasa_fallback", items_count=0)
-
-        if "phrenology" in q_low_def:
-            if re.search(r"\bphrenology\b", merged_def_ctx, flags=re.IGNORECASE):
-                phr_ans = "Phrenology is the view that mental functions correspond to specific areas of the brain and skull."
-                logger.info("[DEFINITION WINNER] mode=phrenology_fallback answer=%s", phr_ans[:220])
-                return _result(phr_ans, used_llm=False, answer_type="definition_phrenology_fallback", items_count=0)
-
-        if re.search(r"\bwhen\s+was\s+the\s+first\s+psychology\s+lab\s+established\b", q_low_def):
-            if re.search(r"\b1879\b", merged_def_ctx) and re.search(r"\bwundt\b", merged_def_ctx, flags=re.IGNORECASE):
-                year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
-                year_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "." if year_match_ctx else None
-                logger.info("[DEFINITION WINNER] mode=lab_year answer=%s", year_ans[:220])
-                if year_ans:
-                    return _result(year_ans, used_llm=False, answer_type="definition_lab_year", items_count=0)
-
-        if re.search(r"\b(who\s+founded\s+modern\s+psychology|who\s+is\s+wilhelm\s+wundt|first\s+psychology\s+lab|first\s+psychological\s+laboratory|when\s+was\s+the\s+first\s+psychology\s+lab)\b", q_low_def):
-            founder_match = re.search(r"(Wilhelm\s+Wundt[^.\n]{0,180}(?:1879|founded[^.\n]{0,80}laboratory[^.\n]{0,120}))", merged_def_ctx, flags=re.IGNORECASE)
-            year_match = re.search(r"\b(1879)\b", merged_def_ctx)
-            if founder_match:
-                founder_ans = re.sub(r"\s+", " ", founder_match.group(1)).strip(" .") + "."
-                logger.info("[DEFINITION WINNER] mode=founder_fast answer=%s", founder_ans[:220])
-                return _result(founder_ans, used_llm=False, answer_type="definition_founder_fast", items_count=0)
-            if year_match and re.search(r"\bwundt\b", merged_def_ctx, flags=re.IGNORECASE):
-                year_match_ctx = re.search(r"([^.\n]{0,120}\b(?:wilhelm\s+wundt|1879|first\s+psychology\s+lab(?:oratory)?)\b[^.\n]{0,160})", merged_def_ctx, flags=re.IGNORECASE)
-                if year_match_ctx:
-                    founder_ans = re.sub(r"\s+", " ", year_match_ctx.group(1)).strip(" .") + "."
-                    logger.info("[DEFINITION WINNER] mode=founder_year_from_context answer=%s", founder_ans[:220])
-                    return _result(founder_ans, used_llm=False, answer_type="definition_founder_year_from_context", items_count=0)
 
         indirect_doc = None
         for d in (routed_docs or doc_dicts or []):
@@ -14436,9 +14364,9 @@ def _shared_rag_final_answer_decision(
                     t for t in re.findall(r"[a-z0-9]{2,}", ent_local_l)
                     if t not in {"the", "a", "an", "of", "and", "in", "to"}
                 ]
-                if has_ent_local and _score_concept_definition_sentence(fast_def, ent_local_l, ent_local_tokens) <= 0:
+                if has_ent_local and _s_definition_sentence(fast_def, ent_local_l, ent_local_tokens) <= 0:
                     alt_def = _extract_candidate_definition_sentence_from_docs(query, routed_docs or doc_dicts or [], max_docs=3)
-                    if alt_def and _score_concept_definition_sentence(alt_def, ent_local_l, ent_local_tokens) > 0:
+                    if alt_def and _s_definition_sentence(alt_def, ent_local_l, ent_local_tokens) > 0:
                         fast_def = alt_def
                     else:
                         fast_def = None
@@ -14458,10 +14386,14 @@ def _shared_rag_final_answer_decision(
                 return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="definition_not_found_simple", items_count=0)
             has_ent_local, ent_local = _extract_entity_from_definition_query(query)
             ent_local_l = re.sub(r"\s+", " ", str(ent_local or "").strip().lower()) if has_ent_local else ""
-            if ent_local_l and ("psychology is the scientific study of behavior and mental processes" in str(fast_def).lower()) and (ent_local_l not in {"psychology", "behavior and mental processes"}):
-                fallback_def = _definition_explanation_fallback(query, routed_docs or doc_dicts or [], ent_local_l)
-                if fallback_def:
-                    return _result(fallback_def, used_llm=False, answer_type="definition_explanation_fallback", items_count=0)
+            if ent_local_l:
+                fast_def_low = re.sub(r"\s+", " ", str(fast_def or "").strip().lower())
+                ent_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", ent_local_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
+                token_hits = sum(1 for tok in ent_tokens if re.search(rf"\b{re.escape(tok)}\b", fast_def_low))
+                if token_hits < max(1, min(2, len(ent_tokens))):
+                    fallback_def = _definition_explanation_fallback(query, routed_docs or doc_dicts or [], ent_local_l)
+                    if fallback_def:
+                        return _result(fallback_def, used_llm=False, answer_type="definition_explanation_fallback", items_count=0)
             if not _passes_strict_definition_relevance_guard(query, fast_def):
                 fallback_def = _definition_explanation_fallback(query, routed_docs or doc_dicts or [], _extract_entity_from_definition_query(query)[1])
                 if fallback_def:
@@ -14476,18 +14408,56 @@ def _shared_rag_final_answer_decision(
     if family_v2 == "list_entity" or family == "list_structure":
         answer_source_mode = "list"
         logger.info("[LIST EXTRACTION MODE] family=%s query=%s", family_v2, (query or "")[:120])
+        if not list_section_confident:
+            list_debug_blocked_reason = "weak section evidence"
+        logger.info("[LIST DEBUG] query=%s", (query or "")[:220])
+        logger.info("[LIST DEBUG] selected_chunks=%s", list_debug_selected_chunks)
+        logger.info("[LIST DEBUG] section_confidences=%s", list_debug_section_confidences)
+        logger.info("[LIST DEBUG] deterministic_allowed=%s", bool(list_section_confident))
+        logger.info("[LIST DEBUG] blocked_reason=%s", list_debug_blocked_reason or "")
+        logger.info("[LIST DEBUG] fallback_to_llm=%s", bool(not list_section_confident))
         q_list_local = re.sub(r"\s+", " ", str(query or "").strip().lower())
-        if q_list_local.startswith("what are ") and not re.search(r"\b(list|types|levels|steps|stages|components|goals|parts|phases|advantages|disadvantages|principles|functions|elements)\b", q_list_local):
+        if q_list_local.startswith("what are ") and (not _is_targeted_list_question(q_list_local)):
             plural_term = re.sub(r"^what are\s+", "", q_list_local).strip(" .?")
             plural_sentence, _plural_md = _best_term_explanation_from_docs(plural_term, routed_docs or doc_dicts or [])
             if plural_sentence:
                 logger.info("[DEF FALLBACK MODE] activated entity=%s", plural_term)
                 logger.info("[DEF FALLBACK ANSWER] %s", plural_sentence[:260])
                 return _result(plural_sentence, used_llm=False, answer_type="definition_plural_explanation", items_count=0)
-        named_list = _extract_named_psychology_list(query, routed_docs or doc_dicts or [])
-        if named_list:
-            logger.info("[LIST WINNER] mode=named_psychology_list items=%s", len([ln for ln in named_list.splitlines() if ln.strip()]))
-            return _result(named_list, used_llm=False, answer_type="list_named_psychology", items_count=len([ln for ln in named_list.splitlines() if ln.strip()]))
+        extraction_blocks = 3 if list_section_confident else 4
+        deterministic_list = _extract_list_from_context(query, list_context, max_candidate_blocks=extraction_blocks)
+        if deterministic_list:
+            det_ok, det_reason, det_shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(deterministic_list), strict_fast=list_section_confident, local_support=_collect_local_window_support(routed_docs or doc_dicts or []))
+            logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(det_ok), det_reason)
+            logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(det_ok), det_reason)
+            if det_ok and det_shaped:
+                logger.info("[LIST WINNER] mode=deterministic_context items=%s", len([ln for ln in det_shaped.splitlines() if ln.strip()]))
+                return _result(det_shaped, used_llm=False, answer_type="list_deterministic_context", items_count=len([ln for ln in det_shaped.splitlines() if ln.strip()]))
+            logger.info("[LIST REJECTED] reason=%s", det_reason)
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
+            single_doc_best: str | None = None
+            single_doc_count = 0
+            for d_single in (routed_docs or doc_dicts or [])[:4]:
+                single_ctx = str((d_single or {}).get("page_content") or (d_single or {}).get("text") or "")
+                if not single_ctx.strip():
+                    continue
+                single_list = _extract_list_from_context(query, single_ctx, max_candidate_blocks=2)
+                if not single_list:
+                    continue
+                single_ok, single_reason, single_shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(single_list), strict_fast=False, local_support=_collect_local_window_support([d_single]))
+                logger.info("[LIST SINGLE DOC DEBUG] accepted=%s reason=%s", bool(single_ok), single_reason)
+                if not (single_ok and single_shaped):
+                    continue
+                item_count = len([ln for ln in single_shaped.splitlines() if ln.strip()])
+                if item_count > single_doc_count:
+                    single_doc_best = single_shaped
+                    single_doc_count = item_count
+            if single_doc_best and single_doc_count >= 2:
+                logger.info("[LIST WINNER] mode=deterministic_single_doc items=%s", single_doc_count)
+                return _result(single_doc_best, used_llm=False, answer_type="list_deterministic_context", items_count=single_doc_count)
+        if not list_section_confident:
+            logger.info("[LIST REJECTED] reason=weak_section_signal")
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
         prefer_deterministic_list = bool(
             re.search(r"\bprinciples?\b", q_list_local)
             or "tell me about" in q_list_local
@@ -14495,23 +14465,11 @@ def _shared_rag_final_answer_decision(
         )
         fast_list = None if prefer_deterministic_list else _extract_simple_list_from_docs(routed_docs or doc_dicts or [], query_text=query)
         if fast_list:
-            sanitized_fast_list = _sanitize_list_answer_text(query, fast_list)
-            if not sanitized_fast_list:
-                fast_list = None
-            else:
-                fast_list = sanitized_fast_list
-        if fast_list:
-            logger.info("[LIST WINNER] mode=fast items=%s", len([ln for ln in fast_list.splitlines() if ln.strip()]))
-            return _result(fast_list, used_llm=False, answer_type="list_fast_simple", items_count=len([ln for ln in fast_list.splitlines() if ln.strip()]))
+            logger.info("[LIST REJECTED] reason=fallback_list_path_blocked")
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
 
     if family == "explanatory_compare":
         q_over = re.sub(r"\s+", " ", str(query or "").strip().lower())
-        if "difference between behavior and mental processes" in q_over:
-            ans = "Behavior refers to observable actions, while mental processes refer to internal activities such as thinking, memory, and emotion."
-            return _result(ans, used_llm=False, answer_type="overview_behavior_vs_mental_forced", items_count=0)
-        if "why is psychology considered a science" in q_over:
-            ans = "Psychology is considered a science because it uses scientific methods to observe, measure, and test behavior and mental processes."
-            return _result(ans, used_llm=False, answer_type="overview_why_science_forced", items_count=0)
         topic_pure = _extract_topic_pure_overview_from_docs(query, routed_docs or doc_dicts or [])
         if topic_pure:
             return _result(topic_pure, used_llm=False, answer_type="overview_topic_pure", items_count=0)
@@ -14547,9 +14505,9 @@ def _shared_rag_final_answer_decision(
                         t for t in re.findall(r"[a-z0-9]{2,}", ent_local_l)
                         if t not in {"the", "a", "an", "of", "and", "in", "to"}
                     ]
-                    if has_ent_local and _score_concept_definition_sentence(fast_def, ent_local_l, ent_local_tokens) <= 0:
+                    if has_ent_local and _s_definition_sentence(fast_def, ent_local_l, ent_local_tokens) <= 0:
                         alt_def = _extract_candidate_definition_sentence_from_docs(query, doc_dicts or [], max_docs=3)
-                        if alt_def and _score_concept_definition_sentence(alt_def, ent_local_l, ent_local_tokens) > 0:
+                        if alt_def and _s_definition_sentence(alt_def, ent_local_l, ent_local_tokens) > 0:
                             fast_def = alt_def
                         else:
                             fast_def = None
@@ -14650,6 +14608,16 @@ def _shared_rag_final_answer_decision(
             }
 
         if family == "list_structure":
+            if not list_section_confident:
+                logger.info("[LIST REJECTED] reason=weak_section_signal")
+                return {
+                    "intent": intent,
+                    "query_family": family,
+                    "answer": RAG_NO_MATCH_RESPONSE,
+                    "used_llm": False,
+                    "answer_type": "list_not_found",
+                    "extractor_items_count": len(items),
+                }
             deterministic_list = _extract_list_from_context(query, list_context, max_candidate_blocks=2)
             if deterministic_list:
                 return {
@@ -14671,13 +14639,13 @@ def _shared_rag_final_answer_decision(
                     "extractor_items_count": len(items),
                 }
             if str(list_context or "").strip():
-                logger.info("[LIST FALLBACK] extractor_failed context_present=true action=allow_llm")
+                logger.info("[LIST REJECTED] reason=extractor_failed")
                 return {
                     "intent": intent,
                     "query_family": family,
-                    "answer": None,
-                    "used_llm": True,
-                    "answer_type": "list_llm_fallback_required",
+                    "answer": RAG_NO_MATCH_RESPONSE,
+                    "used_llm": False,
+                    "answer_type": "list_not_found",
                     "extractor_items_count": len(items),
                 }
             return {
@@ -14791,6 +14759,16 @@ def _shared_rag_final_answer_decision(
         }
 
     if family == "list_structure":
+        if not list_section_confident:
+            logger.info("[LIST FALLBACK] weak_section_signal=true action=not_found_after_llm")
+            return {
+                "intent": intent,
+                "query_family": family,
+                "answer": RAG_NO_MATCH_RESPONSE,
+                "used_llm": False,
+                "answer_type": "list_not_found",
+                "extractor_items_count": len(items),
+            }
         deterministic_list = _extract_list_from_context(query, list_context, max_candidate_blocks=2)
         if deterministic_list:
             deterministic_list = _sanitize_list_answer_text(query, deterministic_list) or deterministic_list
@@ -14817,18 +14795,7 @@ def _shared_rag_final_answer_decision(
                 "extractor_items_count": len(fallback_items),
             }
         if str(list_context or "").strip():
-            llm_list_answer = _sanitize_list_answer_text(query, answer or "")
-            if llm_list_answer and _is_answer_grounded_in_docs(llm_list_answer, routed_docs or doc_dicts or [], query_text=query):
-                logger.info("[LIST FALLBACK] extractor_failed llm_grounded=true action=accept_llm")
-                return {
-                    "intent": intent,
-                    "query_family": family,
-                    "answer": llm_list_answer,
-                    "used_llm": True,
-                    "answer_type": "list_llm_grounded_fallback",
-                    "extractor_items_count": len([ln for ln in llm_list_answer.splitlines() if ln.strip()]),
-                }
-            logger.info("[LIST FALLBACK] extractor_failed llm_grounded=false action=not_found")
+            logger.info("[LIST REJECTED] reason=llm_fallback_blocked")
         return {
             "intent": intent,
             "query_family": family,
@@ -14919,15 +14886,40 @@ def _shared_rag_final_answer_decision(
         }
 
     if family in {"out_of_scope_candidate", "general", "overview_chapter_compare"} and answer and answer != RAG_NO_MATCH_RESPONSE:
-        if not _is_answer_grounded_in_docs(answer, doc_dicts, query_text=query):
-            return {
-                "intent": intent,
-                "query_family": family,
-                "answer": RAG_NO_MATCH_RESPONSE,
-                "used_llm": False,
-                "answer_type": "ungrounded_answer_blocked",
-                "extractor_items_count": len(items),
-            }
+        grounded = _is_answer_grounded_in_docs(answer, doc_dicts, query_text=query)
+        docs_count = len(doc_dicts or [])
+        fallback_docs_count = len(_select_generation_context_docs(query, doc_dicts or [], max_docs=3)) if _is_llm_generation_query(query) else 0
+        allow_generation_bypass = _is_generation_bypass_query(query)
+        if not grounded:
+            if allow_generation_bypass and (docs_count > 0 or fallback_docs_count > 0):
+                logger.info(
+                    "[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s",
+                    docs_count,
+                    grounded,
+                    "allow_generation_response",
+                )
+            else:
+                logger.info(
+                    "[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s",
+                    docs_count,
+                    grounded,
+                    "not_found_no_docs_or_strict_mode",
+                )
+                return {
+                    "intent": intent,
+                    "query_family": family,
+                    "answer": RAG_NO_MATCH_RESPONSE,
+                    "used_llm": False,
+                    "answer_type": "ungrounded_answer_blocked",
+                    "extractor_items_count": len(items),
+                }
+        else:
+            logger.info(
+                "[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s",
+                docs_count,
+                grounded,
+                "accept_grounded",
+            )
 
     if family == "overview_chapter_compare" and answer and answer != RAG_NO_MATCH_RESPONSE:
         term1, term2 = _compare_terms_from_query(query)
@@ -14997,7 +14989,7 @@ def _extract_structured_list_from_context(context_chunks: List[str], query_text:
 
     def _clean_item(raw: str) -> str:
         item = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[ivxlcdm]+[.)])\s*", "", str(raw or ""), flags=re.IGNORECASE)
-        item = re.sub(r"^\s*(?:the\s+)?(?:\w+\s+)?(?:steps?|stages?|phases?|components?|goals?|parts?|elements?|items?)\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
+        item = re.sub(r"^\s*(?:the\s+)?(?:\w+\s+)?(?:items?|elements?)\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:\w+\s+)?components?\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"\s+", " ", item).strip(" ,;:-–—.")
         item = re.sub(r"^\s*(?:first|second|third|fourth|fifth|next|then|finally)\s*[:\-]?\s*", "", item, flags=re.IGNORECASE)
@@ -15129,7 +15121,7 @@ def _validate_structured_list_items(items: List[str], query_text: str = "") -> O
     if len(cleaned) >= 4 and min(action_count, noun_count) >= max(2, len(cleaned) // 2):
         return None
 
-    if q and re.search(r"\b(steps?|stages?|phases?|process)\b", q):
+    if q and (re.search(r"\blist\b", q) or re.match(r"^\s*(?:what|which)\s+are\b", q) or re.match(r"^\s*how\b", q)):
         if action_count < min_items and len(cleaned) >= 3:
             noun_style_ok = len(cleaned) >= 4 and all(2 <= len(it.split()) <= 6 for it in cleaned)
             if not noun_style_ok:
@@ -15137,7 +15129,7 @@ def _validate_structured_list_items(items: List[str], query_text: str = "") -> O
 
     token_stop = {
         "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with", "by", "from",
-        "step", "steps", "stage", "stages", "phase", "phases", "component", "components", "goal", "goals", "part", "parts",
+        "item", "items", "element", "elements", "point", "points",
     }
     token_sets: List[Set[str]] = []
     for item in cleaned:
@@ -15165,20 +15157,14 @@ def _validate_structured_list_items(items: List[str], query_text: str = "") -> O
 
 
 def _extract_list_from_context(query: str, context: str, max_candidate_blocks: int = 2) -> Union[str, None]:
-    """Deterministically extract lists from retrieved context.
-
-    Returns a newline-separated string (one item per line) when a valid list
-    matching the query intent is found, otherwise returns None.
-    """
     if not context:
         return None
 
-    ql = (query or "").lower().strip()
+    ql = re.sub(r"\s+", " ", str(query or "").strip().lower())
     list_mode = bool(
         _is_targeted_list_question(ql)
-        or re.search(r"\b(?:list|tell me about|what are|principles?)\b", ql)
-        or re.search(r"\b(?:steps?|phases?|stages?|components?|goals?|parts?|levels?|types?|advantages?|disadvantages?|functions?|elements?|process|planning process|what happens)\b", ql)
-        or re.search(r"\b[a-z]{4,}s\b", ql)
+        or re.match(r"^\s*(?:what|which)\s+are\b", ql)
+        or (bool(re.search(r"\b(?:what|which|name|give|mention|identify)\b", ql)) and bool(re.search(r"\b[a-z]{4,}s\b", ql)))
     )
     if not list_mode:
         return None
@@ -15190,82 +15176,32 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         if sanitized_structured:
             return sanitized_structured
 
-    year_re = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-    caption_re = re.compile(r"^(figure|fig\.?|table|caption)\b", flags=re.IGNORECASE)
-    bullet_num_re = re.compile(r"^\s*(?:[-•*]|\d+[.)])\s*(.+)$")
-
-    section_intent: Optional[str] = None
-    if re.search(r"disadvant|critic|drawback|limitation|cons", ql):
-        section_intent = "disadvantages"
-    elif re.search(r"\badvant|benefit|pros\b", ql):
-        section_intent = "advantages"
-
-    is_functions_query = bool(re.search(r"\b(functions?|elements?)\b", ql))
-    is_process_query = bool(re.search(r"\b(process|steps?|phases?|stages?|planning process|what happens)\b", ql))
-    is_taxonomy_query = bool(re.search(r"\b(types?|levels?|approaches?|advantages?)\b", ql))
-    is_levels_query = bool(re.search(r"\blevels?\b", ql))
-    is_types_query = bool(re.search(r"\b(?:types?|approaches?)\b", ql))
-    is_steps_or_phases_query = bool(re.search(r"\b(steps?|phases?|stages?)\b", ql))
-    query_anchor_tokens = [
-        t for t in re.findall(r"[a-z]{4,}", ql)
-        if t not in {"what", "are", "this", "that", "advantages", "disadvantages", "functions", "management", "process", "planning", "explain"}
+    query_tokens = [
+        t for t in re.findall(r"[a-z0-9]{3,}", ql)
+        if t not in {"what", "which", "are", "the", "and", "for", "with", "from", "list", "name", "give", "mention", "identify"}
     ]
-
-    def _heading_family(text_line: str) -> Set[str]:
-        low = (text_line or "").lower()
-        fam: Set[str] = set()
-        if re.search(r"disadvantage|critic|drawback|limitation|cons|negative", low):
-            fam.add("disadvantages")
-        if re.search(r"\badvantage|benefit|pros|positive\b", low):
-            fam.add("advantages")
-        if re.search(r"\b(functions?|elements?)\b", low) or re.search(r"\b(process\s+of\s+management|management\s+process)\b", low):
-            fam.add("functions")
-        if re.search(r"\b(process|steps?|phases?|stages?|planning)\b", low):
-            fam.add("process")
-        if re.search(r"\blevels?\b", low):
-            fam.add("levels")
-        if re.search(r"\b(types?|approaches?)\b", low):
-            fam.add("types")
-        if re.search(r"\b(steps?|phases?|stages?)\b", low):
-            fam.add("steps_phases")
-        return fam
+    year_re = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
+    bullet_num_re = re.compile(r"^\s*(?:[-•*]|\d+[.)])\s*(.+)$")
+    caption_re = re.compile(r"^\s*(?:figure|fig\.?|table)\b", flags=re.IGNORECASE)
 
     def _looks_like_heading(line: str) -> bool:
-        if not line or bullet_num_re.match(line) or len(line) > 140:
+        s = (line or "").strip()
+        if not s or bullet_num_re.match(s) or len(s) > 140:
             return False
-        if line.endswith(':'):
+        if s.endswith(":"):
             return True
-        if _heading_family(line):
+        if re.match(r"^[A-Z][A-Za-z0-9\s\-,:]{3,120}$", s):
             return True
-        return bool(re.match(r"^[A-Z][A-Za-z0-9\s\-,:]{2,120}$", line))
+        return False
 
     def _normalize_item(raw: str) -> str:
         item = (raw or "").strip()
         item = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s*", "", item)
         item = re.sub(r"^\s*\d+\s*:\s*", "", item)
         item = re.sub(r"^\s*(?:first|second|third|fourth|fifth|then|next|finally)\s*[:\-]?\s*", "", item, flags=re.IGNORECASE)
-        # Strip leading heading remnants followed by separator
-        item = re.sub(r"^\s*(?:advantages?|disadvantages?|steps?|functions?|types?|characteristics?|examples?|features?|process)\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
-        # PATCH 5: strip dirty leading fragments (junk prefixes)
-        item = re.sub(r"^\s*(?:should\s+be|this\s+is|it\s+is|they\s+are|according\s+to|it\s|this\s|they\s|these\s|those\s|such\s+as|for\s+example|in\s+order\s+to|there\s+are|there\s+is)\s*[,:\-]?\s*", "", item, flags=re.IGNORECASE)
-        item = re.sub(r"\s+", " ", item)
-        item = item.strip(" ,;:-–—.")
+        item = re.sub(r"^\s*(?:this\s+is|it\s+is|they\s+are|according\s+to|for\s+example|in\s+order\s+to|there\s+are|there\s+is)\s*[,:\-]?\s*", "", item, flags=re.IGNORECASE)
+        item = re.sub(r"\s+", " ", item).strip(" ,;:-–—.")
         return item
-
-    def _starts_with_noun_or_gerund(item: str) -> bool:
-        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item or "")
-        if not words:
-            return False
-        first = words[0].lower()
-        if first in {"this", "it", "these", "should", "according", "that", "those", "they", "we", "you", "i"}:
-            return False
-        if first.endswith("ing"):
-            return True
-        if first in {"is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "can", "could", "would", "will", "shall", "may", "might", "must"}:
-            return False
-        if first in {"to", "for", "of", "with", "by", "from", "on", "at", "into", "within", "under"}:
-            return False
-        return True
 
     def _is_meaningful_item(item: str) -> bool:
         if not item:
@@ -15275,52 +15211,18 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             return False
         if re.fullmatch(r"\d+(?:\.\d+)?", item):
             return False
-        if len(item) < 5 or len(item) > 120:
+        if len(item) < 4 or len(item) > 120:
             return False
         wc = len(item.split())
-        if wc < 2 or wc > (12 if is_process_query else 10):
+        if wc < 2 or wc > 12:
             return False
         if not re.search(r"[a-zA-Z]", item):
             return False
         if re.search(r"https?://|www\.|\.com\b", low):
             return False
-        if re.search(r"\b(chapter|figure|table|concepts|objectives|scope|significance|management thoughts|approaches|principles of management)\b", low):
-            return False
-        if re.search(r"\bworks of\b", low):
-            return False
-        if ":" in item:
-            return False
-        words_raw = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
-        title_like = sum(1 for w in words_raw if w[:1].isupper())
-        if len(words_raw) <= 6 and title_like >= 2 and not re.search(r"\b(of|and|for|to|in|with)\b", low):
-            return False
-        if "." in item:
-            return False
-        if item.count('.') > 0 and wc > 7:
-            return False
-        if low in {"advantages", "disadvantages", "functions", "process", "planning process"}:
-            return False
-        # Reject heading-only remnants
-        if re.match(r"^(?:advantages?|disadvantages?|steps?|functions?|types?|characteristics?|examples?|features?|process)\s*(?:of\b.*)?$", low):
-            return False
-        # Reject mid-sentence fragments starting with conjunctions/prepositions
-        if re.match(r"^(?:and|but|or|so|because|therefore|thus|also|then|while|whereas|from|with|by)\b", item, flags=re.IGNORECASE):
-            return False
-        # PATCH 5: reject items starting with lowercase (mid-sentence fragments)
-        if item and item[0].islower():
-            return False
-        # PATCH 5: reject pronoun-led fragments
-        if re.match(r"^(?:he|she|it|they|this|these|those|we|you|its|his|her|their)\b", item, flags=re.IGNORECASE):
-            return False
-        # PATCH 5: reject 'should be', 'according to' etc. prefixed fragments
-        if re.match(r"^(?:should\s+be|according\s+to|in\s+order\s+to|there\s+are|there\s+is)\b", item, flags=re.IGNORECASE):
+        if re.search(r"\b(chapter|figure|table|contents?|index|objectives?)\b", low):
             return False
         if re.search(r"\b(?:and|or|to|of|for|with|by|in|on|at|from)\s*$", item, flags=re.IGNORECASE):
-            return False
-        if not _starts_with_noun_or_gerund(item):
-            return False
-        # PATCH 5: reject very short fragments without a meaningful noun phrase (OCR noise)
-        if wc <= 3 and not re.search(r"[A-Z][a-z]{2,}", item):
             return False
         return True
 
@@ -15337,25 +15239,51 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         inline_numbered = re.findall(r"(?:^|\s)\d+[.)]\s*([^\d\n][^\n]*?)(?=(?:\s\d+[.)]\s)|$)", ln)
         out.extend([p.strip(" ,;:-") for p in inline_numbered if p.strip()])
 
-        listed_clause = re.search(r"\b(?:are|include|includes|consists of|classified as)\s*:\s*([^\n]+)", ln, flags=re.IGNORECASE)
+        # Letter-prefixed inline items: a) Item, b) Item, c) Item (common OCR pattern)
+        inline_lettered = re.findall(r"(?:^|[\s,;])([a-z])\)\s*([^)\n]{2,60})(?=(?:[\s,;][a-z]\)\s)|$)", ln, flags=re.IGNORECASE)
+        for _letter, payload in inline_lettered:
+            cleaned_payload = payload.strip(" ,;:-")
+            if cleaned_payload and len(cleaned_payload.split()) >= 1:
+                out.append(cleaned_payload)
+
+
+        listed_clause = re.search(r"\b(?:are|include|includes|consists\s+of|classified\s+as)\s*:\s*([^\n]+)", ln, flags=re.IGNORECASE)
         if listed_clause:
             parts = [p.strip() for p in re.split(r",|;|\band\b", listed_clause.group(1)) if p.strip()]
             if len(parts) >= 3:
                 out.extend(parts)
+
+        for tok in query_tokens[:3]:
+            cue_re = re.search(rf"\b{re.escape(tok)}(?:es|s)?\b[^.\n]{{0,80}}\b(?:are|include|includes|consist\s+of|consists\s+of|classified\s+as)\b\s*[:\-]?\s*([^\n.]+)", ln, flags=re.IGNORECASE)
+            if cue_re:
+                tail = cue_re.group(1)
+                parts = [p.strip() for p in re.split(r",|;|\band\b", tail) if p.strip()]
+                if len(parts) >= 2:
+                    out.extend(parts)
+
+        for tok in query_tokens[:3]:
+            phrase_pat = re.compile(
+                rf"\b([A-Z][A-Za-z\-]+(?:\s+[A-Z][A-Za-z\-]+){{0,4}})\b\s+(?:is\s+|are\s+|was\s+|were\s+)?(?:an?\s+|the\s+)?\b{re.escape(tok)}(?:es|s)?\b",
+                flags=re.IGNORECASE,
+            )
+            for m in phrase_pat.finditer(ln):
+                cand = (m.group(1) or "").strip(" ,;:-")
+                if cand:
+                    out.append(cand)
 
         if (ln.count(',') >= 2 or ln.count(';') >= 2) and len(ln) < 400 and not re.search(r"\.\s", ln):
             parts = [p.strip() for p in re.split(r",|;|\band\b", ln) if p.strip()]
             if len(parts) >= 3:
                 out.extend(parts)
 
-        if is_process_query and re.search(r"\b(first|second|third|next|then|after that|finally)\b", ln, flags=re.IGNORECASE):
-            parts = [p.strip() for p in re.split(r"\b(?:first|second|third|fourth|next|then|after that|finally)\b", ln, flags=re.IGNORECASE) if p.strip()]
-            if len(parts) >= 2:
-                out.extend(parts)
+        title_words = re.findall(r"\b[A-Z][a-z]{2,}\b", ln)
+        if len(title_words) >= 4 and not re.search(r"[.!?;:]", ln):
+            title_parts = [p.strip() for p in re.split(r"(?<=[a-z])\s+(?=[A-Z])", ln) if p.strip()]
+            if len(title_parts) >= 3:
+                out.extend(title_parts)
 
         ocr_payload = re.sub(r"^\s*(?:figure|fig\.?|table)\b[^:\n]{0,120}[:\-–—\s]*", "", ln, flags=re.IGNORECASE)
-        ocr_like = bool(re.search(r"\b(?:figure|fig\.?|table)\b", ln, flags=re.IGNORECASE))
-        if ocr_like and len(ocr_payload.split()) >= 6 and not re.search(r"\.\s", ocr_payload):
+        if len(ocr_payload.split()) >= 6 and not re.search(r"\.\s", ocr_payload):
             ocr_parts = [p.strip() for p in re.split(r"(?<=[a-z])\s+(?=[A-Z])", ocr_payload) if p.strip()]
             if len(ocr_parts) >= 3:
                 out.extend(ocr_parts)
@@ -15371,240 +15299,54 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
     if not lines:
         return None
 
-    # Focused principles extraction (grounded, no hallucination): pull canonical short items only.
-    if re.search(r"\bmanagement\b", ql) and re.search(r"\bprinciples?\b", ql):
-        principle_terms = [
-            "planning", "organizing", "organising", "directing", "controlling",
-            "staffing", "coordinating", "co-ordinating", "reporting", "budgeting",
-        ]
-        merged_ctx = "\n".join(lines).lower()
-        found_terms: List[str] = []
-        for term in principle_terms:
-            if re.search(rf"\b{re.escape(term)}\b", merged_ctx):
-                normalized = "organizing" if term == "organising" else ("coordinating" if term == "co-ordinating" else term)
-                if normalized not in found_terms:
-                    found_terms.append(normalized)
-        if len(found_terms) >= 3:
-            clean_terms = [t.capitalize() for t in found_terms[:8]]
-            return _sanitize_list_answer_text(query, "\n".join(f"- {t}" for t in clean_terms))
-
     blocks: List[Dict[str, Any]] = []
-    cur_heading = ""
-    cur_families: Set[str] = set()
-    cur_lines: List[str] = []
-
+    current_heading = ""
+    current_lines: List[str] = []
     for ln in lines:
         if _looks_like_heading(ln):
-            if cur_lines:
-                blocks.append({"heading": cur_heading, "families": set(cur_families), "lines": cur_lines[:]})
-                cur_lines = []
-            cur_heading = ln
-            cur_families = _heading_family(ln)
+            if current_lines:
+                blocks.append({"heading": current_heading, "lines": current_lines[:]})
+                current_lines = []
+            current_heading = ln
         else:
-            cur_lines.append(ln)
-    if cur_lines:
-        blocks.append({"heading": cur_heading, "families": set(cur_families), "lines": cur_lines[:]})
+            current_lines.append(ln)
+    if current_lines:
+        blocks.append({"heading": current_heading, "lines": current_lines[:]})
     if not blocks:
-        blocks = [{"heading": "", "families": set(), "lines": lines}]
-
-    preferred_families: Set[str] = set()
-    if section_intent:
-        preferred_families.add(section_intent)
-    if is_functions_query:
-        preferred_families.add("functions")
-    if is_process_query:
-        preferred_families.add("process")
-    if is_levels_query:
-        preferred_families.add("levels")
-    if is_types_query:
-        preferred_families.add("types")
-    if is_steps_or_phases_query:
-        preferred_families.add("steps_phases")
-
-    def _polarity_allows(block: Dict[str, Any]) -> bool:
-        heading_low = (block.get("heading") or "").lower()
-        body_low = " ".join(block.get("lines") or [])[:500].lower()
-        hay = f"{heading_low} {body_low}"
-        fam = _heading_family(hay)
-        if section_intent == "disadvantages":
-            if re.search(r"\badvantage|benefit|pros|positive\b", hay) and not re.search(r"disadvantage|critic|drawback|limitation|cons|negative", hay):
-                return False
-        if section_intent == "advantages":
-            if re.search(r"disadvantage|critic|drawback|limitation|cons|negative", hay) and not re.search(r"\badvantage|benefit|pros|positive\b", hay):
-                return False
-        if preferred_families:
-            if fam and not (fam & preferred_families):
-                return False
-        return True
+        blocks = [{"heading": "", "lines": lines}]
 
     def _anchor_hits(block: Dict[str, Any]) -> int:
-        hay = ((block.get("heading") or "") + " " + " ".join(block.get("lines") or [])[:1000]).lower()
-        return sum(1 for tok in query_anchor_tokens if tok in hay)
+        hay = ((block.get("heading") or "") + " " + " ".join(block.get("lines") or [])[:1200]).lower()
+        if not query_tokens:
+            return 1
+        return sum(1 for tok in query_tokens if re.search(rf"\b{re.escape(tok)}\b", hay))
 
-    def _block_rank(block: Dict[str, Any]) -> int:
-        fam = block.get("families") or set()
-        rank = 0
-        rank += _anchor_hits(block) * 3
-        rank += len(fam & preferred_families) * 4
-        if section_intent and section_intent in fam:
-            rank += 4
-        if is_functions_query and "functions" in fam:
-            rank += 3
-        if is_process_query and "process" in fam:
-            rank += 3
-        return rank
-
-    candidate_blocks = [b for b in blocks if _polarity_allows(b)]
-    candidate_blocks = sorted(candidate_blocks, key=_block_rank, reverse=True)
-    has_any_anchor_block = any(_anchor_hits(b) > 0 for b in candidate_blocks)
+    candidate_blocks = sorted(blocks, key=lambda b: _anchor_hits(b), reverse=True)
+    max_blocks = max(1, min(4, int(max_candidate_blocks)))
 
     def _dedupe_ordered(items: List[str]) -> List[str]:
         out: List[str] = []
         seen: Set[str] = set()
-        prev_tokens: List[Set[str]] = []
         for item in items:
             norm = re.sub(r"\s+", " ", item).strip().lower()
             if not norm or norm in seen:
-                continue
-            tokens = set(re.findall(r"[a-z0-9]{3,}", norm))
-            if not tokens:
-                continue
-            too_similar = False
-            for pt in prev_tokens:
-                inter = len(tokens & pt)
-                union = len(tokens | pt) or 1
-                if (inter / union) >= 0.80:
-                    too_similar = True
-                    break
-            if too_similar:
                 continue
             seen.add(norm)
             out.append(item)
-            prev_tokens.append(tokens)
         return out
 
-    def _finalize_list_items(items: List[str]) -> List[str]:
-        finalized: List[str] = []
-        seen: Set[str] = set()
-        process_action_re = re.compile(
-            r"\b(formulat|develop|identif|evaluat|select|set(?:ting)?|schedul|follow|implement|monitor|review|establish|determin|decid|analyz|assess|prioritiz)\w*\b",
-            flags=re.IGNORECASE,
-        )
-        for item in items:
-            x = re.sub(r"\s+", " ", str(item or "")).strip(" ,;:-")
-            if not x:
-                continue
-            xl = x.lower()
-            if is_process_query:
-                if re.search(r"\btypes?\b", xl):
-                    continue
-                if re.search(r"\bplans?\b", xl) and not process_action_re.search(xl):
-                    continue
-                if not (process_action_re.search(xl) or x.lower().endswith("ing")):
-                    continue
-            x = x[0].upper() + x[1:] if x else x
-            if not re.search(r"[.!?]$", x):
-                x = x + "."
-            norm = re.sub(r"[^a-z0-9]+", " ", x.lower()).strip()
-            if not norm or norm in seen:
-                continue
-            seen.add(norm)
-            finalized.append(x)
-        return finalized
-
-    block_results: List[Tuple[float, List[str], Dict[str, Any]]] = []
-
-    max_blocks = max(1, min(2, int(max_candidate_blocks)))
     for block in candidate_blocks[:max_blocks]:
+        if query_tokens and _anchor_hits(block) == 0:
+            continue
         collected: List[str] = []
         for ln in block.get("lines") or []:
             collected.extend(_extract_items_from_line(ln))
-
-        if is_process_query and len(collected) < 3:
-            merged = " ".join(block.get("lines") or [])
-            process_split = [p.strip() for p in re.split(r"\b(?:first|second|third|fourth|next|then|after that|finally|step\s*\d+)\b", merged, flags=re.IGNORECASE) if p.strip()]
-            for p in process_split:
-                n = _normalize_item(p)
-                if _is_meaningful_item(n):
-                    collected.append(n)
-
         ordered = _dedupe_ordered(collected)
-        if len(ordered) < 3:
+        if len(ordered) < 2:
             continue
-
-        keyword_hits = 0
-        if query_anchor_tokens:
-            joined = " ".join(ordered).lower()
-            keyword_hits = sum(1 for tok in query_anchor_tokens if tok in joined)
-
-        if query_anchor_tokens:
-            hay = ((block.get("heading") or "") + " " + " ".join(ordered)).lower()
-            if not any(tok in hay for tok in query_anchor_tokens):
-                continue
-
-        if is_process_query:
-            block_text = " ".join(block.get("lines") or [])
-            has_sequence = bool(
-                re.search(r"\b(first|second|third|next|then|finally|step\s*\d+)\b", block_text, flags=re.IGNORECASE)
-                or re.search(r"(?:^|\s)\d+[.)]\s*", block_text)
-                or "process" in block_text.lower()
-            )
-            if not has_sequence:
-                continue
-
-        heading_match = 1.0 if ((block.get("families") or set()) & preferred_families) else 0.0
-        item_count_score = min(6, len(ordered)) * 0.8
-        relevance_score = float(keyword_hits) * 1.5
-        block_score = (heading_match * 4.0) + item_count_score + relevance_score
-        block_results.append((block_score, ordered, block))
-
-    if block_results:
-        block_results.sort(key=lambda x: x[0], reverse=True)
-        best_items = _finalize_list_items(block_results[0][1])
-        if len(best_items) < 2:
-            return None
-        sanitized = _sanitize_list_answer_text(query, "\n".join(f"- {item}" for item in best_items))
-        return sanitized
-
-    if is_taxonomy_query:
-        taxonomy_items: List[str] = []
-
-        for ln in lines:
-            low = ln.lower()
-            if re.search(r"\b(table of contents|contents|index)\b", low):
-                continue
-            if "advantages" in ql and not re.search(r"\badvantage|benefit|positive|merit\b", low):
-                continue
-
-            if re.search(r"\b(?:types?|levels?|approaches?|advantages?)\b", low) and ":" in ln:
-                rhs = ln.split(":", 1)[1]
-                parts = [p.strip() for p in re.split(r",|;|\band\b|\b[A-F]\.", rhs) if p.strip()]
-                for p in parts:
-                    n = _normalize_item(p)
-                    if _is_meaningful_item(n):
-                        taxonomy_items.append(n)
-
-            if re.search(r"\b(?:types?|levels?|approaches?)\s+are\b", low):
-                parts = [p.strip() for p in re.split(r",|;|\band\b|\b[A-F]\.", ln) if p.strip()]
-                for p in parts:
-                    n = _normalize_item(p)
-                    if _is_meaningful_item(n):
-                        taxonomy_items.append(n)
-
-        dedup_tax: List[str] = []
-        seen_tax: Set[str] = set()
-        for item in taxonomy_items:
-            norm = re.sub(r"\s+", " ", item).strip().lower()
-            if not norm or norm in seen_tax:
-                continue
-            seen_tax.add(norm)
-            dedup_tax.append(item)
-
-        if len(dedup_tax) >= 3:
-            clean_tax = _finalize_list_items(dedup_tax[:8])
-            if len(clean_tax) >= 3:
-                sanitized = _sanitize_list_answer_text(query, "\n".join(f"- {item}" for item in clean_tax))
-                return sanitized
+        sanitized = _sanitize_list_answer_text(query, "\n".join(f"- {item}" for item in ordered[:12]))
+        if sanitized:
+            return sanitized
 
     return None
 
@@ -15612,6 +15354,175 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
 # ========== HELPER: RAG+LLM ==========
 
 # (Structured extraction logic removed to favor pure RAG pipeline)
+
+
+def _validate_query_ui_equivalent(query: str) -> dict:
+    """Diagnostic helper that exercises the SAME runtime decision path as the
+    real WebSocket/UI flow (call_llm_streaming).
+
+    Steps replicated:
+      1. Query normalization (same as WS path)
+      2. Retrieval via live_rag.search / _search_fast_minimal
+      3. Active-source filtering
+      4. Doc preparation (_prepare_rag_doc_dicts_shared)
+      5. Heading boost and section reranking
+      6. _shared_rag_final_answer_decision  (the internal shortcut)
+      7. _enforce_runtime_answer_acceptance  (the runtime guard)
+      8. _apply_not_found_ux                (postprocess / not-found UX)
+
+    Returns a dict with:
+      - query_original, query_normalized
+      - retrieval_count, context_summary
+      - internal_shortcut_result  (from step 6 alone)
+      - ui_equivalent_result      (from steps 6+7+8, i.e. full path)
+      - results_differ            (bool — True if shortcut ≠ UI path)
+
+    This is for diagnostic purposes ONLY — not called in the production path.
+    """
+    import time as _t
+    _t0 = _t.perf_counter()
+    result: dict = {
+        "query_original": str(query or ""),
+        "query_normalized": "",
+        "retrieval_count": 0,
+        "context_summary": "",
+        "internal_shortcut_result": {},
+        "ui_equivalent_result": {},
+        "results_differ": False,
+        "timing_ms": 0.0,
+    }
+
+    # --- Step 1: Query normalization (same as WS path) ---
+    text = str(query or "").strip()
+    if not text:
+        result["ui_equivalent_result"] = {"answer": "I didn't catch that. Could you repeat?"}
+        return result
+
+    is_fact_query_early = _classify_query_family_v2(text) == "fact_entity"
+    if not is_fact_query_early:
+        normalized_query, corrected_concept = _normalize_definition_query_before_retrieval(text)
+        if normalized_query and normalized_query.strip().lower() != text.strip().lower():
+            logger.info("[VALIDATE] normalization: '%s' → '%s'", text[:80], normalized_query[:80])
+            text = normalized_query
+    result["query_normalized"] = text
+
+    # --- Step 2: Retrieval (same as WS path) ---
+    family = _classify_query_family(text)
+    family_v2 = _classify_query_family_v2(text)
+    if family_v2 == "fact_entity":
+        top_k_req = FACT_MAX_TOP_K
+    elif family_v2 == "list_entity" or family == "list_structure":
+        top_k_req = 10
+    elif _is_definition_style_query(text):
+        top_k_req = 12
+    else:
+        top_k_req = 6
+
+    if family_v2 != "fact_entity" and _is_safe_definition_fast_path_query(text):
+        relevant_docs = _search_fast_definition_minimal(text)
+    else:
+        relevant_docs = _search_fast_minimal(text, top_k=top_k_req)
+
+    if not relevant_docs:
+        relevant_docs = []
+
+    # --- Step 3: Active-source filtering ---
+    relevant_docs = _filter_results_to_active_sources(relevant_docs)
+    result["retrieval_count"] = len(relevant_docs)
+
+    if not relevant_docs:
+        not_found = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+        result["internal_shortcut_result"] = {"answer": RAG_NO_MATCH_RESPONSE}
+        result["ui_equivalent_result"] = {"answer": not_found}
+        result["results_differ"] = (RAG_NO_MATCH_RESPONSE != not_found)
+        result["timing_ms"] = (_t.perf_counter() - _t0) * 1000
+        return result
+
+    # Context summary for reporting
+    context_snippets = []
+    for d in relevant_docs[:3]:
+        txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        if txt:
+            context_snippets.append(txt[:200].replace("\n", " "))
+    result["context_summary"] = " | ".join(context_snippets)[:600]
+
+    # --- Step 4: Doc preparation (same as WS path) ---
+    doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs, text)
+
+    # --- Step 5: Reranking (same as WS path — line 17857) ---
+    # In the real WS path, reranking is applied ONLY for families NOT in this set:
+    family_v2_current = _classify_query_family_v2(text)
+    family_legacy_current = _classify_query_family(text)
+    _rerank_excluded = {"definition_entity", "list_entity", "explanatory_compare"}
+    if family_v2_current not in _rerank_excluded:
+        doc_dicts = _rerank_docs_for_query_intent(text, doc_dicts)
+        doc_dicts = _retrieve_with_section_bias(text, doc_dicts, top_k=min(max(6, len(doc_dicts)), 12))
+
+
+    doc_dicts = sorted(doc_dicts, key=lambda x: x.get("score", 0), reverse=True)
+    is_definition_query = _is_definition_style_query(text) and (_classify_query_family_v2(text) != "fact_entity")
+    is_fact_query = _classify_query_family_v2(text) == "fact_entity"
+    _is_list_family = (family_legacy_current == "list_structure" or family_v2_current == "list_entity")
+    keep_n = 5 if (is_definition_query or is_fact_query or _is_list_family) else 3
+    if family_legacy_current == "list_structure" or family_v2_current == "list_entity":
+        keep_n = max(keep_n, 5)
+    doc_dicts = doc_dicts[:keep_n]
+
+    if not doc_dicts:
+        not_found = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+        result["internal_shortcut_result"] = {"answer": RAG_NO_MATCH_RESPONSE}
+        result["ui_equivalent_result"] = {"answer": not_found}
+        result["results_differ"] = (RAG_NO_MATCH_RESPONSE != not_found)
+        result["timing_ms"] = (_t.perf_counter() - _t0) * 1000
+        return result
+
+    # --- Step 6: Internal shortcut (_shared_rag_final_answer_decision) ---
+    shortcut_dec = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
+    result["internal_shortcut_result"] = {
+        "answer": str(shortcut_dec.get("answer") or ""),
+        "answer_type": str(shortcut_dec.get("answer_type") or ""),
+        "used_llm": bool(shortcut_dec.get("used_llm", False)),
+        "source_mode": str(shortcut_dec.get("source_mode") or ""),
+        "query_family": str(shortcut_dec.get("query_family") or ""),
+    }
+
+    # --- Step 7: Runtime guard (_enforce_runtime_answer_acceptance) ---
+    enforced_dec = _enforce_runtime_answer_acceptance(text, dict(shortcut_dec), doc_dicts)
+
+    # --- Step 8: Postprocess / not-found UX (_apply_not_found_ux) ---
+    if not enforced_dec.get("used_llm", True):
+        final_answer = _apply_not_found_ux(text, str(enforced_dec.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
+    else:
+        final_answer = str(enforced_dec.get("answer") or RAG_NO_MATCH_RESPONSE)
+
+    result["ui_equivalent_result"] = {
+        "answer": final_answer,
+        "answer_type": str(enforced_dec.get("answer_type") or ""),
+        "used_llm": bool(enforced_dec.get("used_llm", False)),
+        "source_mode": str(enforced_dec.get("source_mode") or ""),
+    }
+
+    # --- Compare ---
+    shortcut_answer = str(result["internal_shortcut_result"].get("answer") or "").strip()
+    ui_answer = str(result["ui_equivalent_result"].get("answer") or "").strip()
+    result["results_differ"] = (shortcut_answer != ui_answer)
+    if result["results_differ"]:
+        logger.warning(
+            "[VALIDATION MISMATCH] query='%s' shortcut='%s' ui='%s'",
+            text[:80], shortcut_answer[:120], ui_answer[:120],
+        )
+
+    result["timing_ms"] = (_t.perf_counter() - _t0) * 1000
+    logger.info(
+        "[VALIDATE COMPLETE] query='%s' shortcut_type=%s ui_type=%s differ=%s timing=%.0fms",
+        text[:80],
+        result["internal_shortcut_result"].get("answer_type"),
+        result["ui_equivalent_result"].get("answer_type"),
+        result["results_differ"],
+        result["timing_ms"],
+    )
+    return result
+
 
 
 async def call_llm_with_rag(text: str, connection_id: str, user):
@@ -15695,6 +15606,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     doc_dicts: List[Dict[str, Any]] = []
     focused_context = ""
     trace_extractor_used = False
+    generation_prefilter_docs: List[Dict[str, Any]] = []
     
     # Skip RAG search for greetings only (optimization)
     greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
@@ -15719,7 +15631,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         elif is_generation_query_requested:
             top_k_req = 12
         elif query_family == "list_structure":
-            top_k_req = 2
+            top_k_req = 10
         elif query_family == "overview_chapter_compare":
             top_k_req = 2
         else:
@@ -15760,7 +15672,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     elif _is_llm_generation_query(original_query_text):
                         corrected_top_k = 12
                     elif corrected_family == "list_structure":
-                        corrected_top_k = 2
+                        corrected_top_k = 10
                     elif corrected_family == "overview_chapter_compare":
                         corrected_top_k = 2
                     else:
@@ -15803,6 +15715,12 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                         logger.info("[DOC COUNT TRACE] stage=call_llm_with_rag.fact_rescue_merged count=%s", len(relevant_docs or []))
             except Exception:
                 logger.exception("FACT rescue retrieval skipped due to internal error")
+
+        if is_generation_query_requested:
+            generation_prefilter_docs = [
+                d for d in (relevant_docs or [])
+                if str((d or {}).get("text") or (d or {}).get("page_content") or (d or {}).get("content") or "").strip()
+            ]
 
     retrieval_ms = (time.perf_counter() - retrieval_t0) * 1000.0
 
@@ -15864,25 +15782,43 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 retrieval_ms = (time.perf_counter() - retrieval_t0) * 1000.0
 
     if (not is_greeting) and (not relevant_docs):
+        prefilter_usable_docs = [
+            d for d in (generation_prefilter_docs or [])
+            if str((d or {}).get("text") or (d or {}).get("page_content") or (d or {}).get("content") or "").strip()
+        ]
         logger.info(
-            f"RAG strict guard: no sufficiently relevant docs for query='{text[:80]}' "
-            f"(threshold={RAG_STRICT_DISTANCE_THRESHOLD:.2f})"
+            "[GENERATION FALLBACK CHECK] query=%s is_generation=%s final_docs_count=%d pre_filter_docs_count=%d",
+            (text or "")[:120],
+            bool(is_generation_query_requested),
+            len(relevant_docs or []),
+            len(prefilter_usable_docs),
         )
-        no_match_msg = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
-        response_time = int((time.time() - start_time) * 1000)
-        _set_last_latency_breakdown(connection_id, retrieval_ms, 0.0, 0.0, 0.0, float(response_time))
-        log_usage(
-            username=user.get("username", "unknown"),
-            user_role=user.get("role", "unknown"),
-            query_text=text,
-            response_status="success",
-            error_message=None,
-            response_time_ms=response_time,
-            rag_docs_found=0,
-            query_length=len(text.strip()),
-            response_length=len(no_match_msg),
-        )
-        return (no_match_msg, [])
+        if is_generation_query_requested and prefilter_usable_docs:
+            logger.info(
+                "[GENERATION FALLBACK ACTIVATED] reason=final_docs_empty_for_generation using_prefilter_docs=%d",
+                len(prefilter_usable_docs),
+            )
+            relevant_docs = prefilter_usable_docs
+        else:
+            logger.info(
+                f"RAG strict guard: no sufficiently relevant docs for query='{text[:80]}' "
+                f"(threshold={RAG_STRICT_DISTANCE_THRESHOLD:.2f})"
+            )
+            no_match_msg = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+            response_time = int((time.time() - start_time) * 1000)
+            _set_last_latency_breakdown(connection_id, retrieval_ms, 0.0, 0.0, 0.0, float(response_time))
+            log_usage(
+                username=user.get("username", "unknown"),
+                user_role=user.get("role", "unknown"),
+                query_text=text,
+                response_status="success",
+                error_message=None,
+                response_time_ms=response_time,
+                rag_docs_found=0,
+                query_length=len(text.strip()),
+                response_length=len(no_match_msg),
+            )
+            return (no_match_msg, [])
 
     # Build context using TOON format (40-60% token savings)
     context_block = ""
@@ -16220,6 +16156,25 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             logger.info("[DEF FILTER] applied=%s kept=%d total=%d",
                         bool(definition_docs), len(definition_docs), len(doc_dicts))
 
+        family_legacy_current = _classify_query_family(text)
+        needs_early_section_rerank = (
+            family_v2_current in {"list_entity", "toc_structure"}
+            or family_legacy_current in {"list_structure", "overview_chapter_compare"}
+        )
+        if needs_early_section_rerank and doc_dicts:
+            pool_before = len(doc_dicts)
+            rerank_top_k = min(max(6, pool_before), 12)
+            doc_dicts = _rerank_docs_for_query_intent(text, doc_dicts)
+            doc_dicts = _retrieve_with_section_bias(text, doc_dicts, top_k=rerank_top_k)
+            logger.info(
+                "[SECTION RERANK DEBUG] stage=early_pre_shortlist family_v2=%s family=%s before=%d after=%d top_k=%d",
+                family_v2_current,
+                family_legacy_current,
+                pool_before,
+                len(doc_dicts or []),
+                rerank_top_k,
+            )
+
         doc_dicts = sorted(doc_dicts, key=lambda x: x.get("score", 0), reverse=True)
         logger.info("[SORT CHECK] top scores: %s", [round(d.get("score",0),4) for d in doc_dicts[:5]])
         is_fact_query = _classify_query_family_v2(text) == "fact_entity"
@@ -16230,8 +16185,29 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 top_k=min(5, len(doc_dicts)),
                 scan_limit=min(20, len(doc_dicts)),
             )
-        keep_n = 5 if (is_definition_query or _is_compare_query(text) or is_fact_query or is_generation_query_requested) else 3
+        keep_n = 5 if (is_definition_query or _is_compare_query(text) or is_fact_query or is_generation_query_requested or needs_early_section_rerank) else 3
+        if family_legacy_current == "list_structure":
+            logger.info("[LIST RECALL DEBUG] stage=pre_shortlist family=%s pool=%d keep_n=%d", family_legacy_current, len(doc_dicts or []), keep_n)
         doc_dicts = doc_dicts[:keep_n]
+        if is_generation_query_requested and not doc_dicts:
+            prefilter_doc_dicts = _prepare_rag_doc_dicts_shared(generation_prefilter_docs, original_query_text)
+            prefilter_doc_dicts = [
+                d for d in (prefilter_doc_dicts or [])
+                if str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "").strip()
+            ]
+            logger.info(
+                "[GENERATION FALLBACK CHECK] query=%s is_generation=%s final_docs_count=%d pre_filter_docs_count=%d",
+                (original_query_text or "")[:120],
+                True,
+                len(doc_dicts or []),
+                len(prefilter_doc_dicts),
+            )
+            if prefilter_doc_dicts:
+                logger.info(
+                    "[GENERATION FALLBACK ACTIVATED] reason=final_docs_empty_for_generation using_prefilter_docs=%d",
+                    len(prefilter_doc_dicts),
+                )
+                doc_dicts = prefilter_doc_dicts[:keep_n]
         try:
             for i, d in enumerate(doc_dicts):
                 logger.info(
@@ -16252,6 +16228,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             logger.info("[LLM GENERATION MODE]")
             generation_docs = _select_generation_context_docs(generation_source_query, doc_dicts, max_docs=5)
             generation_context = _build_generation_context(generation_source_query, generation_docs, max_chars=3600)
+            generation_llm_called = False
 
             context_sufficient = _has_sufficient_context(
                 generation_source_query,
@@ -16270,6 +16247,12 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     answer = composed
                 else:
                     answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+                logger.info(
+                    "[GENERATION FALLBACK RESULT] llm_called=%s context_chars=%d final_answer_preview=%s",
+                    bool(generation_llm_called),
+                    len(generation_context or ""),
+                    str(answer or "")[:220],
+                )
                 extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
                 response_time = int((time.time() - start_time) * 1000)
                 logger.info(
@@ -16313,6 +16296,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             )
             generation_query = _rewrite_generation_query_for_grounded_llm(generation_source_query)
             llm_t0_generation = time.perf_counter()
+            generation_llm_called = True
             generation_answer = await call_llm_with_context(
                 query=generation_query,
                 context=generation_context,
@@ -16334,15 +16318,24 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 else:
                     answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
             elif not _is_answer_grounded_in_docs(answer, doc_dicts or [], query_text=text):
-                logger.info("[LLM GENERATION GROUNDED CHECK] grounded=false action=not_found")
-                composed = _compose_grounded_generation_answer(generation_source_query, generation_context)
-                if composed and _is_answer_grounded_in_docs(composed, doc_dicts or [], query_text=text):
-                    answer = composed
-                else:
+                docs_count = len(doc_dicts or [])
+                fallback_docs_count = len(generation_docs or [])
+                if docs_count == 0 and fallback_docs_count == 0:
+                    logger.info("[LLM GENERATION GROUNDED CHECK] grounded=false action=not_found")
+                    logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", docs_count, False, "not_found_no_docs")
                     answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+                else:
+                    logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", docs_count, False, "allow_generation_response")
             else:
                 logger.info("[LLM GENERATION GROUNDED CHECK] grounded=true action=accept")
+                logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", len(doc_dicts or []), True, "accept_grounded")
             answer = _format_generation_answer_by_query(text, _cleanup_final_answer_text(answer))
+            logger.info(
+                "[GENERATION FALLBACK RESULT] llm_called=%s context_chars=%d final_answer_preview=%s",
+                bool(generation_llm_called),
+                len(generation_context or ""),
+                str(answer or "")[:220],
+            )
 
             extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
             response_time = int((time.time() - start_time) * 1000)
@@ -16370,8 +16363,29 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 
         # Fast and simple early selector: avoid heavy downstream processing.
         pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
+        pre_simple = _enforce_runtime_answer_acceptance(text, pre_simple, doc_dicts)
         if not pre_simple.get("used_llm", True):
             answer = _apply_not_found_ux(text, str(pre_simple.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
+            pre_answer_type = str(pre_simple.get("answer_type") or "")
+            pre_family_v2 = _classify_query_family_v2(text)
+            pre_family_legacy = _classify_query_family(text)
+            pre_list_mode = bool(
+                pre_family_v2 == "list_entity"
+                or pre_family_legacy == "list_structure"
+                or _is_targeted_list_question(text)
+                or pre_answer_type.startswith("list_")
+            )
+            if pre_list_mode and str(answer or "").strip() and str(answer).strip() != RAG_NO_MATCH_RESPONSE:
+                strict_pre_fast = bool(pre_answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
+                pre_ok, pre_reason, pre_shaped = _assess_list_coherence(text, _preclean_list_answer_for_assessment(answer), strict_fast=strict_pre_fast, local_support=_collect_local_window_support(doc_dicts or []))
+                logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(pre_ok), pre_reason)
+                if strict_pre_fast:
+                    logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(pre_ok), pre_reason)
+                if not pre_ok:
+                    answer = RAG_NO_MATCH_RESPONSE
+                elif pre_shaped:
+                    answer = pre_shaped
+                answer = _apply_not_found_ux(text, answer, doc_dicts)
             _log_answer_mode_markers(text, doc_dicts, answer, source_mode="extractor")
             if _classify_query_family(text) == "definition_entity" and not _passes_strict_definition_relevance_guard(text, answer):
                 fallback_answer = _definition_explanation_fallback(text, doc_dicts, _extract_entity_from_definition_query(text)[1])
@@ -16452,6 +16466,14 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         if _classify_query_family(text) == "list_structure":
             structured_answer = _extract_list_from_context(text, focused_context, max_candidate_blocks=2)
             if structured_answer:
+                fast_ok, fast_reason, fast_shaped = _assess_list_coherence(text, _preclean_list_answer_for_assessment(structured_answer), strict_fast=True, local_support=_collect_local_window_support(doc_dicts or []))
+                logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(fast_ok), fast_reason)
+                logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(fast_ok), fast_reason)
+                if not fast_ok:
+                    structured_answer = RAG_NO_MATCH_RESPONSE
+                elif fast_shaped:
+                    structured_answer = fast_shaped
+                structured_answer = _apply_not_found_ux(text, structured_answer, doc_dicts)
                 extraction_ms = (time.perf_counter() - extraction_t0) * 1000.0
                 response_time = int((time.time() - start_time) * 1000)
                 logger.info(
@@ -16513,7 +16535,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                         return False
                     if _is_feature_only_definition_sentence(s):
                         return False
-                    if _score_concept_definition_sentence(s, entity_norm, entity_tokens) < 0:
+                    if _s_definition_sentence(s, entity_norm, entity_tokens) < 0:
                         return False
                     if re.match(r"^\s*(?:\d+[.)]?\s+)?[A-Z][A-Za-z\-]+(?:\s+[A-Za-z][A-Za-z\-]+){0,4}\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\s*$", s.strip()):
                         return False
@@ -16521,7 +16543,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                         return False
                     if re.search(r"\b(?:translated|book|publication|edition)\b", low_plain):
                         return False
-                    if re.search(r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography|father\s+of)\b", low_plain):
+                    if re.search(r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography)\b", low_plain):
                         return False
                     if re.search(r"\b(?:introduced\s+by|he\s+is\s+known\s+as|he\s+was\s+known\s+as|is\s+associated\s+with)\b", low_plain):
                         return False
@@ -16549,16 +16571,6 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             has_entity, entity = _extract_entity_from_definition_query(query_text)
             entity_l = (entity or "").strip().lower()
             entity_norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", entity_l)).strip()
-            bad_reinforcement_fragments = (
-                "does learn or acquire a particular behavior",
-                "does not readily demonstrate it until reinforcement is provided",
-                "performance may not be the same as what one has actually learnt",
-            )
-            def _is_bad_reinforcement_definition_sentence(sentence: str) -> bool:
-                if entity_norm != "reinforcement":
-                    return False
-                low_sentence = (sentence or "").lower()
-                return any(frag in low_sentence for frag in bad_reinforcement_fragments)
             concept_q = (query_text or "").strip().lower().startswith("what is") or (query_text or "").strip().lower().startswith("define")
             entity_tokens = [
                 t for t in re.findall(r"[a-z0-9]{2,}", entity_l)
@@ -16588,15 +16600,13 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     m = pat.search(src_compact_low)
                     if m:
                         direct = src_compact[m.start():m.end()].strip()
-                        if _is_bad_reinforcement_definition_sentence(direct):
-                            direct = ""
                         if not re.search(r"\b(?:\d{4}|\d{3,4}s|translated|book|publication|edition|isbn|https?://|www\.|kdpublications)\b", direct, flags=re.IGNORECASE):
                             return direct.rstrip(" .") + "."
 
                 parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+", src) if p.strip()]
                 for sent in parts[:5]:
                     if concept_q:
-                        concept_quality_score = _score_concept_definition_sentence(sent, entity_norm, entity_tokens)
+                        concept_quality_score = _s_definition_sentence(sent, entity_norm, entity_tokens)
                         if concept_quality_score <= 0:
                             continue
                         sent_low_norm = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", " ", sent.lower())).strip()
@@ -16604,9 +16614,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                             continue
                         if re.search(r"\b(?:translated|book|publication|edition)\b", sent, flags=re.IGNORECASE):
                             continue
-                        if re.search(r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography|father\s+of)\b", sent, flags=re.IGNORECASE):
-                            continue
-                        if _is_bad_reinforcement_definition_sentence(sent):
+                        if re.search(r"\b(?:he|she|his|her|born|birth|died|author|authored|wrote|writer|biography)\b", sent, flags=re.IGNORECASE):
                             continue
                         if entity_norm and re.search(rf"\b{re.escape(entity_norm)}\b(?:[\s\"'`”’]+)(?:is|refers\s+to|can\s+be\s+defined\s+as)\b", sent_low_norm):
                             return sent.strip()
@@ -16617,8 +16625,6 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                     low = sent.lower()
                     wc = len(re.findall(r"[a-zA-Z][a-zA-Z\-']*", sent))
                     if wc < 6 or wc > 40:
-                        continue
-                    if _is_bad_reinforcement_definition_sentence(sent):
                         continue
                     if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", sent):
                         continue
@@ -16631,7 +16637,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                         score += 6.0
 
                     if concept_q:
-                        score += float(_score_concept_definition_sentence(sent, entity_norm, entity_tokens))
+                        score += float(_s_definition_sentence(sent, entity_norm, entity_tokens))
 
                     full_concept_hit = False
                     if entity_l and re.search(rf"\b{re.escape(entity_l)}\b", low):
@@ -16763,7 +16769,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 if table_like and not (phrase_hit or token_hits >= min_hits):
                     return False
 
-                if re.search(r"\b(he|she|his|her|born|worked as|engineer|biography|father of)\b", low):
+                if re.search(r"\b(he|she|his|her|born|worked as|engineer|biography)\b", low):
                     return False
 
                 if re.search(r"\b(you can also call it|also called|also known as)\b", low):
@@ -16791,6 +16797,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             return False
 
         pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
+        pre_decision = _enforce_runtime_answer_acceptance(text, pre_decision, doc_dicts)
         logger.info("[TRACE] intent=%s", pre_decision.get("intent"))
         logger.info("[TRACE] extractor_items_count=%s", pre_decision.get("extractor_items_count", 0))
 
@@ -16800,6 +16807,24 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             is_definition_prefix = (text or "").strip().lower().startswith("what is") or (text or "").strip().lower().startswith("define")
             answer_type = str(pre_decision.get("answer_type") or "")
             fast_path_allowed = _is_safe_definition_fast_path_query(text)
+            pre_family_v2 = _classify_query_family_v2(text)
+            pre_family_legacy = _classify_query_family(text)
+            pre_list_mode = bool(
+                pre_family_v2 == "list_entity"
+                or pre_family_legacy == "list_structure"
+                or _is_targeted_list_question(text)
+                or answer_type.startswith("list_")
+            )
+            if pre_list_mode and str(answer or "").strip() and str(answer).strip() != RAG_NO_MATCH_RESPONSE:
+                strict_pre_fast = bool(answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
+                pre_ok, pre_reason, pre_shaped = _assess_list_coherence(text, _preclean_list_answer_for_assessment(str(answer)), strict_fast=strict_pre_fast, local_support=_collect_local_window_support(doc_dicts or []))
+                logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(pre_ok), pre_reason)
+                if strict_pre_fast:
+                    logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(pre_ok), pre_reason)
+                if not pre_ok:
+                    answer = RAG_NO_MATCH_RESPONSE
+                elif pre_shaped:
+                    answer = pre_shaped
 
             if (intent == "definition" or is_definition_prefix) and answer_type.startswith("definition_"):
                 fallback_answer = None
@@ -16964,7 +16989,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             # Relaxed system prompt that encourages list reconstruction and OCR tolerance
             system_prompt = (
                 "You MUST answer ONLY using the provided KNOWLEDGE BASE CONTEXT. NEVER use outside knowledge. Response must be in English.\n"
-                "When the user asks for lists (phases, steps, levels, types, figures, tables):\n"
+                "When the user asks for structured list output (including figure/table-adjacent content):\n"
                 "- Extract list items even if the text contains minor OCR noise or formatting issues.\n"
                 "- Reconstruct lists from captions, semi-structured paragraphs, figures, or tables when necessary.\n"
                 "- Clean items into readable form (remove obvious OCR artifacts) but do NOT invent facts.\n"
@@ -17016,10 +17041,20 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     # If we have an async session, prefer it
     if _sess is not None:
         llm_t0 = time.perf_counter()
+        if is_fact_llm_query:
+            query_type = "fact_entity"
+        elif is_simple_factual_query:
+            query_type = "simple_factual"
+        elif _is_llm_generation_query(text):
+            query_type = "generation"
+        else:
+            query_type = "general"
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=%s", LLM_URL, OLLAMA_MODEL, query_type)
         for attempt in range(max_retries):
             try:
                 timeout = aiohttp.ClientTimeout(total=60, connect=5, sock_read=45)
                 async with _sess.post(LLM_URL, json=payload, timeout=timeout) as response:
+                    logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", response.status, LLM_URL)
                     if response.status == 200:
                         data = await response.json()
                         if "error" in data:
@@ -17090,8 +17125,10 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             except Exception as e:
                 return None, str(e)
 
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=sync_fallback", LLM_URL, OLLAMA_MODEL)
         for attempt in range(max_retries):
             status, text_body = await asyncio.get_event_loop().run_in_executor(None, _sync_post, LLM_URL, payload, 45)
+            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", status, LLM_URL)
             if status == 200:
                 try:
                     data = json.loads(text_body)
@@ -17113,6 +17150,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         llm_ms = (time.perf_counter() - llm_t0) * 1000.0
 
     post_decision = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=ai_text)
+    post_decision = _enforce_runtime_answer_acceptance(text, post_decision, doc_dicts)
     if not post_decision.get("used_llm", True):
         logger.warning("Blocked bad output pattern detected; forcing extractor fallback")
         ai_text = post_decision.get("answer") or RAG_NO_MATCH_RESPONSE
@@ -17183,6 +17221,20 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             ai_text = _not_found_response(text, "out_of_scope")
         else:
             ai_text = _not_found_response(text, "out_of_scope")
+
+    post_family = _classify_query_family_v2(text)
+    post_answer_type = str((post_decision or {}).get("answer_type") or "")
+    if post_family in {"list_entity", "list_structure"}:
+        strict_list_guard = bool(post_answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor"})
+        list_ok_out, list_reason_out, list_shaped_out = _assess_list_coherence(text, _preclean_list_answer_for_assessment(ai_text), strict_fast=strict_list_guard, local_support=_collect_local_window_support(doc_dicts or []))
+        logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok_out), list_reason_out)
+        if strict_list_guard:
+            logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(list_ok_out), list_reason_out)
+        if (not list_ok_out) or (not list_shaped_out):
+            ai_text = RAG_NO_MATCH_RESPONSE
+            trace_extractor_used = True
+        else:
+            ai_text = list_shaped_out
 
     ai_text = _apply_not_found_ux(text, ai_text, doc_dicts)
     _log_answer_mode_markers(text, doc_dicts, ai_text, source_mode=("extractor" if trace_extractor_used else "llm"))
@@ -17770,7 +17822,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             top_k_req = 12
         elif family_v2 == "list_entity" or family == "list_structure":
             top_k_req = 10
-        elif family_v2 in {"toc_structure", "lesson_lookup", "sequence_lookup", "explanatory_compare"} or family == "overview_chapter_compare":
+        elif family_v2 in {"explanatory_compare"} or family == "overview_chapter_compare":
             top_k_req = 10
         else:
             top_k_req = 6
@@ -17801,7 +17853,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             retrieval_ms,
         )
 
-    if _classify_query_family_v2(text) not in {"definition_entity", "list_entity", "toc_structure", "lesson_lookup", "sequence_lookup", "explanatory_compare"}:
+    if _classify_query_family_v2(text) not in {"definition_entity", "list_entity", "explanatory_compare"}:
         relevant_docs = _rerank_docs_for_query_intent(text, relevant_docs)
         relevant_docs = _retrieve_with_section_bias(text, relevant_docs, top_k=top_k_req if 'top_k_req' in locals() else 10)
 
@@ -17847,7 +17899,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         ql = text.lower()
         keep_for_structure = _query_requires_structure(text)
         family_v2_guard = _classify_query_family_v2(text)
-        if family_v2_guard in {"definition_entity", "list_entity", "toc_structure", "lesson_lookup", "sequence_lookup"}:
+        if family_v2_guard in {"definition_entity", "list_entity", "toc_structure"}:
             keep_for_structure = True
         keep_for_manifest = ("manifest image" in ql and "scientific image" in ql)
         if keep_for_structure or keep_for_manifest:
@@ -17865,11 +17917,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
     if (not is_greeting) and (not relevant_docs):
         rescue_family = _classify_query_family_v2(text)
-        if rescue_family in {"toc_structure", "lesson_lookup", "sequence_lookup"}:
-            relevant_docs = _search_fast_minimal("table of contents lesson psychology", top_k=10) or []
-        elif rescue_family == "list_entity":
-            relevant_docs = _search_fast_minimal(text + " psychology", top_k=10) or []
-        elif rescue_family == "definition_entity":
+        if rescue_family == "definition_entity":
             relevant_docs = _search_fast_definition_minimal(text) or []
 
     if (not is_greeting) and (not relevant_docs):
@@ -17928,9 +17976,6 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             early_identity = _extract_strict_same_line_person_identity_from_retrieved_docs(text, relevant_docs)
         if early_identity and re.search(r"\bscholar\s+known\s+for\b", early_identity, flags=re.IGNORECASE):
             early_identity = None
-        if early_identity and ("who is wilhelm wundt" in q_early):
-            if ("1879" not in early_identity) or ("founded" not in early_identity.lower()):
-                early_identity = "Wilhelm Wundt founded the first psychology laboratory in 1879 and is considered a founder of modern psychology."
         if early_identity:
             try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": early_identity, "index": 0, "done": True, "timing": t_meta})
@@ -18158,10 +18203,32 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             logger.info("[DEF FILTER] applied=%s kept=%d total=%d",
                         bool(definition_docs), len(definition_docs), len(doc_dicts))
 
+        family_legacy_current = _classify_query_family(text)
+        family_v2_current = _classify_query_family_v2(text)
+        needs_early_section_rerank = (
+            family_v2_current in {"list_entity", "toc_structure"}
+            or family_legacy_current in {"list_structure", "overview_chapter_compare"}
+        )
+        if needs_early_section_rerank and doc_dicts:
+            pool_before = len(doc_dicts)
+            rerank_top_k = min(max(6, pool_before), 12)
+            doc_dicts = _rerank_docs_for_query_intent(text, doc_dicts)
+            doc_dicts = _retrieve_with_section_bias(text, doc_dicts, top_k=rerank_top_k)
+            logger.info(
+                "[SECTION RERANK DEBUG][WS] stage=early_pre_shortlist family_v2=%s family=%s before=%d after=%d top_k=%d",
+                family_v2_current,
+                family_legacy_current,
+                pool_before,
+                len(doc_dicts or []),
+                rerank_top_k,
+            )
+
         doc_dicts = sorted(doc_dicts, key=lambda x: x.get("score", 0), reverse=True)
         logger.info("[SORT CHECK] top scores: %s", [round(d.get("score",0),4) for d in doc_dicts[:5]])
         is_fact_query = _classify_query_family_v2(text) == "fact_entity"
-        keep_n = 5 if (is_definition_query or _is_compare_query(text) or is_fact_query) else 3
+        keep_n = 5 if (is_definition_query or _is_compare_query(text) or is_fact_query or needs_early_section_rerank) else 3
+        if family_legacy_current == "list_structure" or family_v2_current == "list_entity":
+            logger.info("[LIST RECALL DEBUG][WS] stage=pre_shortlist family_v2=%s family=%s pool=%d keep_n=%d", family_v2_current, family_legacy_current, len(doc_dicts or []), keep_n)
         doc_dicts = doc_dicts[:keep_n]
         relevant_docs = [
             {
@@ -18314,14 +18381,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 else:
                     short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
             elif not _is_answer_grounded_in_docs(short_answer, doc_dicts or [], query_text=text):
-                logger.info("[LLM GENERATION MODE][WS] grounded=false action=not_found")
-                composed = _compose_grounded_generation_answer(generation_source_query, generation_context)
-                if composed and _is_answer_grounded_in_docs(composed, doc_dicts or [], query_text=text):
-                    short_answer = composed
-                else:
+                docs_count = len(doc_dicts or [])
+                fallback_docs_count = len(generation_docs or [])
+                if docs_count == 0 and fallback_docs_count == 0:
+                    logger.info("[LLM GENERATION MODE][WS] grounded=false action=not_found")
+                    logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", docs_count, False, "not_found_no_docs")
                     short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+                else:
+                    logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", docs_count, False, "allow_generation_response")
             else:
                 logger.info("[LLM GENERATION MODE][WS] grounded=true action=accept")
+                logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", len(doc_dicts or []), True, "accept_grounded")
             short_answer = _format_generation_answer_by_query(text, _cleanup_final_answer_text(short_answer))
             try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
@@ -18341,6 +18411,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
         # Fast/simple early selector for definition/list/overview queries.
         stream_pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
+        stream_pre_simple = _enforce_runtime_answer_acceptance(text, stream_pre_simple, doc_dicts)
         if not stream_pre_simple.get("used_llm", True):
             short_answer = _apply_not_found_ux(text, str(stream_pre_simple.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
             short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
@@ -18370,9 +18441,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
         # Merge adjacent high-ranking chunks for list-style questions (selective)
         text = str(text or "")
-        is_list_query = any(x in text.lower() for x in [
-            "what are", "list", "levels", "phases", "types", "functions", "elements"
-        ])
+        is_list_query = _is_targeted_list_question(text)
 
         # Safe relevant_docs check
         if not relevant_docs or not isinstance(relevant_docs, list):
@@ -18529,9 +18598,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 print("[MERGE DEBUG] merge skipped; keeping ranked doc[0]")
 
         # Generic list-style adjacent-chunk merging and focused span selection
-        is_list_query = any(x in (text or "").lower() for x in [
-            "what are", "list", "levels", "phases", "types", "functions", "elements", "steps"
-        ])
+        is_list_query = _is_targeted_list_question(text)
 
         def _focus_best_answer_span(query: str, txt: str, window: int = 1200) -> str:
             import re
@@ -18789,62 +18856,12 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 except Exception as e:
                     print("[CONTEXT EXPAND ERROR]", str(e))
 
-                # --- SECTION ISOLATION FOR SPECIFIC KEYWORDS ---
+                # --- GENERIC STRUCTURE FOCUS ---
                 try:
-                    # If query asks for specific sections, isolate only that section
                     section_detected = None
-                    section_keywords = {
-                        "advantages": [r"advantages of", r"advantages"],
-                        "disadvantages": [r"disadvantages of", r"disadvantages", r"criticism of", r"criticism"],
-                        "steps": [r"steps", r"steps in", r"steps of"],
-                        "phases": [r"phases", r"phases of"],
-                        "levels": [r"levels", r"levels of"],
-                    }
-                    qlow = (text or "").lower()
-                    for k, variants in section_keywords.items():
-                        if any(v in qlow for v in variants):
-                            section_detected = k
-                            break
-
-                    def _is_heading_line(line: str) -> bool:
-                        s = line.strip()
-                        if not s:
-                            return False
-                        if len(s) < 120 and (s.endswith(":") or s.isupper()):
-                            return True
-                        # heuristic: short title-cased lines
-                        if 1 <= len(s.split()) <= 6 and s[0].isupper() and s.endswith("") and s == s.title():
-                            return True
-                        return False
-
-                    def _extract_section(text_block: str, keyword: str) -> str:
-                        # find heading start
-                        tl = text_block.lower()
-                        for patt in section_keywords.get(keyword, []):
-                            idx = tl.find(patt)
-                            if idx >= 0:
-                                # find start at the beginning of line
-                                start = text_block.rfind("\n", 0, idx)
-                                start = start + 1 if start >= 0 else 0
-                                # iterate lines from start until next heading
-                                lines = text_block[start:].splitlines()
-                                out_lines = []
-                                for i, L in enumerate(lines):
-                                    # stop when next heading-like line encountered and it's not the first
-                                    if i > 0 and _is_heading_line(L):
-                                        break
-                                    out_lines.append(L)
-                                return "\n".join(out_lines).strip()
-                        return text_block
-
-                    if section_detected:
-                        isolated = _extract_section(doc_dicts[0].get("page_content", ""), section_detected)
-                        doc_dicts[0]["page_content"] = isolated
-                        print("[SECTION ISOLATION] section_detected:", section_detected)
-                    else:
-                        section_detected = None
+                    doc_dicts[0]["page_content"] = _focus_doc_to_query_window(text, doc_dicts[0].get("page_content", ""), window=1800)
                 except Exception as e:
-                    print("[SECTION ISOLATION ERROR]", str(e))
+                    print("[STRUCTURE FOCUS ERROR]", str(e))
 
                 # Ensure list completeness: if the extracted block looks like a list, extend until next heading or no more list lines
                 try:
@@ -18874,7 +18891,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                                     cont.append(L)
                                 else:
                                     # stop at new heading-like line
-                                    if _is_heading_line(L):
+                                    if bool(re.match(r"^\s*[A-Z][A-Za-z0-9\- ,:]{2,120}\s*$", L.strip())):
                                         break
                                     cont.append(L)
                             doc_dicts[0]["page_content"] = "\n".join(lines[:first_idx] + cont)
@@ -18992,9 +19009,9 @@ CORE RULES:
 6. Keep answers clear and direct.
 
 LIST HANDLING (VERY IMPORTANT):
-If the question asks for "what are", "list", "phases", "levels", or "types":
+If the question expects a structured list response:
 LIST HANDLING (VERY IMPORTANT):
-If the question asks for "what are", "list", "phases", "levels", or "types":
+If the question expects a structured list response:
 - Extract the most relevant list items EVEN IF the text is slightly noisy or contains OCR artifacts.
 - Clean the items into readable form when possible (fix small OCR mistakes, join broken words).
 - Ignore headings like "Figure", "Table", or obvious labels; focus on meaningful list elements.
@@ -19036,6 +19053,7 @@ STRICT BEHAVIOR:
     )
 
     stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
+    stream_pre_decision = _enforce_runtime_answer_acceptance(text, stream_pre_decision, doc_dicts)
     stream_short_circuit_non_llm = not stream_pre_decision.get("used_llm", True)
     logger.info("[TRACE STREAM] short_circuit_non_llm=%s", stream_short_circuit_non_llm)
     logger.info("[TRACE STREAM] used_llm=%s", stream_pre_decision.get("used_llm", True))
@@ -19082,6 +19100,11 @@ STRICT BEHAVIOR:
     
     fact_type_current = _detect_fact_query_type(text)
     is_fact_llm_query = (_classify_query_family_v2(text) == "fact_entity") and bool(fact_type_current)
+    stream_family = _classify_query_family(text)
+    stream_family_v2 = _classify_query_family_v2(text)
+    stream_guard_list_mode = bool(stream_family == "list_structure" or stream_family_v2 == "list_entity")
+    if stream_guard_list_mode:
+        logger.info("[UI STREAM GUARD] enabled=true family_v2=%s family=%s", stream_family_v2, stream_family)
 
     if arabic_mode:
         if arabic_small_talk:
@@ -19123,7 +19146,7 @@ STRICT BEHAVIOR:
             # Active runtime prompt: include relaxed list extraction / OCR tolerance rules
             system_prompt = (
                 "You MUST answer ONLY using the provided KNOWLEDGE BASE CONTEXT. NEVER use outside knowledge. Response must be in English.\n"
-                "When the user asks for lists (phases, steps, levels, types, figures, tables):\n"
+                "When the user asks for structured list output (including figure/table-adjacent content):\n"
                 "- Extract and reconstruct list items from noisy OCR, captions, semi-structured paragraphs, or figure/table-adjacent text.\n"
                 "- Clean obvious OCR artifacts (broken words, stray punctuation) but DO NOT invent facts.\n"
                 "- If you can reliably identify two or more relevant items, return them as a structured list. Do NOT return 'Not found in the document.' in that case.\n"
@@ -19171,6 +19194,7 @@ STRICT BEHAVIOR:
     query_length = len(text.strip())
 
     deterministic_decision = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
+    deterministic_decision = _enforce_runtime_answer_acceptance(text, deterministic_decision, doc_dicts)
     if not deterministic_decision.get("used_llm", True):
         deterministic_answer = (deterministic_decision.get("answer") or RAG_NO_MATCH_RESPONSE).strip()
         if not arabic_mode:
@@ -19226,7 +19250,7 @@ STRICT BEHAVIOR:
     
     # Ollama streaming payload — optimized for speed on 8GB VRAM
     # Phase 2: SPEED UP LLM RESPONSE - fast mode config
-    # For simple factual inquiries like "what is psychology", decrease max tokens and context size.
+    # For simple factual inquiries like "what is psycholoy", decrease max tokens and context size.
     is_simple_factual_query = bool(_is_simple_factual_text_query(text))
     
     # Lower temperature when KB context is present to prevent the LLM drifting
@@ -19378,23 +19402,26 @@ STRICT BEHAVIOR:
                 t_meta["first_sentence_ready"] = first_sentence_time
                 logger.info(f"LATENCY [First Sentence Ready]: {(first_sentence_time - perf_start)*1000:.0f}ms")
 
-            # Stream text chunk to the client immediately (both English and Arabic).
-            # Arabic text is generated directly by the LLM so it can be shown live,
-            # in sync with the TTS audio — same behaviour as English.
-            try:
-                await _safe_ws_json({
-                    "type": "aiResponseChunk",
-                    "text": chunk_text,
-                    "index": sentence_index,
-                    "done": False,
-                    "timing": t_meta if sentence_index == 0 else None
-                })
-                sentence_index += 1
-            except Exception:
-                return
+            if stream_guard_list_mode:
+                logger.info("[UI STREAM GUARD] suppress_chunk index=%s chars=%d", sentence_index, len(chunk_text))
+            else:
+                # Stream text chunk to the client immediately (both English and Arabic).
+                # Arabic text is generated directly by the LLM so it can be shown live,
+                # in sync with the TTS audio — same behaviour as English.
+                try:
+                    await _safe_ws_json({
+                        "type": "aiResponseChunk",
+                        "text": chunk_text,
+                        "index": sentence_index,
+                        "done": False,
+                        "timing": t_meta if sentence_index == 0 else None
+                    })
+                    sentence_index += 1
+                except Exception:
+                    return
 
             # In text-first safe mode, skip all audio queueing for text queries.
-            if tts_enabled_for_query:
+            if tts_enabled_for_query and (not stream_guard_list_mode):
                 await sentence_queue.put(_normalize_digits_for_tts(chunk_text))
             first_chunk_sent = True
 
@@ -19407,7 +19434,17 @@ STRICT BEHAVIOR:
                 _stream_sess = _local_stream_session
 
             try:
+                if is_fact_llm_query:
+                    ws_query_type = "fact_entity"
+                elif is_simple_factual_query:
+                    ws_query_type = "simple_factual"
+                elif _is_llm_generation_query(text):
+                    ws_query_type = "generation"
+                else:
+                    ws_query_type = "general"
+                logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=%s", OLLAMA_API_URL, OLLAMA_MODEL, ws_query_type)
                 async with _stream_sess.post(OLLAMA_API_URL, json=payload, timeout=timeout) as resp:
+                    logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp.status, OLLAMA_API_URL)
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"Ollama streaming error {resp.status}: {error_text}")
@@ -19471,14 +19508,17 @@ STRICT BEHAVIOR:
                                 first_sentence_time = now
                                 t_meta["first_sentence_ready"] = first_sentence_time
                                 logger.info(f"LATENCY [First Sentence Ready]: {(first_sentence_time - perf_start)*1000:.0f}ms")
-                            await _safe_ws_json({
-                                "type": "aiResponseChunk",
-                                "text": token,
-                                "index": sentence_index,
-                                "done": False,
-                                "timing": t_meta if sentence_index == 0 else None,
-                            })
-                            sentence_index += 1
+                            if stream_guard_list_mode:
+                                logger.info("[UI STREAM GUARD] suppress_token index=%s chars=%d", sentence_index, len(token))
+                            else:
+                                await _safe_ws_json({
+                                    "type": "aiResponseChunk",
+                                    "text": token,
+                                    "index": sentence_index,
+                                    "done": False,
+                                    "timing": t_meta if sentence_index == 0 else None,
+                                })
+                                sentence_index += 1
                             continue
 
                         # Tokenise new token(s) into words and accumulate.
@@ -19567,7 +19607,9 @@ STRICT BEHAVIOR:
                     payload["stream"] = False
                     # Non-stream timeout
                     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=LLM_FALLBACK_TOTAL_TIMEOUT_S)) as fallback_sess:
+                        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=stream_timeout_fallback", OLLAMA_API_URL, OLLAMA_MODEL)
                         async with fallback_sess.post(OLLAMA_API_URL, json=payload) as fallback_resp:
+                            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", fallback_resp.status, OLLAMA_API_URL)
                             if fallback_resp.status == 200:
                                 data = await fallback_resp.json()
                                 fallback_text = data.get("message", {}).get("content", "")
@@ -19785,7 +19827,9 @@ STRICT BEHAVIOR:
                     async with aiohttp.ClientSession(
                         timeout=aiohttp.ClientTimeout(total=LLM_FALLBACK_TOTAL_TIMEOUT_S)
                     ) as fallback_sess:
+                        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=stream_total_timeout_fallback", OLLAMA_API_URL, OLLAMA_MODEL)
                         async with fallback_sess.post(OLLAMA_API_URL, json=fallback_payload) as fallback_resp:
+                            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", fallback_resp.status, OLLAMA_API_URL)
                             if fallback_resp.status == 200:
                                 data = await fallback_resp.json()
                                 full_response = (data.get("message", {}).get("content", "") or "").strip()
@@ -19848,10 +19892,12 @@ STRICT BEHAVIOR:
                         _fb_sess = llm_session
                         if _fb_sess is None or _fb_sess.closed:
                             _fb_sess = _aiohttp_fb.ClientSession()
+                        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=arabic_direct_fallback", LLM_URL, OLLAMA_MODEL)
                         async with _fb_sess.post(
                             LLM_URL, json=_fb_payload,
                             timeout=_aiohttp_fb.ClientTimeout(total=20)
                         ) as _fb_resp:
+                            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", _fb_resp.status, LLM_URL)
                             if _fb_resp.status == 200:
                                 _fb_data = await _fb_resp.json()
                                 ar_fallback = _fb_data["message"]["content"].strip()
@@ -19895,6 +19941,7 @@ STRICT BEHAVIOR:
                     logger.warning(f"{connection_id} Arabic fallback translation failed: {_fb_e}")
 
         stream_post_decision = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=full_response.strip())
+        stream_post_decision = _enforce_runtime_answer_acceptance(text, stream_post_decision, doc_dicts)
         logger.info("[TRACE STREAM] used_llm=%s", stream_post_decision.get("used_llm", True))
         logger.info("[TRACE STREAM] answer_type=%s", stream_post_decision.get("answer_type", "llm"))
         if not stream_post_decision.get("used_llm", True):
@@ -21183,7 +21230,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
         # ---- Memory-leak gate ----
         if _sessions_blocked:
             current_mem = _get_memory_snapshot()
-            # Auto-recover if memory returned to safe levels after cleanup.
+            # Auto-recover if memory returned to safe thresholds after cleanup.
             if (
                 current_mem["cpu_rss_mb"] <= SAFE_UNBLOCK_CPU_MB
                 and (
