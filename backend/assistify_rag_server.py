@@ -10998,6 +10998,75 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             logger.info("[LIST CLEAN OUTLIER] dropped_tail_fragment=%s", tail[:120])
             cleaned = lead
 
+    def _strip_trailing_suffix_noise(item_text: str) -> str:
+        s = re.sub(r"\s+", " ", str(item_text or "")).strip(" ,;:-")
+        if not s:
+            return ""
+        toks = s.split()
+        if len(toks) < 2:
+            return s
+        tail = toks[-1]
+        prev = toks[-2]
+        if re.fullmatch(r"[A-Z]{2,4}", tail) and re.search(r"[A-Za-z]", prev):
+            return " ".join(toks[:-1]).strip(" ,;:-")
+        if re.fullmatch(r"(?:[A-Z]{1,4}\d{1,4}|\d{1,4}[A-Z]{1,4})", tail):
+            return " ".join(toks[:-1]).strip(" ,;:-")
+        return s
+
+    def _is_heading_artifact(item_text: str) -> bool:
+        low = re.sub(r"\s+", " ", str(item_text or "")).strip(" ,;:-").lower()
+        if not low:
+            return True
+        if low in {"note", "notes"}:
+            return True
+        return False
+
+    def _is_org_label(item_text: str) -> bool:
+        return bool(re.search(r"\b(?:association|society|university|institute|college|department|committee|council|academy|federation|foundation)\b", str(item_text or ""), flags=re.IGNORECASE))
+
+    normalized_cleaned: List[str] = []
+    seen_norm_final: Set[str] = set()
+    for item in cleaned:
+        adjusted = _strip_trailing_suffix_noise(item)
+        adjusted = re.sub(r"\s+", " ", adjusted).strip(" ,;:-")
+        if not adjusted or _is_heading_artifact(adjusted):
+            continue
+        norm = re.sub(r"[^a-z0-9]+", " ", adjusted.lower()).strip()
+        if not norm or norm in seen_norm_final:
+            continue
+        seen_norm_final.add(norm)
+        normalized_cleaned.append(adjusted)
+
+    if len(normalized_cleaned) >= 3:
+        tail_tokens = [
+            re.findall(r"[A-Za-z][A-Za-z\-']*", it)[-1].lower()
+            for it in normalized_cleaned
+            if re.findall(r"[A-Za-z][A-Za-z\-']*", it)
+        ]
+        tail_counts: Dict[str, int] = defaultdict(int)
+        for t in tail_tokens:
+            tail_counts[t] += 1
+        dominant_tail = ""
+        dominant_count = 0
+        for t, cnt in tail_counts.items():
+            if cnt > dominant_count:
+                dominant_tail = t
+                dominant_count = cnt
+        if dominant_tail and dominant_count >= 2:
+            filtered_parallel: List[str] = []
+            for it in normalized_cleaned:
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", it)
+                if not words:
+                    continue
+                tail = words[-1].lower()
+                if _is_org_label(it) and tail != dominant_tail:
+                    continue
+                filtered_parallel.append(it)
+            if len(filtered_parallel) >= 2:
+                normalized_cleaned = filtered_parallel
+
+    cleaned = normalized_cleaned
+
     if len(cleaned) < 2:
         return None
     return "\n".join(f"- {it}" for it in cleaned)
