@@ -6983,9 +6983,121 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
         "validation_scope": "selected_chunks",
         "single_local_window_text": "",
         "scope_chunk": -1.0,
+        "same_section_adjacent_labels": 0.0,
     }
     source_chunks: set[int] = set()
+    section_rows: list[dict[str, Any]] = []
     best_scope_conf = -1.0
+
+    def _page_num(md: dict) -> int | None:
+        raw_page = md.get("page")
+        if raw_page is None:
+            return None
+        m = re.search(r"\d+", str(raw_page))
+        if not m:
+            return None
+        try:
+            return int(m.group(0))
+        except Exception:
+            return None
+
+    def _clean_label_count(text: str) -> int:
+        if not text:
+            return 0
+        inline_pattern_hits = 0
+        seen_inline: set[str] = set()
+        for m in re.finditer(
+            r"\b([A-Z][A-Za-z\-']{2,}(?:\s+[A-Z][A-Za-z\-']{2,}){0,3})\s+(?:A|An)\s+(?:branch|category|type|kind|form|area)\s+of\b",
+            str(text),
+            flags=re.IGNORECASE,
+        ):
+            cand = re.sub(r"\s+", " ", str(m.group(1) or "")).strip(" ,;:-")
+            if not cand:
+                continue
+            norm_c = re.sub(r"[^a-z0-9]+", " ", cand.lower()).strip()
+            if not norm_c or norm_c in seen_inline:
+                continue
+            seen_inline.add(norm_c)
+            inline_pattern_hits += 1
+
+        lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+        if not lines:
+            lines = [p.strip() for p in re.split(r"(?<=[.!?])\s+", str(text)) if p.strip()]
+        count = 0
+        seen_norm: set[str] = set()
+        for ln in lines[:60]:
+            item = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s+", "", ln).strip(" ,;:-")
+            if not item:
+                continue
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+            wc = len(words)
+            if wc < 1 or wc > 6:
+                continue
+            low = item.lower()
+            if re.search(r"\b(?:is|are|was|were|be|been|being|include|includes|included|consist|consists|consisted|comprise|comprises|composed|focus|focuses|focused|study|studies|studied|explain|explains|explained|describe|describes|described|involv(?:e|es|ed)|concern(?:s|ed)?)\b", low):
+                continue
+            if re.search(r"[;:]", item) or ". " in item:
+                continue
+            norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
+            if not norm or norm in seen_norm:
+                continue
+            seen_norm.add(norm)
+            count += 1
+        return max(count, inline_pattern_hits)
+
+    def _extract_inline_labels(text: str) -> list[str]:
+        labels: list[str] = []
+        seen: set[str] = set()
+        src = str(text or "")
+        for m in re.finditer(
+            r"\b([A-Z][A-Za-z\-']{2,}(?:\s+[A-Z][A-Za-z\-']{2,}){0,3})\s+(?:A|An)\s+(?:branch|category|type|kind|form|area)\s+of\b",
+            src,
+            flags=re.IGNORECASE,
+        ):
+            cand = re.sub(r"\s+", " ", str(m.group(1) or "")).strip(" ,;:-")
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", cand)
+            if len(words) < 1 or len(words) > 6:
+                continue
+            norm = re.sub(r"[^a-z0-9]+", " ", cand.lower()).strip()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            labels.append(cand)
+
+        title_candidates = [
+            re.sub(r"\s+", " ", c).strip(" ,;:-")
+            for c in re.findall(r"\b([A-Z][A-Za-z\-']+(?:\s+[A-Z][A-Za-z\-']+){1,3})\b", src)
+        ]
+        suffix_counter: Counter[str] = Counter()
+        normalized_candidates: list[tuple[str, list[str]]] = []
+        connector_words = {"of", "to", "for", "in", "on", "with", "by", "and", "or"}
+        for cand in title_candidates:
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", cand)
+            if len(words) < 2 or len(words) > 4:
+                continue
+            lw = [w.lower() for w in words]
+            if any(w in connector_words for w in lw):
+                continue
+            normalized_candidates.append((cand, words))
+            suffix_counter[words[-1].lower()] += 1
+
+        dominant_suffix = ""
+        if suffix_counter:
+            top_suffix, top_count = suffix_counter.most_common(1)[0]
+            if top_count >= 3:
+                dominant_suffix = str(top_suffix)
+
+        if dominant_suffix:
+            for cand, words in normalized_candidates:
+                if words[-1].lower() != dominant_suffix:
+                    continue
+                norm = re.sub(r"[^a-z0-9]+", " ", cand.lower()).strip()
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                labels.append(cand)
+        return labels
+
     for d in (docs or []):
         md = dict((d or {}).get("metadata") or {})
         chunk_idx = -1
@@ -6996,6 +7108,15 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
             pass
         promoted = bool(md.get("_local_window_promoted") or md.get("local_window_promoted"))
         chunk_text = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        source_name = str(md.get("source") or md.get("filename") or md.get("id") or "")
+        page_num = _page_num(md)
+        section_rows.append({
+            "source": source_name,
+            "page": page_num,
+            "chunk": chunk_idx,
+            "text": chunk_text,
+            "clean_labels": _clean_label_count(chunk_text),
+        })
         if chunk_text and isinstance(support.get("chunk_texts"), list):
             support["chunk_texts"].append({
                 "chunk": int(chunk_idx) if "chunk_idx" in locals() else -1,
@@ -7030,6 +7151,68 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
             support["list_density"],
             float(md.get("local_list_density") or md.get("_local_list_density") or 0.0),
         )
+
+    if section_rows:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for row in section_rows:
+            src = str(row.get("source") or "")
+            if not src:
+                continue
+            grouped.setdefault(src, []).append(row)
+
+        best_pair: tuple[int, list[dict[str, Any]]] | None = None
+        for _src, rows in grouped.items():
+            valid_rows = [r for r in rows if isinstance(r.get("chunk"), int) and int(r.get("chunk")) >= 0]
+            valid_rows.sort(key=lambda r: int(r.get("chunk") or -1))
+            for i in range(len(valid_rows) - 1):
+                a = valid_rows[i]
+                b = valid_rows[i + 1]
+                ca = int(a.get("chunk") or -1)
+                cb = int(b.get("chunk") or -1)
+                if abs(cb - ca) != 1:
+                    continue
+                pa = a.get("page")
+                pb = b.get("page")
+                same_or_adj_page = bool(
+                    (isinstance(pa, int) and isinstance(pb, int) and abs(pa - pb) <= 1)
+                    or (pa is None)
+                    or (pb is None)
+                )
+                if not same_or_adj_page:
+                    continue
+                labels_a = int(a.get("clean_labels") or 0)
+                labels_b = int(b.get("clean_labels") or 0)
+                if labels_a < 1 or labels_b < 1:
+                    continue
+                pair_score = labels_a + labels_b
+                if best_pair is None or pair_score > best_pair[0]:
+                    best_pair = (pair_score, [a, b])
+
+        if best_pair is not None and best_pair[0] >= 3:
+            pair_rows = best_pair[1]
+            pair_chunks = [int(r.get("chunk") or -1) for r in pair_rows if int(r.get("chunk") or -1) >= 0]
+            pair_labels: list[str] = []
+            seen_pair_labels: set[str] = set()
+            for r in pair_rows:
+                for lbl in _extract_inline_labels(str(r.get("text") or "")):
+                    norm_lbl = re.sub(r"[^a-z0-9]+", " ", lbl.lower()).strip()
+                    if not norm_lbl or norm_lbl in seen_pair_labels:
+                        continue
+                    seen_pair_labels.add(norm_lbl)
+                    pair_labels.append(lbl)
+            pair_text = "\n".join(pair_labels) if len(pair_labels) >= 3 else "\n".join(str(r.get("text") or "") for r in pair_rows if str(r.get("text") or "").strip())
+            if pair_chunks and pair_text.strip():
+                support["same_section_adjacent_labels"] = 1.0
+                if support.get("validation_scope") != "single_local_window":
+                    support["validation_scope"] = "adjacent_local_section"
+                    support["single_local_window_text"] = pair_text[:8000]
+                    support["scope_chunk"] = float(min(pair_chunks))
+                logger.info(
+                    "[LOCAL SECTION ADJ] enabled=true chunks=%s label_score=%s labels=%s",
+                    pair_chunks,
+                    int(best_pair[0]),
+                    len(pair_labels),
+                )
     ordered_chunks = sorted(source_chunks)
     support["source_chunk_count"] = float(len(ordered_chunks))
     support["chunk_span"] = float((ordered_chunks[-1] - ordered_chunks[0]) if len(ordered_chunks) >= 2 else 0.0)
@@ -10873,6 +11056,7 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     used_single_window = False
     placeholder_heading_rejected = False
     strict_adjacent_merge_allowed = False
+    same_section_adjacent_labels = False
     if isinstance(local_support, dict):
         source_chunk_count = float(local_support.get("source_chunk_count", 0.0) or 0.0)
         merged_extra_chunks_count = float(local_support.get("merged_extra_chunks_count", 0.0) or 0.0)
@@ -10883,6 +11067,7 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         )
         placeholder_heading_rejected = bool(float(local_support.get("placeholder_heading_rejected", 0.0) or 0.0) >= 0.5)
         strict_adjacent_merge_allowed = bool(float(local_support.get("strict_adjacent_merge_allowed", 0.0) or 0.0) >= 0.5)
+        same_section_adjacent_labels = bool(float(local_support.get("same_section_adjacent_labels", 0.0) or 0.0) >= 0.5)
     if (not used_single_window) and int(round(selected_chunks_count)) == 1 and merged_extra_chunks_count <= 0.0:
         used_single_window = True
     if (not used_single_window) and selected_chunks_count <= 1.0 and source_chunk_count <= 1.0 and merged_extra_chunks_count <= 0.0:
@@ -10938,6 +11123,10 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         and (not _is_goal_objective_list_query(query_text, q_family_v2))
     )
     stage_list_query_mode = bool(re.search(r"\bstages?\b", _list_query_norm))
+    branch_category_query_mode = bool(
+        re.search(r"\b(?:branch|branches|category|categories|type|types|kind|kinds|form|forms|area|areas)\s+of\b", _list_query_norm)
+        or bool(re.match(r"^\s*(?:list|name|give|mention|identify)\b", _list_query_norm) and re.search(r"\b(?:branch|category|type|kind|form|area)s?\b", _list_query_norm))
+    )
     strict_continuation_window_ok = bool(
         _directive_list_query_mode
         and stage_list_query_mode
@@ -11109,28 +11298,50 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         and int(round(selected_chunks_count)) == 1
         and merged_extra_chunks_count <= 0.0
     )
-    locality_ok = bool(same_chunk_locality or same_window_locality or single_selected_locality)
+    adjacent_section_locality = bool(
+        branch_category_query_mode
+        and same_section_adjacent_labels
+        and int(round(selected_chunks_count)) <= 3
+        and len(aligned_items) >= min_required_items
+        and coherent_override_items
+    )
+    locality_ok = bool(same_chunk_locality or same_window_locality or single_selected_locality or adjacent_section_locality)
 
     validation_scope = "selected_chunks"
     locality_reason = "chunk_locality"
-    if isinstance(local_support, dict) and str(local_support.get("validation_scope") or "") == "single_local_window":
+    if isinstance(local_support, dict) and str(local_support.get("validation_scope") or "") in {"single_local_window", "adjacent_local_section"}:
         scope_text = str(local_support.get("single_local_window_text") or "")
-        validation_scope = "single_local_window"
+        validation_scope = str(local_support.get("validation_scope") or "single_local_window")
         scope_low = scope_text.lower()
         items_in_scope = 0
+        scoped_items: list[str] = []
         for item in aligned_items:
             item_low = item.lower()
             if item_low in scope_low:
                 items_in_scope += 1
+                scoped_items.append(item)
                 continue
             toks = [t for t in re.findall(r"[a-z0-9]{3,}", item_low) if t not in {"the", "and", "for", "with", "from", "of", "to"}]
             if toks:
                 hit_toks = sum(1 for t in toks if _token_match_light(scope_low, t))
                 if hit_toks >= max(1, min(2, len(toks))):
                     items_in_scope += 1
+                    scoped_items.append(item)
         scope_ratio = float(items_in_scope) / float(max(1, len(aligned_items)))
         locality_ok = bool(items_in_scope >= min_required_items and scope_ratio >= 0.70)
         locality_reason = "items_not_in_single_window" if not locality_ok else "single_window_match"
+        if validation_scope == "adjacent_local_section":
+            scoped_unique = list(dict.fromkeys(scoped_items))
+            if len(scoped_unique) >= min_required_items:
+                locality_ok = True
+                locality_reason = "adjacent_section_match"
+                aligned_items = scoped_unique
+            elif adjacent_section_locality:
+                locality_ok = True
+                locality_reason = "adjacent_section_labels"
+            else:
+                locality_ok = False
+                locality_reason = "items_not_in_adjacent_section"
         logger.info("[LOCALITY DEBUG] validation_scope=%s", validation_scope)
         logger.info("[LOCALITY DEBUG] items_in_scope=%s", items_in_scope)
         logger.info("[LOCALITY DEBUG] accepted=%s reason=%s", bool(locality_ok), locality_reason)
@@ -11139,6 +11350,8 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         logger.info("[LOCALITY DEBUG] items_in_scope=%s", -1)
         if single_selected_locality and not (same_chunk_locality or same_window_locality):
             locality_reason = "single_selected_chunk"
+        elif adjacent_section_locality:
+            locality_reason = "adjacent_section_labels"
         logger.info("[LOCALITY DEBUG] accepted=%s reason=%s", bool(locality_ok), locality_reason)
 
     logger.info(
