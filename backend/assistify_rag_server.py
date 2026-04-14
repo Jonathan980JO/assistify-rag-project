@@ -10791,11 +10791,6 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         x = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*", "", s or "", flags=re.IGNORECASE)
         x = re.sub(r"^[\W_]+|[\W_]+$", "", x)
         x = re.sub(r"\s+", " ", x).strip(" ,;:-")
-        words_x = re.findall(r"[A-Za-z][A-Za-z\-']*", x)
-        if len(words_x) == 2 and words_x[0][:1].isupper() and words_x[1][:1].islower():
-            label_suffixes = {"school", "psychology", "approach", "model", "perspective", "theory", "method"}
-            if words_x[1].lower() not in label_suffixes:
-                x = words_x[0] + words_x[1]
         return x
 
     def _normalize_stage_label(item_text: str) -> str:
@@ -11083,10 +11078,107 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             return True
         return False
 
+    _list_query_norm_early = re.sub(r"\s+", " ", str(query_text or "")).strip().lower()
+    _is_list_query_early = bool(
+        _is_targeted_list_question(_list_query_norm_early)
+        or re.match(r"^\s*(?:what|which)\s+are\b", _list_query_norm_early)
+        or re.match(r"^\s*(?:list|name|give|mention|identify)\b", _list_query_norm_early)
+    )
+
+    q_family_v2_early = _classify_query_family_v2(query_text)
+    q_context_tokens_early, q_focus_tokens_early = _split_query_context_focus_tokens(query_text, q_family_v2_early)
+    _early_query_tokens = list(dict.fromkeys([t for t in (q_focus_tokens_early + q_context_tokens_early) if len(str(t or "").strip()) >= 3]))
+
+    def _extract_inline_concept_items(text: str, query_tokens: List[str]) -> List[str]:
+        src = re.sub(r"\s+", " ", str(text or "")).strip()
+        if not src:
+            return []
+
+        segments = [s.strip() for s in re.split(r"(?<=[.!?])\s+", src) if s and s.strip()]
+        if not segments:
+            segments = [src]
+
+        verb_re = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
+
+        def _clean_part(p: str) -> str:
+            out = re.sub(r"^[\W_]+|[\W_]+$", "", str(p or ""))
+            out = re.sub(r"\s+", " ", out).strip(" ,;:-")
+            return out
+
+        def _is_short_concept_label(p: str) -> bool:
+            s = _clean_part(p)
+            if not s:
+                return False
+            if len(s) > 40:
+                return False
+            if re.search(r"[.!?]", s):
+                return False
+            if verb_re.search(s):
+                return False
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+            wc = len(words)
+            if wc < 1 or wc > 3:
+                return False
+            return True
+
+        best: List[str] = []
+        for seg in segments[:8]:
+            if len(seg) > 260:
+                continue
+            parts: List[str] = []
+            if "," in seg or ";" in seg:
+                parts.extend([_clean_part(p) for p in re.split(r",|;", seg) if _clean_part(p)])
+            if not parts and re.search(r"\s{2,}", seg):
+                parts.extend([_clean_part(p) for p in re.split(r"\s{2,}", seg) if _clean_part(p)])
+            if not parts:
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", seg)
+                if len(words) >= 4:
+                    caps = sum(1 for w in words if w[:1].isupper())
+                    caps_ratio = float(caps) / float(max(1, len(words)))
+                    if caps_ratio >= 0.60:
+                        parts.extend(words)
+
+            filtered: List[str] = []
+            seen_filtered: Set[str] = set()
+            for p in parts:
+                item = _clean_part(p)
+                if not _is_short_concept_label(item):
+                    continue
+                norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+                if not norm or norm in seen_filtered:
+                    continue
+                seen_filtered.add(norm)
+                filtered.append(item)
+
+            if len(filtered) > len(best):
+                best = filtered
+
+        if len(best) < 4:
+            return []
+
+        focus_hits = 0
+        for it in best:
+            low = it.lower()
+            if any(_token_match_light(low, tok) for tok in query_tokens):
+                focus_hits += 1
+        if focus_hits < 1:
+            return []
+
+        return best
+
+    inline_concept_recovered = False
     shaped = _sanitize_list_answer_text(query_text, answer_text)
     if not shaped:
-        logger.info("[LIST FINAL DECISION] accepted=False reason=sanitize_failed")
-        return (False, "sanitize_failed", None)
+        inline_items: List[str] = []
+        if strict_fast and _is_list_query_early:
+            inline_items = _extract_inline_concept_items(answer_text, _early_query_tokens)
+        if inline_items:
+            shaped = "\n".join(f"- {it}" for it in inline_items)
+            inline_concept_recovered = True
+            logger.info("[LIST INLINE CONCEPT] recovered=True items=%d", len(inline_items))
+        else:
+            logger.info("[LIST FINAL DECISION] accepted=False reason=sanitize_failed")
+            return (False, "sanitize_failed", None)
 
     raw_items = [re.sub(r"^\s*[-•*]\s+", "", ln).strip() for ln in shaped.splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
     total_items = len(raw_items)
@@ -11165,9 +11257,20 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     min_required_items = 2 if single_window_short_list_override else 3
 
     if len(cleaned_items) < min_required_items:
-        logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(cleaned_items), rejected_items, 0, 0.0, 0.0)
-        logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
-        return (False, "min_quality_failed", None)
+        inline_items_minq: List[str] = []
+        if strict_fast and _is_list_query_early:
+            inline_items_minq = _extract_inline_concept_items(answer_text, _early_query_tokens)
+        if len(inline_items_minq) >= 4:
+            inline_concept_recovered = True
+            cleaned_items = list(inline_items_minq)
+            total_items = len(cleaned_items)
+            rejected_items = 0
+            seen_norm = {re.sub(r"[^a-z0-9]+", " ", str(it).lower()).strip() for it in cleaned_items}
+            logger.info("[LIST INLINE CONCEPT] recovered=True reason=min_quality_fallback items=%d", len(cleaned_items))
+        else:
+            logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(cleaned_items), rejected_items, 0, 0.0, 0.0)
+            logger.info("[LIST FINAL DECISION] accepted=False reason=min_quality_failed")
+            return (False, "min_quality_failed", None)
 
     q_family_v2 = _classify_query_family_v2(query_text)
     q_context_tokens, q_focus_tokens = _split_query_context_focus_tokens(query_text, q_family_v2)
@@ -11211,6 +11314,8 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         and merged_extra_chunks_count <= 0.0
     ):
         min_required_items = 2
+    if _directive_list_query_mode and strict_fast and (not stage_list_query_mode):
+        min_required_items = min(min_required_items, 2)
 
     def _is_clean_label_item(item_text: str) -> bool:
         s = re.sub(r"\s+", " ", str(item_text or "")).strip(" ,;:-")
@@ -11293,6 +11398,19 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         return (False, "alignment_failed", None)
 
     if strict_label_query_mode:
+        clean_label_count = sum(1 for it in aligned_items if _is_clean_label_item(it))
+        directive_focus_label_override = bool(
+            _directive_list_query_mode
+            and (not stage_list_query_mode)
+            and strict_fast
+            and len(aligned_items) >= 3
+            and clean_label_count >= 3
+            and sum(
+                1
+                for it in aligned_items
+                if any(_token_match_light(it.lower(), tok) for tok in q_focus_tokens)
+            ) >= 1
+        )
         if _directive_list_query_mode and not (
             (
                 used_single_window
@@ -11300,6 +11418,13 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
                 and merged_extra_chunks_count <= 0.0
             )
             or strict_continuation_window_ok
+            or directive_focus_label_override
+            or (
+                strict_fast
+                and (not stage_list_query_mode)
+                and len(aligned_items) >= 2
+                and clean_label_count >= 2
+            )
         ):
             logger.info("[LIST FINAL DECISION] accepted=False reason=single_window_required")
             return (False, "single_window_required", None)
@@ -11308,7 +11433,6 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             if stage_item_count < 2:
                 logger.info("[LIST FINAL DECISION] accepted=False reason=stage_label_min_failed")
                 return (False, "stage_label_min_failed", None)
-        clean_label_count = sum(1 for it in aligned_items if _is_clean_label_item(it))
         if clean_label_count < 2:
             logger.info("[LIST FINAL DECISION] accepted=False reason=clean_label_min_failed")
             return (False, "clean_label_min_failed", None)
@@ -11436,6 +11560,32 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     if not structure_ok:
         logger.info("[LIST FINAL DECISION] accepted=False reason=structure_failed")
         return (False, "structure_failed", None)
+    if (
+        not locality_ok
+        and _directive_list_query_mode
+        and (not stage_list_query_mode)
+        and strict_fast
+        and len(aligned_items) >= 4
+        and sum(1 for it in aligned_items if _is_clean_label_item(it)) >= 4
+        and (
+            sum(1 for it in aligned_items if any(_token_match_light(it.lower(), tok) for tok in q_focus_tokens)) >= 1
+            or len(aligned_items) >= 5
+        )
+        and alignment_score >= 0.70
+    ):
+        locality_ok = True
+        locality_reason = "directive_compact_label_window"
+        logger.info("[LOCALITY DEBUG] accepted=True reason=%s", locality_reason)
+    if (
+        not locality_ok
+        and inline_concept_recovered
+        and len(aligned_items) >= 4
+        and alignment_score >= 0.70
+        and structure_ok
+    ):
+        locality_ok = True
+        locality_reason = "inline_concept_window"
+        logger.info("[LOCALITY DEBUG] accepted=True reason=%s", locality_reason)
     if not locality_ok:
         logger.info("[LIST FINAL DECISION] accepted=False reason=locality_failed")
         return (False, "locality_failed", None)
@@ -14480,13 +14630,88 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
         if fast_deterministic_mode:
             logger.info("[FAST LIST GUARD] accepted=%s reason=%s", bool(list_ok), list_reason)
         if (not list_ok) or (not shaped):
-            logger.info("[LIST CANDIDATE REJECTED] reason=%s answer=%s", list_reason, answer[:220])
-            dec["answer"] = RAG_NO_MATCH_RESPONSE
-            dec["used_llm"] = False
-            dec["answer_type"] = "list_incoherent_rejected"
-            dec["source_mode"] = "not_found_guard"
-            _log_final_decision_debug(rejected=True, rejection_reason=f"list_{list_reason}")
-            return dec
+            recovered_shaped: str | None = None
+            if fast_deterministic_mode and str(list_reason or "") in {"min_quality_failed", "sanitize_failed", "locality_failed", "single_window_required"}:
+                q_family_tmp = _classify_query_family_v2(query)
+                q_ctx_tmp, q_focus_tmp = _split_query_context_focus_tokens(query, q_family_tmp)
+                q_toks_tmp = [t for t in (q_focus_tmp + q_ctx_tmp) if len(str(t or "").strip()) >= 3]
+                verb_re = re.compile(r"\b(?:is|are|was|were|be|been|being)\b", re.IGNORECASE)
+
+                def _clean_inline_item(s: str) -> str:
+                    out = re.sub(r"^[\W_]+|[\W_]+$", "", str(s or ""))
+                    out = re.sub(r"\s+", " ", out).strip(" ,;:-")
+                    return out
+
+                def _valid_inline_item(s: str) -> bool:
+                    item = _clean_inline_item(s)
+                    if not item:
+                        return False
+                    if re.search(r"[.!?]", item):
+                        return False
+                    if len(item) > 40:
+                        return False
+                    if verb_re.search(item):
+                        return False
+                    words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+                    wc = len(words)
+                    return bool(1 <= wc <= 3)
+
+                best_items: List[str] = []
+                for d in (retrieved_docs or [])[:4]:
+                    src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+                    if not src:
+                        continue
+                    segments = [s.strip() for s in re.split(r"[\n]+|(?<=[.!?])\s+", src) if s and s.strip()]
+                    for seg in segments[:80]:
+                        sseg = re.sub(r"\s+", " ", seg).strip()
+                        if len(sseg) < 12 or len(sseg) > 240:
+                            continue
+                        seg_low = sseg.lower()
+                        seg_focus_hit = bool(any(_token_match_light(seg_low, tok) for tok in q_toks_tmp))
+                        parts: List[str] = []
+                        if re.search(r"[,;•]", sseg):
+                            parts.extend([_clean_inline_item(p) for p in re.split(r"[,;•]", sseg) if _clean_inline_item(p)])
+                        if not parts and re.search(r"\s{2,}", sseg):
+                            parts.extend([_clean_inline_item(p) for p in re.split(r"\s{2,}", sseg) if _clean_inline_item(p)])
+                        if not parts:
+                            words = re.findall(r"[A-Za-z][A-Za-z\-']*", sseg)
+                            if len(words) >= 4:
+                                cap_ratio = float(sum(1 for w in words if w[:1].isupper())) / float(max(1, len(words)))
+                                if cap_ratio >= 0.60:
+                                    parts.extend(words)
+
+                        cand: List[str] = []
+                        seen_cand: Set[str] = set()
+                        for p in parts:
+                            it = _clean_inline_item(p)
+                            if not _valid_inline_item(it):
+                                continue
+                            norm = re.sub(r"[^a-z0-9]+", " ", it.lower()).strip()
+                            if not norm or norm in seen_cand:
+                                continue
+                            seen_cand.add(norm)
+                            cand.append(it)
+
+                        if len(cand) >= 4:
+                            focus_hits = sum(1 for it in cand if any(_token_match_light(it.lower(), tok) for tok in q_toks_tmp))
+                            if (focus_hits >= 1 or seg_focus_hit) and len(cand) > len(best_items):
+                                best_items = cand
+
+                if len(best_items) >= 4:
+                    recovered_shaped = "\n".join(f"- {it}" for it in best_items)
+
+            if recovered_shaped:
+                shaped = recovered_shaped
+                list_ok = True
+                logger.info("[LIST RECOVERED] mode=inline_concept_docs items=%d", len([ln for ln in shaped.splitlines() if ln.strip()]))
+            else:
+                logger.info("[LIST CANDIDATE REJECTED] reason=%s answer=%s", list_reason, answer[:220])
+                dec["answer"] = RAG_NO_MATCH_RESPONSE
+                dec["used_llm"] = False
+                dec["answer_type"] = "list_incoherent_rejected"
+                dec["source_mode"] = "not_found_guard"
+                _log_final_decision_debug(rejected=True, rejection_reason=f"list_{list_reason}")
+                return dec
         align = _list_query_alignment_metrics(query, shaped)
         mismatch_penalty = float(align.get("mismatch_penalty", 0.0) or 0.0)
         _effective_mismatch_threshold = 1.5
@@ -14596,6 +14821,41 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
                 and low_drift
             )
 
+            shaped_items = [
+                re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s+", "", ln).strip()
+                for ln in str(shaped or "").splitlines()
+                if re.match(r"^\s*(?:[-*•]|\d+[\.)])\s+", str(ln or ""))
+            ]
+            compact_label_count = 0
+            focus_hit_item_count = 0
+            label_verb_re = re.compile(r"\b(?:is|are|was|were|has|have|had|include|includes|including|means|refers|describe|describes|explains|suggests|indicates)\b", re.IGNORECASE)
+            for it in shaped_items:
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", it)
+                wc = len(words)
+                if 1 <= wc <= 6 and not label_verb_re.search(it) and ". " not in it and ";" not in it:
+                    compact_label_count += 1
+                if any(_token_match_light(it.lower(), tok) for tok in q_focus_tokens):
+                    focus_hit_item_count += 1
+            compact_ratio = float(compact_label_count) / float(max(1, len(shaped_items)))
+            _guard_query_norm = re.sub(r"\s+", " ", str(query or "")).strip().lower()
+            _guard_directive_mode = bool(re.match(r"^\s*(?:list|name|give|mention|identify)\b", _guard_query_norm))
+            _guard_stage_mode = bool(re.search(r"\bstages?\b", _guard_query_norm))
+            cross_section_compact_label_allow = bool(
+                len(source_counts) == 1
+                and len(shaped_items) >= 3
+                and compact_ratio >= 0.80
+                and focus_hit_item_count >= 1
+                and low_drift
+            )
+            directive_compact_label_allow = bool(
+                _guard_directive_mode
+                and (not _guard_stage_mode)
+                and same_source_cluster
+                and len(shaped_items) >= 4
+                and compact_ratio >= 0.80
+                and focus_hit_item_count >= 1
+            )
+
             controlled_nearby_ok = bool(
                 same_source_cluster
                 and chunk_spread_ok
@@ -14603,6 +14863,10 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
                 and low_drift
             )
             if same_section_same_source_allow:
+                controlled_nearby_ok = True
+            if cross_section_compact_label_allow:
+                controlled_nearby_ok = True
+            if directive_compact_label_allow:
                 controlled_nearby_ok = True
 
             if not controlled_nearby_ok:
@@ -15024,6 +15288,9 @@ def _shared_rag_final_answer_decision(
             return (0.0, fetched_doc, fetched_sig, int(fetched_clean))
 
         primary_clean_count = 0
+        primary_section_confidence = 0.0
+        primary_has_deterministic_list_candidate = False
+        primary_strong_section_for_merge_guard = False
         if list_ranked:
             primary_tuple = list_ranked[0]
             if strict_label_query:
@@ -15037,6 +15304,21 @@ def _shared_rag_final_answer_decision(
             primary_chunk = md_primary.get("chunk_index")
             primary_source = str(md_primary.get("source") or md_primary.get("filename") or md_primary.get("id") or "")
             primary_signature = _section_signature_for_doc(primary_doc)
+            primary_section_confidence = _debug_section_confidence(primary_sig, primary_score)
+            primary_has_deterministic_list_candidate = bool(
+                int(primary_clean_count) >= 2
+                or (
+                    float(primary_sig.get("marker_score", 0.0) or 0.0) >= 0.16
+                    and (
+                        float(primary_sig.get("phrase_hits", 0.0) or 0.0) >= 0.30
+                        or float(primary_sig.get("heading_hits", 0.0) or 0.0) >= 0.35
+                        or float(primary_sig.get("local_focus_hits", 0.0) or 0.0) >= 1.0
+                    )
+                )
+            )
+            primary_strong_section_for_merge_guard = bool(
+                list_section_confident or primary_section_confidence >= 0.42
+            )
             logger.info("[LIST SOURCE DEBUG] primary_chunk=%s", primary_chunk)
             if strict_label_query:
                 logger.info("[LIST SOURCE DEBUG] primary_clean_label_count=%s", int(primary_clean_count))
@@ -15081,6 +15363,18 @@ def _shared_rag_final_answer_decision(
                     cand_signature = _section_signature_for_doc(cand_doc)
                     same_section = _same_section_signature(primary_signature, cand_signature)
                     owner_consistent = _owner_focus_consistent(primary_doc, cand_doc)
+                    if (
+                        primary_strong_section_for_merge_guard
+                        and primary_has_deterministic_list_candidate
+                        and not same_section
+                    ):
+                        logger.info("[LIST MERGE GUARD] primary_chunk=%s", primary_chunk)
+                        logger.info("[LIST MERGE GUARD] primary_section_confidence=%.3f", float(primary_section_confidence))
+                        logger.info("[LIST MERGE GUARD] adjacent_chunk=%s", cand_chunk)
+                        logger.info("[LIST MERGE GUARD] same_section=False")
+                        logger.info("[LIST MERGE GUARD] merge=False reason=strong_primary_section_preserved")
+                        logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strong_primary_section_preserved"', cand_chunk)
+                        continue
                     if strict_mode:
                         if not owner_consistent:
                             logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strict_mode_owner_mismatch"', cand_chunk)
@@ -15837,7 +16131,6 @@ def _shared_rag_final_answer_decision(
                 logger.info("[LIST WINNER] mode=deterministic_context items=%s", len([ln for ln in det_shaped.splitlines() if ln.strip()]))
                 return _result(det_shaped, used_llm=False, answer_type="list_deterministic_context", items_count=len([ln for ln in det_shaped.splitlines() if ln.strip()]))
             logger.info("[LIST REJECTED] reason=%s", det_reason)
-            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
             single_doc_best: str | None = None
             single_doc_count = 0
             for d_single in (routed_docs or doc_dicts or [])[:4]:
