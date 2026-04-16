@@ -120,52 +120,42 @@ def _focus_doc_to_query_window(query: str, text: str, window: int = 700) -> str:
                 continue
             seen.add(tok)
             out.append(tok)
-        return out[:18]
+        return out
 
-    def is_list_query(qs: str) -> bool:
-        q_words = re.findall(r"[a-z]+", qs)
-        plural_tokens = [w for w in q_words if len(w) > 3 and w.endswith("s") and w not in {"this", "is", "was", "does"}]
-        if re.search(r"\blist\b", qs):
-            return True
-        if re.match(r"^\s*(?:what|which)\s+are\b", qs):
-            return True
-        if re.match(r"^\s*(?:name|give|mention|identify)\b", qs) and plural_tokens:
-            return True
-        if re.search(r"\b(?:what|which)\b", qs) and plural_tokens:
-            return True
-        return False
-
-    query_tokens = _query_tokens(q)
-
-    list_detected = False
-    trimming_applied = False
-    used_full_chunk = False
-    min_window = max(window, 2200 if is_list_query(q) else window)
-
-    lines = t.splitlines(keepends=True)
-    line_entries: list[tuple[int, int, str]] = []
-    pos = 0
-    for ln in lines:
-        s = pos
-        e = pos + len(ln)
-        line_entries.append((s, e, ln))
-        pos = e
+    q_tokens = _query_tokens(q)
+    q_token_set = set(q_tokens)
 
     def _line_overlap(line: str) -> int:
-        low = line.lower()
-        return sum(1 for tok in query_tokens if re.search(rf"\b{re.escape(tok)}\b", low))
+        if not q_token_set:
+            return 0
+        ll = str(line or "").lower()
+        return sum(1 for tok in q_token_set if re.search(rf"\b{re.escape(tok)}\b", ll))
 
     def _is_structured_line(line: str) -> bool:
-        stripped = line.strip()
-        if not stripped:
+        if not line:
             return False
-        if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", line):
+        if re.search(r"^\s*(?:[-•*]|\d+[.)])\s+", line):
             return True
-        if re.match(r"^\s*[A-Z][A-Za-z0-9\- ]{2,60}:\s*$", line):
+        if re.search(r"\|\s*[^|]+\s*\|", line):
             return True
         if re.search(r"(?:\b[A-Z][\w\-]{2,}\b\s*,\s*){2,}\b[A-Z][\w\-]{2,}\b", line):
             return True
         return False
+
+    line_entries: list[Tuple[int, int, str]] = []
+    pos = 0
+    for ln in t.splitlines():
+        start = pos
+        end = start + len(ln)
+        line_entries.append((start, end, ln))
+        pos = end + 1
+    if not line_entries:
+        line_entries = [(0, len(t), t)]
+
+    min_window = max(int(window), 700)
+    list_detected = False
+    trimming_applied = False
+    used_full_chunk = False
 
     def _structured_density(start_idx: int, end_idx: int) -> float:
         seg = line_entries[max(0, start_idx): min(len(line_entries), end_idx)]
@@ -277,7 +267,7 @@ def _focus_doc_to_query_window(query: str, text: str, window: int = 700) -> str:
         end = min(len(t), anchor_end + max(window, 900))
 
         anchor_structured = _is_structured_line(line_entries[anchor_idx][2])
-        if is_list_query(q) or anchor_structured or _structured_density(anchor_idx - 2, anchor_idx + 10) >= 0.35:
+        if _is_list_query(q) or anchor_structured or _structured_density(anchor_idx - 2, anchor_idx + 10) >= 0.35:
             list_detected = True
             non_struct_run = 0
             for _idx2 in range(anchor_idx, min(len(line_entries), anchor_idx + 100)):
@@ -2648,28 +2638,29 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
             if shaped and _list_relevance_ok(shaped, docs[:5]):
                 return shaped
 
-    if "psychology" in q_norm and re.search(r"\b(?:area|areas|branch|branches|type|types|field|fields|category|categories)\b", q_norm):
-        psych_labels: list[str] = []
-        seen_psych: set[str] = set()
-        for d in docs[:5]:
-            dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
-            if not dtxt.strip():
-                continue
-            for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+psychology)\b", dtxt):
-                lbl = re.sub(r"\s+", " ", (m.group(1) or "").strip())
-                norm = re.sub(r"[^a-z0-9]+", " ", lbl.lower()).strip()
-                if not norm or norm in seen_psych:
-                    continue
-                seen_psych.add(norm)
-                psych_labels.append(lbl)
-                if len(psych_labels) >= 8:
-                    break
-            if len(psych_labels) >= 8:
-                break
-        if len(psych_labels) >= 3:
-            shaped = _sanitize_list_answer_text(query_text, "\n".join(f"- {x}" for x in psych_labels))
-            if shaped and _list_relevance_ok(shaped, docs[:5]):
-                return shaped
+    # DISABLED_CHEATING_LOGIC: Topic-specific psychology label extraction branch.
+    # if "psychology" in q_norm and re.search(r"\b(?:area|areas|branch|branches|type|types|field|fields|category|categories)\b", q_norm):
+    #     psych_labels: list[str] = []
+    #     seen_psych: set[str] = set()
+    #     for d in docs[:5]:
+    #         dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+    #         if not dtxt.strip():
+    #             continue
+    #         for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+psychology)\b", dtxt):
+    #             lbl = re.sub(r"\s+", " ", (m.group(1) or "").strip())
+    #             norm = re.sub(r"[^a-z0-9]+", " ", lbl.lower()).strip()
+    #             if not norm or norm in seen_psych:
+    #                 continue
+    #             seen_psych.add(norm)
+    #             psych_labels.append(lbl)
+    #             if len(psych_labels) >= 8:
+    #                 break
+    #         if len(psych_labels) >= 8:
+    #             break
+    #     if len(psych_labels) >= 3:
+    #         shaped = _sanitize_list_answer_text(query_text, "\n".join(f"- {x}" for x in psych_labels))
+    #         if shaped and _list_relevance_ok(shaped, docs[:5]):
+    #             return shaped
 
     return None
 
@@ -3041,7 +3032,7 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
         sentence_low = sentence.lower()
         if has_entity_anywhere and has_definition_pattern:
             if False:
-                if re.search(r"\b(?:classification|major\s+classification|contributors?|table\s*\d+|scientific\s+management\s*[-•]|administrative\s+management\s*[-•])\b", sentence_low):
+                if re.search(r"\b(?:classification|major\s+classification|contributors?|table\s*\d+)\b", sentence_low):
                     logger.info("[DEF REJECT WEAK] entity=%s reason=classification_style sentence=%s", entity, sentence[:160])
                     continue
                 local_link = bool(
@@ -3213,7 +3204,27 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     has_entity, entity = _extract_entity_from_definition_query(query)
     entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
     if not entity_l:
+        if ans and ans.lower() != not_found.lower() and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
+            logger.info("[WS FIXED ANSWER] mode=preserve_validated_no_entity answer=%s", ans[:220])
+            return ans
         return not_found
+
+    def _entity_grounded_in_text(text_l: str) -> bool:
+        if not entity_l:
+            return True
+        if re.search(rf"\b{re.escape(entity_l)}\b", text_l):
+            return True
+        etoks = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
+        generic_entity_tokens = {"approach", "theory", "method", "model", "system", "concept", "perspective", "school", "view"}
+        match_tokens = [t for t in etoks if t not in generic_entity_tokens] or etoks
+        token_hits = sum(1 for t in match_tokens if re.search(rf"\b{re.escape(t)}\b", text_l))
+        return token_hits >= 1
+
+    if is_definition_mode and ans and ans.lower() != not_found.lower():
+        ans_l = ans.lower()
+        if _entity_grounded_in_text(ans_l) and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
+            logger.info("[WS FIXED ANSWER] mode=preserve_validated answer=%s", ans[:220])
+            return ans
 
     def _finalize_definition_output(text: str) -> str:
         s = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(text or "").strip()))
@@ -3390,6 +3401,35 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
         if not _is_complete_sentence(best):
             return not_found
         return best
+
+    if is_definition_mode:
+        doc_rescue = _extract_best_scored_concept_sentence_from_docs(query, docs or [], max_docs=3)
+        if not doc_rescue:
+            doc_rescue = _extract_simple_definition_sentence(query, docs or [])
+        if (not doc_rescue) and entity_l:
+            for d in (docs or [])[:3]:
+                txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+                if not txt.strip():
+                    continue
+                for rs in _split_text_into_sentences(txt)[:24]:
+                    rs_clean = _clean_definition_like_sentence(rs)
+                    if not rs_clean:
+                        continue
+                    rs_low = rs_clean.lower()
+                    if not re.search(rf"\b{re.escape(entity_l)}\b", rs_low):
+                        continue
+                    if _looks_table_or_heading_like_chunk(rs_clean):
+                        continue
+                    if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", rs_clean)) < 8:
+                        continue
+                    doc_rescue = rs_clean
+                    break
+                if doc_rescue:
+                    break
+        doc_rescue = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(doc_rescue or "")).strip())
+        if doc_rescue and _is_answer_grounded_in_docs(doc_rescue, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, doc_rescue):
+            logger.info("[WS FIXED ANSWER] mode=doc_rescue extracted=%s", doc_rescue[:220])
+            return _finalize_definition_output(doc_rescue)
 
     routed_answer = _extract_definition_route_answer(query, docs)
     if routed_answer:
@@ -3926,12 +3966,13 @@ def is_indirect_entity_explanation(sentence: str, entity: str) -> bool:
     if not descriptive_re.search(s_l):
         return False
 
-    unrelated_general_re = re.compile(
-        r"\b(?:management\s+is\s+the\s+process|management\s+in\s+general|general\s+principles\s+of\s+management)\b",
-        re.IGNORECASE,
-    )
-    if unrelated_general_re.search(s_l) and not has_full_entity:
-        return False
+    # DISABLED_CHEATING_LOGIC: Domain-specific generic-management rejection.
+    # unrelated_general_re = re.compile(
+    #     r"\b(?:management\s+is\s+the\s+process|management\s+in\s+general|general\s+principles\s+of\s+management)\b",
+    #     re.IGNORECASE,
+    # )
+    # if unrelated_general_re.search(s_l) and not has_full_entity:
+    #     return False
 
     return True
 
@@ -4237,8 +4278,22 @@ def _sentence_passes_same_concept_filter(sentence: str, entity: str, chunk_is_en
 
 
 def _apply_concept_filter_to_docs(docs: list[dict], entity: str) -> list[dict]:
-    logger.info("[CONCEPT FILTER DISABLED] entity=%s docs=%d", entity, len(docs or []))
-    return list(docs or [])
+    source_docs = list(docs or [])
+    if not source_docs:
+        return []
+    e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if not e:
+        return source_docs
+    filtered: list[dict] = []
+    for d in source_docs:
+        txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+        if _chunk_passes_concept_consistency(txt, e):
+            filtered.append(d)
+    if filtered:
+        logger.info("[CONCEPT FILTER] entity=%s docs=%d kept=%d", entity, len(source_docs), len(filtered))
+        return filtered
+    logger.info("[CONCEPT FILTER] entity=%s docs=%d kept=0 fallback=original", entity, len(source_docs))
+    return source_docs
 
 
 def _select_safe_indirect_from_pool(pool: list[dict], max_pick: int = 2) -> tuple[list[str], str]:
@@ -4266,8 +4321,25 @@ def _select_safe_indirect_from_pool(pool: list[dict], max_pick: int = 2) -> tupl
 
 
 def _enforce_definition_doc_contamination_guard(docs: list[dict], entity: str) -> list[dict]:
-    logger.info("[CONTAMINATION GUARD DISABLED] entity=%s docs=%d", entity, len(docs or []))
-    return list(docs or [])[:5]
+    source_docs = list(docs or [])
+    if not source_docs:
+        return []
+    e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if not e:
+        return source_docs[:5]
+    guarded: list[dict] = []
+    for d in source_docs:
+        txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+        if not _chunk_passes_concept_consistency(txt, e):
+            continue
+        if _is_wrong_concept_definition_chunk(txt, e):
+            continue
+        guarded.append(d)
+    if guarded:
+        logger.info("[CONTAMINATION GUARD] entity=%s docs=%d kept=%d", entity, len(source_docs), len(guarded))
+        return guarded[:5]
+    logger.info("[CONTAMINATION GUARD] entity=%s docs=%d kept=0 fallback=top5", entity, len(source_docs))
+    return source_docs[:5]
 
 
 def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool = False) -> list[str] | list[tuple[float, bool, str]]:
@@ -4310,7 +4382,6 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
             r"\bfocused\s+on\b",
             r"\bmain\s+goals?\b",
             r"\bgrew\s+out\s+of\b",
-            r"\bmanagement\s+ideas?\b",
             r"\bprinciples?\b",
             r"\bmethods?\b",
             r"\befficiency\b",
@@ -4330,8 +4401,9 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
             strong_explanatory_phrase_boost += 2.2
         if re.search(r"\bstud(?:ied|y)\s+scientifically\b", s_l, flags=re.IGNORECASE):
             strong_explanatory_phrase_boost += 1.8
-        if re.search(r"\b(?:principles?|methods?)\b", s_l, flags=re.IGNORECASE) and re.search(r"\bscientific\b", s_l, flags=re.IGNORECASE):
-            strong_explanatory_phrase_boost += 1.2
+        # DISABLED_CHEATING_LOGIC: Domain-specific principles+scientific boost.
+        # if re.search(r"\b(?:principles?|methods?)\b", s_l, flags=re.IGNORECASE) and re.search(r"\bscientific\b", s_l, flags=re.IGNORECASE):
+        #     strong_explanatory_phrase_boost += 1.2
 
         prose_bonus = 1.6 if not is_table_like else 0.0
         long_coherent_bonus = 0.0
@@ -4367,7 +4439,7 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
             broken_fragment_penalty = 8.0
 
         preamble_penalty = 0.0
-        if re.search(r"\b(?:before\s+we\s+can\s+study|we\s+need\s+to\s+look\s+at|there\s+are\s+\w+\s+parts\s+to|talk\s+about\s+how\s+management\s+ideas\s+have\s+changed\s+over\s+time)\b", s_l, flags=re.IGNORECASE):
+        if re.search(r"\b(?:before\s+we\s+can\s+study|we\s+need\s+to\s+look\s+at|there\s+are\s+\w+\s+parts\s+to)\b", s_l, flags=re.IGNORECASE):
             preamble_penalty = 3.8
 
         entity_token_completeness_boost = 0.0
@@ -4411,7 +4483,19 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
 
 
 def _is_wrong_concept_definition_chunk(text: str, query_entity: str) -> bool:
-    logger.info("[WRONG CONCEPT CHECK DISABLED] entity=%s preview=%s", query_entity, str(text or "")[:180].replace("\n", " "))
+    t = re.sub(r"\s+", " ", str(text or "").strip().lower())
+    e = re.sub(r"\s+", " ", str(query_entity or "").strip().lower())
+    if not t or not e:
+        return False
+    has_entity_phrase = bool(re.search(rf"\b{re.escape(e)}\b", t))
+    if has_entity_phrase:
+        return False
+    entity_tokens = _definition_entity_tokens(e)
+    token_hits = sum(1 for tok in entity_tokens if re.search(rf"\b{re.escape(tok)}\b", t))
+    wrong_concept = bool(defines_other_concept(t, e) or (_mentions_other_approach(t, e) and token_hits < max(1, min(2, len(entity_tokens)))))
+    if wrong_concept:
+        logger.info("[WRONG CONCEPT CHECK] entity=%s result=true preview=%s", query_entity, str(text or "")[:180].replace("\n", " "))
+        return True
     return False
 
 
@@ -4481,11 +4565,12 @@ def _chunk_satisfies_fact_relation_rule(chunk_text: str, query_text: str, fact_t
                     sl,
                 )
             )
-            if "father" in ql and "psycholog" in ql:
-                if re.search(r"\bsport\s+psycholog\w*\b", sl):
-                    continue
-                if not re.search(r"\bfather\s+of\b", sl):
-                    continue
+            # DISABLED_CHEATING_LOGIC: Topic-specific father/psychology relation filter.
+            # if "father" in ql and "psycholog" in ql:
+            #     if re.search(r"\bsport\s+psycholog\w*\b", sl):
+            #         continue
+            #     if not re.search(r"\bfather\s+of\b", sl):
+            #         continue
             if has_person_name and has_action_verb and has_subject:
                 return True
 
@@ -5049,8 +5134,9 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             focus_hits = sum(1 for t in query_focus_terms if re.search(rf"\b{re.escape(t)}\b", txt))
             if chunk_entities and has_action and (focus_hits >= 1):
                 direct_fact_bonus += 0.85
-            if re.search(r"\bpsycholog\w*\b", txt) and re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
-                direct_fact_bonus += 0.55
+            # DISABLED_CHEATING_LOGIC: Topic-specific psychology bonus.
+            # if re.search(r"\bpsycholog\w*\b", txt) and re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
+            #     direct_fact_bonus += 0.55
             if "father" in query_actions and re.search(r"\bfather\s+of\b", txt):
                 direct_fact_bonus += 0.5
                 direct_fact_bonus += 2.2
@@ -5060,13 +5146,14 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
                 direct_fact_bonus += 1.3
                 direct_fact_bonus += 1.0
                 direct_fact_bonus += 1.6
-            if "father" in q_terms and person_name_counts and re.search(r"\bpsycholog\w*\b", txt):
-                max_freq = 0
-                for nm in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
-                    norm_nm = " ".join(str(nm).split()).strip().lower()
-                    max_freq = max(max_freq, int(person_name_counts.get(norm_nm, 0)))
-                if max_freq >= 2:
-                    direct_fact_bonus += min(0.9, 0.35 * float(max_freq))
+            # DISABLED_CHEATING_LOGIC: Topic-specific father/psychology frequency bonus.
+            # if "father" in q_terms and person_name_counts and re.search(r"\bpsycholog\w*\b", txt):
+            #     max_freq = 0
+            #     for nm in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
+            #         norm_nm = " ".join(str(nm).split()).strip().lower()
+            #         max_freq = max(max_freq, int(person_name_counts.get(norm_nm, 0)))
+            #     if max_freq >= 2:
+            #         direct_fact_bonus += min(0.9, 0.35 * float(max_freq))
         elif fact_type == "when":
             if chunk_years and re.search(r"\b(?:in|during|year|emerged|established|introduced|proposed|first)\b", txt):
                 direct_fact_bonus += 0.9
@@ -5085,11 +5172,12 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             generic_penalty += 1.1
             generic_penalty += 0.85
             generic_penalty += 1.5
-        if "father" in q_terms and re.search(r"\bfather\s+of\s+sport\s+psycholog\w*\b", txt):
-            generic_penalty += 2.2
-        if "father" in q_terms and re.search(r"\bsport\s+psycholog\w*\b", txt):
-            generic_penalty += 1.6
-            generic_penalty += 1.25
+        # DISABLED_CHEATING_LOGIC: Topic-specific sport-psychology penalty routing.
+        # if "father" in q_terms and re.search(r"\bfather\s+of\s+sport\s+psycholog\w*\b", txt):
+        #     generic_penalty += 2.2
+        # if "father" in q_terms and re.search(r"\bsport\s+psycholog\w*\b", txt):
+        #     generic_penalty += 1.6
+        #     generic_penalty += 1.25
         if query_acronyms and not any(re.search(rf"\b{re.escape(a.lower())}\b", txt) for a in query_acronyms):
             generic_penalty += 0.95
             generic_penalty += 1.4
@@ -5539,9 +5627,10 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
                 bonus -= 0.20
                 retrieval_boost_applied = True
 
-            if re.search(r"\bclassical\s+approach\b", txt) or re.search(r"\bscientific\s+management\b", txt):
-                bonus += 0.30
-                retrieval_boost_applied = True
+            # DISABLED_CHEATING_LOGIC: Domain-specific retrieval boost for classical/scientific management terms.
+            # if re.search(r"\bclassical\s+approach\b", txt) or re.search(r"\bscientific\s+management\b", txt):
+            #     bonus += 0.30
+            #     retrieval_boost_applied = True
 
             if retrieval_boost_applied:
                 logger.info("[DEF BOOST] before=%.3f after=%.3f", def_boost_before, float(bonus))
@@ -6280,7 +6369,7 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
         long_prose = sum(1 for s in sents if len(re.findall(r"[A-Za-z][A-Za-z\-']*", s)) >= 8)
         score += min(1.2, 0.2 * long_prose)
 
-        if re.search(r"\b(table\s*\d+|contributors?|classification|management ideas)\b", txt[:1200]):
+        if re.search(r"\b(table\s*\d+|contributors?|classification)\b", txt[:1200]):
             score -= 2.4
         if is_person_query and table_like_head and person_identity_re and person_identity_re.search(txt):
             score += 1.8
@@ -6750,10 +6839,11 @@ def _looks_table_or_heading_like_chunk(text: str) -> bool:
     low = src.lower()
     if re.search(r"\b(?:table|fig(?:ure)?|fig\.)\b", low[:1600]):
         return True
-    if re.search(r"\b(table\s*\d+|contributors?|classification|contents?|chapter\s+\d+|management ideas)\b", low[:1400]):
+    if re.search(r"\b(table\s*\d+|contributors?|classification|contents?|chapter\s+\d+)\b", low[:1400]):
         return True
-    if re.search(r"\bmanagement\s+ideas\s+contributors\b", low[:1600]):
-        return True
+    # DISABLED_CHEATING_LOGIC: Domain-specific management-ideas table detector.
+    # if re.search(r"\bmanagement\s+ideas\s+contributors\b", low[:1600]):
+    #     return True
     if re.search(r"\b\d+\.\s*[A-Z][A-Za-z\s\-]{2,50}\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b", src[:1600]):
         return True
     # PATCH 4: detect Figure references, numbered row structures, and OCR table remnants
@@ -9728,8 +9818,9 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             return True
         if re.search(r"\b(?:classification|contributors?)\b", low):
             return True
-        if re.search(r"\bmanagement\s+ideas\s+contributors\b", low):
-            return True
+        # DISABLED_CHEATING_LOGIC: Domain-specific management-ideas row detector.
+        # if re.search(r"\bmanagement\s+ideas\s+contributors\b", low):
+        #     return True
         if re.search(r"\b\d+\.\s*[A-Z][A-Za-z\s\-]{2,50}\s+[A-Z][a-z]+\s+[A-Z][a-z]+\b", sentence):
             return True
         if re.search(r"^\s*[A-Z][A-Za-z0-9\s\-]{3,90}\s*:\s*(?:[-•*]|\d+[.)])\s+", sentence):
@@ -9987,7 +10078,9 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
 
                 bio_fragment = bool(re.search(r"\b(he|she|his|her)\b", low)) or bool(re.search(r"\b(born|worked as|engineer|biography)\b", low))
                 alias_style = bool(re.search(r"\b(you can also call it|also called|also known as)\b", low))
-                generic_management_without_phrase = is_concept_query and ("management" in low) and (not phrase_hit)
+                # DISABLED_CHEATING_LOGIC: Domain-specific management phrase penalty.
+                # generic_ungrounded_concept = is_concept_query and ("management" in low) and (not phrase_hit)
+                generic_ungrounded_concept = False
 
                 score = 0.0
                 if full_entity_hit:
@@ -10007,7 +10100,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     score -= 1.8
                 if alias_style:
                     score -= 2.2
-                if generic_management_without_phrase:
+                if generic_ungrounded_concept:
                     score -= 3.0
                 if table_like:
                     score -= 3.0
@@ -10055,7 +10148,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                         "token_hits": token_hits,
                         "has_concept_verb": has_strict_concept_verb,
                         "has_explanatory_verb": has_explanatory_verb,
-                        "generic_management_without_phrase": generic_management_without_phrase,
+                        "generic_ungrounded_concept": generic_ungrounded_concept,
                         "bio_fragment": bio_fragment,
                         "alias_style": alias_style,
                         "table_like": table_like,
@@ -10072,7 +10165,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             for c in concept_candidates:
                 if not c["phrase_hit"]:
                     continue
-                if c["generic_management_without_phrase"] or c["continuation"] or c["alias_style"]:
+                if c["continuation"] or c["alias_style"]:
                     continue
                 quality_score = int(c.get("concept_quality_score", -99))
                 if quality_score < 0:
@@ -10352,6 +10445,8 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
         return composed_answer
 
     def _rescue_from_concept_signals(source_docs: list[dict]) -> str | None:
+        # DISABLED_CHEATING_LOGIC: Domain-specific concept-signal rescue mapping.
+        return None
         if not is_concept_query or not has_entity or not entity_l:
             return None
         signals = _concept_specific_signal_terms(entity_l)
@@ -10552,7 +10647,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 clean_concept = re.sub(r"\s+", " ", concept_cell).strip(" .")
                 if clean_concept:
                     # FINAL FIX: fallback accepted only from strict same-line table mapping.
-                    role = "management thinker" if re.search(r"\bmanagement\b", clean_concept.lower()) else "scholar"
+                    role = "scholar"
                     return f"{entity_title} is a {role} known for {clean_concept}."
         return None
 
@@ -10638,7 +10733,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                     continue
                 non_generic_hits = sum(
                     1 for t in entity_tokens
-                    if t not in {"management", "theory", "process", "system", "approach", "concept", "model", "method"}
+                    if t not in {"theory", "system", "approach", "concept", "model", "method"}
                     and re.search(rf"\b{re.escape(t)}\b", low)
                 )
                 if entity_tokens and non_generic_hits <= 0 and not re.search(rf"\b{re.escape(entity_l)}\b", low):
@@ -10647,7 +10742,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 if wc < 8 or wc > 35:
                     continue
                 score = float(token_hits)
-                if re.search(r"\b(is|refers to|defined as|known as|means|principles?|process|method|approach|planning|efficiency)\b", low):
+                if re.search(r"\b(is|refers to|defined as|known as|means|method|approach|efficiency)\b", low):
                     score += 1.2
                 if score > best_score:
                     best_score = score
@@ -11064,7 +11159,9 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
         out: List[str] = []
         seen: set[str] = set()
         local_ql = (query_text or "").lower()
-        is_planning_process_q = ("planning" in local_ql) and ("process" in local_ql)
+        # DISABLED_CHEATING_LOGIC: Domain-specific planning-process list gate.
+        # is_planning_process_q = ("planning" in local_ql) and ("process" in local_ql)
+        is_planning_process_q = False
         process_action_re = re.compile(
             r"\b(formulat|develop|identif|evaluat|select|set(?:ting)?|schedul|follow|implement|monitor|review|establish|determin|decid|analyz|assess|prioritiz)\w*\b",
             flags=re.IGNORECASE,
@@ -11075,12 +11172,13 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
                 continue
             if not _starts_with_noun_or_gerund(cleaned):
                 continue
-            if is_planning_process_q:
-                cl = cleaned.lower()
-                if re.search(r"\btypes?\b", cl):
-                    continue
-                if re.search(r"\bplans?\b", cl) and not process_action_re.search(cl):
-                    continue
+            # DISABLED_CHEATING_LOGIC: Domain-specific planning-process item filter.
+            # if is_planning_process_q:
+            #     cl = cleaned.lower()
+            #     if re.search(r"\btypes?\b", cl):
+            #         continue
+            #     if re.search(r"\bplans?\b", cl) and not process_action_re.search(cl):
+            #         continue
             if re.search(r"\b(?:this|it|these|should|according\s+to)\b", cleaned, flags=re.IGNORECASE):
                 continue
             if re.search(r"(?:\.{2,}|\|)", cleaned):
@@ -11103,21 +11201,22 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
 
     def _clean_list_item(raw_item: str) -> str | None:
         ql = (query_text or "").lower()
-        is_advantages_query = "advantage" in ql
+        # DISABLED_CHEATING_LOGIC: Domain-specific advantages query special casing.
+        # is_advantages_query = "advantage" in ql
         item = re.sub(r"\s+", " ", str(raw_item or "")).strip(" ,;:-\"'")
         item = re.sub(r"^(?:[:;,.\-–—]+\s*)+", "", item)
         item = re.sub(r"^\s*(?:and|or|also|then|such\s+as|for\s+example)\s+", "", item, flags=re.IGNORECASE)
         item = re.sub(r"\s+\d+\.?$", "", item).strip()
         if not item:
             return None
-        max_words = 24 if is_advantages_query else 14
+        max_words = 14
         if len(item.split()) < 2 or len(item.split()) > max_words:
             return None
         if weak_list_start_re.match(item):
             return None
         if list_noise_re.search(item):
             return None
-        if item and item[0].islower() and not is_advantages_query:
+        if item and item[0].islower():
             return None
         if item.endswith(":"):
             return None
@@ -11131,22 +11230,24 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
             return None
         if re.search(r"\b(introduction\s+concepts?|\w+\s+of\s+\w+)\b", item, flags=re.IGNORECASE):
             return None
-        if is_advantages_query and re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|disciplinarian|time\s+and\s+cost\s+clerk|table|figure)\b", item, flags=re.IGNORECASE):
-            return None
+        # DISABLED_CHEATING_LOGIC: Domain-specific management-role filtering for advantages queries.
+        # if is_advantages_query and re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|disciplinarian|time\s+and\s+cost\s+clerk|table|figure)\b", item, flags=re.IGNORECASE):
+        #     return None
         return item
 
     ql = (query_text or "").lower()
 
     def _list_topic_gate(text: str) -> bool:
-        low = (text or "").lower()
-        if "advantage" in ql:
-            if re.search(r"\bcriticisms?|limitations?|drawbacks?\b", low):
-                return False
-            return bool(re.search(r"\bbenefits?|merits?|pros|scientific\s+management|efficien|productiv\b", low))
-        if ("planning" in ql) and ("process" in ql):
-            return bool(re.search(r"\bplanning\b", low) and re.search(r"\bprocess|objectives?|premises?|alternatives?\b", low))
-        if "principle" in ql:
-            return bool(re.search(r"\bprinciples?\b", low))
+        # DISABLED_CHEATING_LOGIC: Domain-specific gating for advantages/planning/principles queries.
+        # low = (text or "").lower()
+        # if "advantage" in ql:
+        #     if re.search(r"\bcriticisms?|limitations?|drawbacks?\b", low):
+        #         return False
+        #     return bool(re.search(r"\bbenefits?|merits?|pros|scientific\s+management|efficien|productiv\b", low))
+        # if ("planning" in ql) and ("process" in ql):
+        #     return bool(re.search(r"\bplanning\b", low) and re.search(r"\bprocess|objectives?|premises?|alternatives?\b", low))
+        # if "principle" in ql:
+        #     return bool(re.search(r"\bprinciples?\b", low))
         return True
 
     for d in docs[:3]:
@@ -11204,7 +11305,8 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
     fallback_items: List[str] = []
     seen: set[str] = set()
     bad_starts = re.compile(r"^(and|but|or|so|because|therefore|thus|also|then|while|whereas)\b", flags=re.IGNORECASE)
-    is_advantages_query = "advantage" in (query_text or "").lower()
+    # DISABLED_CHEATING_LOGIC: Domain-specific advantages query fallback branching.
+    # is_advantages_query = "advantage" in (query_text or "").lower()
     for d in docs[:3]:
         src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
         if not src:
@@ -11217,7 +11319,7 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
             low = cleaned.lower()
             if "he thought" in low or "it can be said" in low:
                 continue
-            if bad_starts.match(cleaned) and not is_advantages_query:
+            if bad_starts.match(cleaned):
                 continue
             if low in seen:
                 continue
@@ -11228,49 +11330,51 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
         if len(fallback_items) >= 8:
             break
 
-    if is_advantages_query and len(fallback_items) >= 2:
-        final_items = _finalize_items(fallback_items, limit=8)
-        if len(final_items) >= 2:
-            return "\n".join(f"- {it}" for it in final_items)
+    # DISABLED_CHEATING_LOGIC: Domain-specific short-circuit for advantages queries.
+    # if is_advantages_query and len(fallback_items) >= 2:
+    #     final_items = _finalize_items(fallback_items, limit=8)
+    #     if len(final_items) >= 2:
+    #         return "\n".join(f"- {it}" for it in final_items)
     if len(fallback_items) >= 3:
         final_items = _finalize_items(fallback_items, limit=8)
         if len(final_items) >= 3:
             return "\n".join(f"- {it}" for it in final_items)
 
     # FINAL TUNING: relaxed evidence fallback from prose fragments.
-    if is_advantages_query:
-        keyword_items: List[str] = []
-        keyword_seen: set[str] = set()
-        for d in docs[:3]:
-            src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
-            if not src:
-                continue
-            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+|,", src) if p.strip()]
-            for part in parts:
-                cand = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", part).strip(" ,;:-\"'")
-                cand = re.sub(r"\s+", " ", cand)
-                if not cand:
-                    continue
-                low = cand.lower()
-                if not re.search(r"\b(advantage|benefit|efficien|improvement|productiv)\b", low):
-                    continue
-                if re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|table|figure)\b", low):
-                    continue
-                if len(cand.split()) < 4 or len(cand.split()) > 28:
-                    continue
-                norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
-                if not norm or norm in keyword_seen:
-                    continue
-                keyword_seen.add(norm)
-                keyword_items.append(cand.rstrip(".") + ".")
-                if len(keyword_items) >= 3:
-                    break
-            if len(keyword_items) >= 3:
-                break
-        if len(keyword_items) >= 2:
-            final_items = _finalize_items(keyword_items, limit=3)
-            if len(final_items) >= 2:
-                return "\n".join(f"- {it}" for it in final_items)
+    # DISABLED_CHEATING_LOGIC: Domain-specific keyword reconstruction for advantages queries.
+    # if is_advantages_query:
+    #     keyword_items: List[str] = []
+    #     keyword_seen: set[str] = set()
+    #     for d in docs[:3]:
+    #         src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+    #         if not src:
+    #             continue
+    #         parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+|,", src) if p.strip()]
+    #         for part in parts:
+    #             cand = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", part).strip(" ,;:-\"'")
+    #             cand = re.sub(r"\s+", " ", cand)
+    #             if not cand:
+    #                 continue
+    #             low = cand.lower()
+    #             if not re.search(r"\b(advantage|benefit|efficien|improvement|productiv)\b", low):
+    #                 continue
+    #             if re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|table|figure)\b", low):
+    #                 continue
+    #             if len(cand.split()) < 4 or len(cand.split()) > 28:
+    #                 continue
+    #             norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
+    #             if not norm or norm in keyword_seen:
+    #                 continue
+    #             keyword_seen.add(norm)
+    #             keyword_items.append(cand.rstrip(".") + ".")
+    #             if len(keyword_items) >= 3:
+    #                 break
+    #         if len(keyword_items) >= 3:
+    #             break
+    #     if len(keyword_items) >= 2:
+    #         final_items = _finalize_items(keyword_items, limit=3)
+    #         if len(final_items) >= 2:
+    #             return "\n".join(f"- {it}" for it in final_items)
 
     # Inline numbered list extraction: handles "1. Item one. 2. Item two. 3. Item three."
     # appearing as continuous text within a paragraph or after a table/figure heading.
@@ -11317,7 +11421,9 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     if not list_mode:
         return None
 
-    principles_query = bool(re.search(r"\bprinciples?\b", q))
+    # DISABLED_CHEATING_LOGIC: Domain-specific principles query mode.
+    # principles_query = bool(re.search(r"\bprinciples?\b", q))
+    principles_query = False
     stage_list_query_mode = bool(re.search(r"\bstages?\b", q))
 
     raw = str(answer_text or "")
@@ -11468,8 +11574,9 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 split_parts = stage_parts
             else:
                 split_parts = [p.strip() for p in re.split(r"\s*[-–—;,|]\s*", cand) if p.strip()]
-        if principles_query and re.search(r"\band\b", cand, flags=re.IGNORECASE):
-            split_parts = [p.strip() for p in re.split(r"\band\b", cand, flags=re.IGNORECASE) if p.strip()]
+        # DISABLED_CHEATING_LOGIC: Domain-specific principles-mode splitting.
+        # if principles_query and re.search(r"\band\b", cand, flags=re.IGNORECASE):
+        #     split_parts = [p.strip() for p in re.split(r"\band\b", cand, flags=re.IGNORECASE) if p.strip()]
 
         for part in split_parts:
             item = _clean_item(part)
@@ -11493,10 +11600,11 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 if not words:
                     continue
                 wc = len(words)
-                if principles_query and wc > 4:
-                    continue
-                if principles_query and re.search(r"\b(is|are|was|were|interacts?|incorporates?|essential|entity|organization)\b", item, flags=re.IGNORECASE):
-                    continue
+                # DISABLED_CHEATING_LOGIC: Domain-specific principles item constraints.
+                # if principles_query and wc > 4:
+                #     continue
+                # if principles_query and re.search(r"\b(is|are|was|were|interacts?|incorporates?|essential|entity|organization)\b", item, flags=re.IGNORECASE):
+                #     continue
                 if wc < 3:
                     # Keep compact, meaningful list labels (e.g., Planning, Organizing).
                     if not all(len(w) >= 4 for w in words):
@@ -11995,18 +12103,21 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     strong_focus_present = bool(any(_strong_focus_match(it) for it in cleaned_items) or len(aligned_items) >= 1)
     coherent_override_items = _list_internal_coherence(cleaned_items)
 
-    single_window_alignment_override = bool(
-        used_single_window
-        and int(round(selected_chunks_count)) == 1
-        and len(cleaned_items) >= 2
-        and strong_focus_present
-        and coherent_override_items
-    )
+    # DISABLED_CHEATING_LOGIC: Forced single-window acceptance override.
+    # single_window_alignment_override = bool(
+    #     used_single_window
+    #     and int(round(selected_chunks_count)) == 1
+    #     and len(cleaned_items) >= 2
+    #     and strong_focus_present
+    #     and coherent_override_items
+    # )
+    single_window_alignment_override = False
 
-    if (len(aligned_items) < min_required_items or alignment_score < 0.70) and single_window_alignment_override:
-        aligned_items = list(cleaned_items)
-        alignment_score = max(0.70, alignment_score)
-        logger.info("[LIST ALIGNMENT OVERRIDE] enabled=True reason=single_window_focus_match")
+    # DISABLED_CHEATING_LOGIC: Forced acceptance branch bypassing alignment threshold.
+    # if (len(aligned_items) < min_required_items or alignment_score < 0.70) and single_window_alignment_override:
+    #     aligned_items = list(cleaned_items)
+    #     alignment_score = max(0.70, alignment_score)
+    #     logger.info("[LIST ALIGNMENT OVERRIDE] enabled=True reason=single_window_focus_match")
 
     if len(aligned_items) < min_required_items or alignment_score < 0.70:
         logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
@@ -12392,7 +12503,7 @@ def _extract_candidate_definition_sentence_from_docs(query_text: str, docs: list
                 score -= 5.0
             if any(p in low for p in weak_phrases):
                 score -= 5.0
-            if re.search(r"\b(this|these|such)\s+(approach|theory|principles?|concept|method)\b", low):
+            if re.search(r"\b(this|these|such)\s+(approach|theory|concept|method)\b", low):
                 score -= 3.0
 
             if score >= early_exit_threshold:
@@ -12472,6 +12583,45 @@ def _passes_fast_path_definition_validation(query_text: str, answer_sentence: st
         has_person_name = bool(re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", sentence))
         return token_grounded and has_attr and has_person_name
     return token_grounded
+
+
+def _definition_entity_or_reference_match(query_text: str, answer_text: str) -> bool:
+    a_low = re.sub(r"\s+", " ", str(answer_text or "").strip().lower())
+    if not a_low:
+        return False
+
+    has_entity, entity = _extract_entity_from_definition_query(query_text)
+    if not has_entity:
+        return True
+
+    entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if not entity_l:
+        return True
+
+    if re.search(rf"\b{re.escape(entity_l)}\b", a_low):
+        return True
+
+    stop = {"the", "a", "an", "of", "and", "in", "to", "what", "is", "define"}
+    generic_entity_tokens = {"approach", "theory", "method", "model", "system", "concept", "perspective", "school", "view"}
+    entity_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in stop]
+    specific_tokens = [t for t in entity_tokens if t not in generic_entity_tokens]
+
+    if specific_tokens:
+        specific_hits = sum(1 for t in specific_tokens if re.search(rf"\b{re.escape(t)}\b", a_low))
+        if specific_hits >= 1:
+            return True
+
+    query_l = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    query_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", query_l) if t not in stop]
+    query_overlap_hits = sum(1 for t in query_tokens if re.search(rf"\b{re.escape(t)}\b", a_low))
+    generic_hits = sum(1 for t in generic_entity_tokens if re.search(rf"\b{re.escape(t)}\b", a_low))
+    has_definition_verb = bool(re.search(r"\b(?:is|was|refers\s+to|defined\s+as|means|focuses\s+on|emphasizes|involves)\b", a_low))
+    has_clear_reference = bool(
+        re.search(r"^\s*(?:it|this|that|the)\s+(?:approach|theory|model|method|system|concept|perspective|school)\b", a_low)
+        or re.search(r"\bthis\s+(?:approach|theory|model|method|system|concept|perspective|school)\b", a_low)
+    )
+
+    return bool(has_definition_verb and (has_clear_reference or generic_hits >= 1) and query_overlap_hits >= 1)
 
 
 def _passes_strict_definition_relevance_guard(query_text: str, answer_sentence: str) -> bool:
@@ -12602,24 +12752,29 @@ def _extract_topic_pure_overview_from_docs(query_text: str, docs: list[dict]) ->
     if not topic_tokens:
         return None
 
-    requires_principles = "principle" in q or "principles" in q
-    requires_planning_process = bool(re.search(r"\bplanning\b", q) and re.search(r"\bprocess\b", q))
-    requires_polarity = bool(re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?)\b", q))
+    # DISABLED_CHEATING_LOGIC: Domain-specific overview gates (principles/planning/pros-cons).
+    # requires_principles = "principle" in q or "principles" in q
+    # requires_planning_process = bool(re.search(r"\bplanning\b", q) and re.search(r"\bprocess\b", q))
+    # requires_polarity = bool(re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?)\b", q))
+    requires_principles = False
+    requires_planning_process = False
+    requires_polarity = False
 
     def _topic_gate(s_low: str) -> bool:
-        if requires_principles:
-            if not re.search(r"\bprinciples?\b", s_low):
-                return False
-            if re.search(r"\bfunctions?|podcorb\b", s_low):
-                return False
-            if re.match(r"^\s*principles\s+of\s+.*\b\d{1,3}\b", s_low):
-                return False
-        if requires_planning_process:
-            if not (re.search(r"\bplanning\b", s_low) and re.search(r"\bprocess\b", s_low)):
-                return False
-        if requires_polarity:
-            if not re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?|merits?)\b", s_low):
-                return False
+        # DISABLED_CHEATING_LOGIC: Domain-specific topic gate.
+        # if requires_principles:
+        #     if not re.search(r"\bprinciples?\b", s_low):
+        #         return False
+        #     if re.search(r"\bfunctions?|podcorb\b", s_low):
+        #         return False
+        #     if re.match(r"^\s*principles\s+of\s+.*\b\d{1,3}\b", s_low):
+        #         return False
+        # if requires_planning_process:
+        #     if not (re.search(r"\bplanning\b", s_low) and re.search(r"\bprocess\b", s_low)):
+        #         return False
+        # if requires_polarity:
+        #     if not re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?|merits?)\b", s_low):
+        #         return False
         return True
 
     candidates: List[Tuple[float, str]] = []
@@ -12641,10 +12796,11 @@ def _extract_topic_pure_overview_from_docs(query_text: str, docs: list[dict]) ->
             if overlap <= 0:
                 continue
             score = float(overlap)
-            if requires_principles and re.search(r"\bprinciples?\b", low):
-                score += 1.5
-            if requires_planning_process and re.search(r"\bplanning\b", low):
-                score += 1.2
+            # DISABLED_CHEATING_LOGIC: Domain-specific score boosts for principles/planning tokens.
+            # if requires_principles and re.search(r"\bprinciples?\b", low):
+            #     score += 1.5
+            # if requires_planning_process and re.search(r"\bplanning\b", low):
+            #     score += 1.2
             if requires_polarity and re.search(r"\b(?:pros|cons|benefits?|drawbacks?|limitations?|criticisms?|merits?)\b", low):
                 score += 1.2
             norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
@@ -12722,6 +12878,8 @@ def _refine_concept_definition_answer(query_text: str, docs: list[dict], answer:
         return best[1] if best and best[0] >= 2.2 else None
 
     def _extract_contributor_from_docs() -> str | None:
+        # DISABLED_CHEATING_LOGIC: Domain-specific contributor extraction tied to management schools.
+        return None
         if not docs or not entity_l:
             return None
         ent_norm = re.sub(r"\s+", " ", entity_l).strip().lower()
@@ -13298,7 +13456,7 @@ def _is_document_title_heading_text(text: str) -> bool:
         return True
     if re.search(r"[-–—]\s*[A-Za-z]{2,8}\s*\d{2,4}", s, flags=re.IGNORECASE):
         return True
-    if re.search(r"\b(?:introduction|intro\s*duction|fundamentals|principles|basics|overview)\s+to\b", s, flags=re.IGNORECASE):
+    if re.search(r"\b(?:introduction|intro\s*duction|fundamentals|basics|overview)\s+to\b", s, flags=re.IGNORECASE):
         return True
     if re.search(r"\b(?:course|syllabus|textbook|edition|semester|module|manual)\b", s, flags=re.IGNORECASE) and title_ratio >= 0.5:
         return True
@@ -14100,7 +14258,7 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                 return True
             if re.search(r"^\s*(?:chapter\s+\d+|unit\s+\d+|contents?|table of contents|summary|introduction)\s*[:\-–—]?\s*$", s, flags=re.IGNORECASE):
                 return True
-            if re.search(r"\b(?:page\s*\d+|p\.\s*\d+|isbn|kdpublications|principles of business management|preface|unit\s*\d+)\b", low):
+            if re.search(r"\b(?:page\s*\d+|p\.\s*\d+|isbn|kdpublications|preface|unit\s*\d+)\b", low):
                 return True
             if re.search(r"\b\d{1,4}\b", low):
                 return True
@@ -14137,11 +14295,13 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                 if _looks_explanatory(low):
                     score += 3.0
                 score += 1.5 * sum(1 for t in query_tokens if re.search(rf"\b{re.escape(t)}\b", low))
-                score += 2.0 * sum(1 for t in ("management", "principles", "process") if re.search(rf"\b{re.escape(t)}\b", low))
+                # DISABLED_CHEATING_LOGIC: Domain-specific score boosts for management/principles/process tokens.
+                # score += 2.0 * sum(1 for t in ("management", "principles", "process") if re.search(rf"\b{re.escape(t)}\b", low))
                 if re.search(r"\b(theory|theorist|coined|introduced|known as)\b", low):
                     score -= 3.5
-                if re.search(r"\b(organization|administration|planning|controlling|coordinating)\b", low):
-                    score += 0.8
+                # DISABLED_CHEATING_LOGIC: Domain-specific process-verb score boost.
+                # if re.search(r"\b(organization|administration|planning|controlling|coordinating)\b", low):
+                #     score += 0.8
                 candidates.append((score, s))
 
         if not candidates:
@@ -14214,7 +14374,7 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                 if token_hits == 0:
                     continue
                 score = float(token_hits)
-                if any(k in low for k in ("is", "was", "refers to", "focuses on", "concerned with", "principles", "emphasizes")):
+                if any(k in low for k in ("is", "was", "refers to", "focuses on", "concerned with", "emphasizes")):
                     score += 1.5
                 if any(k in low for k in ("whereas", "while", "but", "however", "on the other hand")):
                     score += 1.0
@@ -14237,7 +14397,7 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
                 diff_sent = s
                 break
         if not diff_sent:
-            diff_sent = f"{left_raw.title()} and {right_raw.title()} differ in their main focus and approach to management."
+            diff_sent = f"{left_raw.title()} and {right_raw.title()} differ in their main focus and approach."
 
         return (
             f"- {left_raw.title()} summary: {left_sent}\n"
@@ -14484,7 +14644,7 @@ def _is_valid_overview_answer(answer: str, query: str = "") -> bool:
     a = (answer or "").strip()
     low = a.lower()
 
-    if any(k in low for k in (" born ", " founder of ", " known as ", " biograph", " psychologist")):
+    if any(k in low for k in (" born ", " founder of ", " known as ", " biograph")):
         return False
 
     bullet_items = re.findall(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+(.+)", a)
@@ -14732,7 +14892,7 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
             score -= 5.0
         if any(p in low_plain for p in weak_phrases):
             score -= 5.0
-        if re.search(r"\b(this|these|such)\s+(approach|theory|principles?|concept|method)\b", low_plain):
+        if re.search(r"\b(this|these|such)\s+(approach|theory|concept|method)\b", low_plain):
             score -= 3.0
 
         if any(marker in low for marker in bad_markers):
@@ -14915,9 +15075,9 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
                 if raw_prefix and 2 <= len(raw_prefix.split()) <= 6:
                     topic_prefix = raw_prefix.lower()
             if topic_prefix:
-                role = "management thinker" if re.search(r"\bmanagement\b", topic_prefix.lower()) else "scholar"
+                role = "scholar"
                 return f"{best_name} is a {role} known for {topic_prefix}."
-            return f"{best_name} was a management thinker mentioned in the document."
+            return f"{best_name} was a scholar mentioned in the document."
 
     if (not is_person_q) and (not _is_definition_sentence(best_sentence)) and extracted_entity:
         best_name = _extract_person_name(best_sentence)
@@ -14977,8 +15137,15 @@ def _is_answer_grounded_in_docs(answer: str, retrieved_docs: list[dict], query_t
         if (hits / max(1, len(sent_tokens))) >= 0.45:
             supported += 1
 
+    q = (query_text or "").strip().lower()
+    is_definition_query = bool(
+        q.startswith("what is ")
+        or q.startswith("define ")
+        or re.search(r"\bmeaning\s+of\b", q)
+    )
+
     if substantive == 0:
-        return overlap_ratio >= 0.55
+        return overlap_ratio >= (0.40 if is_definition_query else 0.55)
 
     sentence_support_ratio = supported / max(1, substantive)
 
@@ -15010,9 +15177,17 @@ def _is_answer_grounded_in_docs(answer: str, retrieved_docs: list[dict], query_t
         if ph in ctx_low:
             phrase_hits += 1
 
-    # For broad/general queries, be conservative but avoid blocking valid in-doc answers.
-    q = (query_text or "").strip().lower()
+    # For broad/general queries, keep strong anti-hallucination checks,
+    # but allow mild phrasing mismatch for definition queries.
     is_general_explain = q.startswith("explain ") or q.startswith("what is ")
+    if is_definition_query:
+        return (
+            (overlap_ratio >= 0.35)
+            and (sentence_support_ratio >= 0.40)
+            and (q_ctx_ratio >= 0.35)
+            and (q_ans_ratio >= 0.25)
+            and (phrase_hits >= 1)
+        )
     if is_general_explain:
         return (overlap_ratio >= 0.50) and (sentence_support_ratio >= 0.50) and (q_ctx_ratio >= 0.50) and (q_ans_ratio >= 0.40) and (phrase_hits >= 2)
     return (overlap_ratio >= 0.40) and (sentence_support_ratio >= 0.50) and (q_ctx_ratio >= 0.35) and (phrase_hits >= 1)
@@ -15106,7 +15281,7 @@ def _extract_strict_same_line_person_identity_from_retrieved_docs(query_text: st
                 if len(concept_cell.split()) < 1:
                     continue
                 concept_title = _to_title(concept_cell)
-                role = "management thinker" if re.search(r"\bmanagement\b", concept_title.lower()) else "scholar"
+                role = "scholar"
                 return f"{_to_title(person_cell)} is a {role} known for {concept_title}."
 
             # Same-line fallback: full name exists; extract concept from same line without row merging.
@@ -15116,7 +15291,7 @@ def _extract_strict_same_line_person_identity_from_retrieved_docs(query_text: st
                 concept_cell = _extract_concept_from_same_line(line_norm, person_text)
                 if concept_cell:
                     concept_title = _to_title(concept_cell)
-                    role = "management thinker" if re.search(r"\bmanagement\b", concept_title.lower()) else "scholar"
+                    role = "scholar"
                     return f"{_to_title(person_text)} is a {role} known for {concept_title}."
 
     return None
@@ -15497,25 +15672,39 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
 
     if is_definition_mode:
         has_entity, entity = _extract_entity_from_definition_query(query)
-        entity_l = re.sub(r"\s+", " ", str(entity or "")).strip().lower() if has_entity else ""
-        ans_l = answer.lower()
-        has_def_cue = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|is\s+the\s+study\s+of)\b", ans_l))
-        entity_grounded = True
-        if entity_l:
-            if re.search(rf"\b{re.escape(entity_l)}\b", ans_l):
-                entity_grounded = True
+        semantically_grounded = _is_answer_grounded_in_docs(answer, retrieved_docs or [], query_text=query)
+        entity_or_reference_grounded = _definition_entity_or_reference_match(query, answer)
+        strict_pref_ok = _passes_strict_definition_relevance_guard(query, answer)
+
+        if semantically_grounded and entity_or_reference_grounded:
+            if not strict_pref_ok:
+                logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_grounded answer=%s", answer[:220])
+        else:
+            rescue_answer = _extract_best_scored_concept_sentence_from_docs(query, retrieved_docs or [], max_docs=3)
+            if not rescue_answer:
+                rescue_answer = _extract_simple_definition_sentence(query, retrieved_docs or [])
+            rescue_answer = re.sub(r"\s+", " ", str(rescue_answer or "")).strip()
+            rescue_ok = bool(
+                rescue_answer
+                and _definition_entity_or_reference_match(query, rescue_answer)
+                and _is_answer_grounded_in_docs(rescue_answer, retrieved_docs or [], query_text=query)
+            )
+            if rescue_ok:
+                if not _passes_strict_definition_relevance_guard(query, rescue_answer):
+                    logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_rescue_grounded answer=%s", rescue_answer[:220])
+                logger.info("[DEFINITION VALIDATION RESCUE] accepted=true answer=%s", rescue_answer[:220])
+                dec["answer"] = rescue_answer
+                dec["used_llm"] = False
+                dec["answer_type"] = "definition_candidate_rescued"
+                dec["source_mode"] = "definition"
             else:
-                etoks = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
-                token_hits = sum(1 for t in etoks if re.search(rf"\b{re.escape(t)}\b", ans_l))
-                entity_grounded = token_hits >= 1
-        if (not has_def_cue) or (not entity_grounded) or (not _passes_strict_definition_relevance_guard(query, answer)):
-            logger.info("[DEFINITION CANDIDATE REJECTED] reason=missing_definition_cue_or_entity answer=%s", answer[:220])
-            dec["answer"] = RAG_NO_MATCH_RESPONSE
-            dec["used_llm"] = False
-            dec["answer_type"] = "definition_candidate_rejected"
-            dec["source_mode"] = "not_found_guard"
-            _log_final_decision_debug(rejected=True, rejection_reason="definition_candidate_rejected")
-            return dec
+                logger.info("[DEFINITION CANDIDATE REJECTED] reason=entity_reference_or_grounding_failure answer=%s", answer[:220])
+                dec["answer"] = RAG_NO_MATCH_RESPONSE
+                dec["used_llm"] = False
+                dec["answer_type"] = "definition_candidate_rejected"
+                dec["source_mode"] = "not_found_guard"
+                _log_final_decision_debug(rejected=True, rejection_reason="definition_candidate_rejected")
+                return dec
 
     logger.info("[FINAL ANSWER SOURCE] source_mode=%s answer_type=%s used_llm=%s", dec.get("source_mode"), dec.get("answer_type"), dec.get("used_llm"))
     _log_final_decision_debug(rejected=False, rejection_reason="")
@@ -16170,20 +16359,14 @@ def _shared_rag_final_answer_decision(
                 return False
             if _is_fragmentary_ocr(cand):
                 return False
-            has_entity, entity = _extract_entity_from_definition_query(query)
-            entity_l = re.sub(r"\s+", " ", str(entity or "")).strip().lower() if has_entity else ""
-            cand_l = cand.lower()
-            def_cue = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|approach|theory|focuses\s+on)\b", cand_l))
-            if not def_cue:
+            support_docs = routed_docs or doc_dicts or []
+            if not _is_answer_grounded_in_docs(cand, support_docs, query_text=query):
                 return False
-            if entity_l:
-                if re.search(rf"\b{re.escape(entity_l)}\b", cand_l):
-                    return _passes_strict_definition_relevance_guard(query, cand)
-                ent_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
-                token_hits = sum(1 for t in ent_tokens if re.search(rf"\b{re.escape(t)}\b", cand_l))
-                if token_hits < 1:
-                    return False
-            return _passes_strict_definition_relevance_guard(query, cand)
+            if not _definition_entity_or_reference_match(query, cand):
+                return False
+            if not _passes_strict_definition_relevance_guard(query, cand):
+                logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_grounded answer=%s", cand[:220])
+            return True
 
         def _is_coherent_list_answer(ans_text: str) -> tuple[bool, str | None]:
             q_low = re.sub(r"\s+", " ", str(query or "")).strip().lower()
@@ -16236,11 +16419,26 @@ def _shared_rag_final_answer_decision(
                 cleaned_ans = list_shaped
         if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and family_v2 != "fact_entity":
             if not _is_definition_answer_valid(str(cleaned_ans)):
-                logger.info("[DEFINITION CANDIDATE REJECTED] reason=missing_entity_or_definition_cue answer=%s", str(cleaned_ans)[:220])
-                cleaned_ans = RAG_NO_MATCH_RESPONSE
-                used_llm = False
-                answer_type = "definition_candidate_rejected"
-                answer_source_mode = "not_found_guard"
+                rescued = False
+                if family_v2 == "definition_entity":
+                    support_docs = routed_docs or doc_dicts or []
+                    rescue_ans = _extract_best_scored_concept_sentence_from_docs(query, support_docs, max_docs=3)
+                    if not rescue_ans:
+                        rescue_ans = _extract_simple_definition_sentence(query, support_docs)
+                    rescue_ans = _cleanup_final_answer_text(str(rescue_ans or "")).strip() if rescue_ans else ""
+                    if rescue_ans and _is_definition_answer_valid(str(rescue_ans)):
+                        logger.info("[DEFINITION VALIDATION RESCUE] accepted=true answer=%s", str(rescue_ans)[:220])
+                        cleaned_ans = rescue_ans
+                        used_llm = False
+                        answer_type = "definition_candidate_rescued"
+                        answer_source_mode = "definition"
+                        rescued = True
+                if not rescued:
+                    logger.info("[DEFINITION CANDIDATE REJECTED] reason=entity_or_grounding_validation_failed answer=%s", str(cleaned_ans)[:220])
+                    cleaned_ans = RAG_NO_MATCH_RESPONSE
+                    used_llm = False
+                    answer_type = "definition_candidate_rejected"
+                    answer_source_mode = "not_found_guard"
         if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and family_v2 != "fact_entity" and _is_fragmentary_ocr(str(cleaned_ans)):
             logger.info("[FINAL CANDIDATE REJECTED] reason=fragmentary_ocr answer=%s", str(cleaned_ans)[:220])
             cleaned_ans = RAG_NO_MATCH_RESPONSE
@@ -19249,16 +19447,18 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 if re.search(r"\b(you can also call it|also called|also known as)\b", low):
                     return False
 
-                if (" management " in low) and (not phrase_hit):
-                    return False
+                # DISABLED_CHEATING_LOGIC: Domain-specific management rejection rule.
+                # if (" management " in low) and (not phrase_hit):
+                #     return False
 
                 if phrase_hit and has_concept_verb:
                     return True
                 if token_hits < min_hits:
                     return False
 
-                if (" management " in low) and token_hits < 2:
-                    return False
+                # DISABLED_CHEATING_LOGIC: Domain-specific management token threshold.
+                # if (" management " in low) and token_hits < 2:
+                #     return False
                 return True
 
             if (" is " in low) or (" was " in low):
@@ -19467,7 +19667,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                 "- Extract list items even if the text contains minor OCR noise or formatting issues.\n"
                 "- Reconstruct lists from captions, semi-structured paragraphs, figures, or tables when necessary.\n"
                 "- Clean items into readable form (remove obvious OCR artifacts) but do NOT invent facts.\n"
-                "- If relevant items exist in the context, DO NOT return 'Not found in the document.' — instead return the reconstructed list.\n"
+                "- If evidence is weak, mixed, or missing for the asked items, return exactly 'Not found in the document.'.\n"
                 "- Avoid obvious garbage; omit incoherent items.\n"
                 f"{context_block}{format_extra_rules}"
             )
@@ -21498,7 +21698,7 @@ Item 3
 
 If the answer appears embedded in a semi-structured paragraph or mixed text:
 - You MUST extract and reconstruct the list from that paragraph.
-- DO NOT respond "Not found in the document" if relevant items clearly exist in the mixed text.
+- If supporting evidence is insufficient or ambiguous after extraction, respond exactly "Not found in the document.".
 
 DEFINITION / PERSON QUESTIONS:
 For "what is" or "who is":
@@ -21623,7 +21823,7 @@ STRICT BEHAVIOR:
                 "When the user asks for structured list output (including figure/table-adjacent content):\n"
                 "- Extract and reconstruct list items from noisy OCR, captions, semi-structured paragraphs, or figure/table-adjacent text.\n"
                 "- Clean obvious OCR artifacts (broken words, stray punctuation) but DO NOT invent facts.\n"
-                "- If you can reliably identify two or more relevant items, return them as a structured list. Do NOT return 'Not found in the document.' in that case.\n"
+                "- Return a structured list only when items are clearly grounded in context; otherwise return 'Not found in the document.'.\n"
                 "- Ignore headings like 'Figure' or 'Table' if they are merely labels; focus on substantive list elements.\n"
                 "- Be tolerant of minor OCR imperfections when meaning is clear.\n"
                 f"{context_block}{format_extra_rules}"
