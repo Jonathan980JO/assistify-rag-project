@@ -2294,6 +2294,8 @@ def _resolve_grounded_answer_route(query_text: str) -> str:
         return "generic"
     if _detect_fact_query_type(query_text):
         return "fact"
+    if _is_definition_style_query(query_text):
+        return "definition"
     if _is_targeted_list_question(q) or re.match(r"^\s*(?:what|which)\s+are\b", q):
         return "list"
     if q.startswith(("what is", "define", "who is", "who was", "who introduced", "meaning of")):
@@ -2366,9 +2368,11 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             return -10**9
         if re.search(r"\b(?:in\s+dividual|for\s+mula|psy\s+chology|struc\s+turalism|func\s+tionalism)\b", low):
             return -10**9
+        if re.search(r"\b(?:misconception|misconceptions|myth|myths|people\s+believe|frequent\s+thought)\b", low):
+            return -10**9
 
-        def_verb = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", low))
-        direct_pattern = bool(entity_l and re.search(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\s+(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on)\b", low))
+        def_verb = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|characterized\s+by)\b", low))
+        direct_pattern = bool(entity_l and re.search(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\s+(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies)\b", low))
         concept_signal = bool(re.search(r"\b(?:approach|theory|model|process|study|system|framework)\b", low))
         token_len = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", s))
 
@@ -2383,7 +2387,7 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             score += 1.5
         if entity_l:
             ent_m = re.search(rf"\b{re.escape(entity_l)}\b", low)
-            cue_m = re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", low)
+            cue_m = re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|characterized\s+by)\b", low)
             if ent_m and cue_m and abs(ent_m.start() - cue_m.start()) > 80:
                 return -10**9
         if token_len < 6:
@@ -2431,7 +2435,7 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
                 continue
             if entity_l and not re.search(rf"\b{re.escape(entity_l)}\b", cs.lower()):
                 continue
-            if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", cs.lower()):
+            if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|characterized\s+by)\b", cs.lower()):
                 continue
             collected.append(cs)
 
@@ -3178,6 +3182,9 @@ def _is_ws_explain_query_mode(query: str) -> bool:
         or re.match(r"^\s*how\s+does\s+.+\s+(?:work|operate)\s+in\s+detail\s*\??\s*$", q)
         or re.match(r"^\s*what\s+is\s+the\s+(?:goal|purpose)\s+of\s+.+\s*\??\s*$", q)
         or re.match(r"^\s*what\s+does\s+.+\s+focus\s+on\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+study\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+say\s+about\s+.+\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+idea\s+is\s+.+\s+known\s+for\s*\??\s*$", q)
         or re.match(r"^\s*what\s+is\s+the\s+idea\s+behind\s+.+\s*\??\s*$", q)
     )
 
@@ -3189,12 +3196,25 @@ def _is_ws_definition_query_mode(query: str) -> bool:
     return bool(
         re.match(r"^\s*what\s+is\s+.+", q)
         or re.match(r"^\s*define\s+.+", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+mean\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+focus\s+on\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+study\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+say\s+about\s+.+\s*\??\s*$", q)
+        or re.match(r"^\s*what\s+idea\s+is\s+.+\s+known\s+for\s*\??\s*$", q)
         or re.search(r"\bmeaning\s+of\b", q)
     )
 
 
 def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str:
-    ans = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(answer or "").strip()))
+    raw_answer = str(answer or "")
+    has_multiline_bullets = bool(re.search(r"(?:^|\n)\s*(?:[-•*]|\d+[.)])\s+", raw_answer))
+    if (not has_multiline_bullets) and bool(re.match(r"^\s*[-•*]\s+", raw_answer)) and raw_answer.count(" - ") >= 1:
+        parts = [p.strip(" ,;:-") for p in re.split(r"\s+-\s+", raw_answer) if p.strip(" ,;:-")]
+        if len(parts) >= 2:
+            raw_answer = "\n".join(f"- {p}" for p in parts)
+            has_multiline_bullets = True
+    normalized_input = re.sub(r"[ \t]+", " ", raw_answer).strip() if has_multiline_bullets else re.sub(r"\s+", " ", raw_answer).strip()
+    ans = _cleanup_final_answer_text(normalized_input)
     is_explain_mode = _is_ws_explain_query_mode(query)
     is_definition_mode = _is_ws_definition_query_mode(query)
     if not (is_explain_mode or is_definition_mode):
@@ -3205,8 +3225,15 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
     if not entity_l:
         if ans and ans.lower() != not_found.lower() and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
+            ans_clean = _cleanup_final_answer_text(ans)
+            if is_definition_mode:
+                ans_clean = re.sub(r"\s*/\s*(?:model|vu)\b", " ", ans_clean, flags=re.IGNORECASE)
+                ans_clean = re.sub(r"\b(?:lesson|unit|chapter)\s+\d+\b", "", ans_clean, flags=re.IGNORECASE)
+                ans_clean = re.sub(r"\bvu\b", "", ans_clean, flags=re.IGNORECASE)
+                ans_clean = re.sub(r"\bmodel\b", "", ans_clean, flags=re.IGNORECASE)
+                ans_clean = re.sub(r"\s+", " ", ans_clean).strip()
             logger.info("[WS FIXED ANSWER] mode=preserve_validated_no_entity answer=%s", ans[:220])
-            return ans
+            return ans_clean
         return not_found
 
     def _entity_grounded_in_text(text_l: str) -> bool:
@@ -3223,13 +3250,25 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     if is_definition_mode and ans and ans.lower() != not_found.lower():
         ans_l = ans.lower()
         if _entity_grounded_in_text(ans_l) and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
+            ans_clean = _cleanup_final_answer_text(ans)
+            ans_clean = re.sub(r"\s*/\s*(?:model|vu)\b", " ", ans_clean, flags=re.IGNORECASE)
+            ans_clean = re.sub(r"\b(?:lesson|unit|chapter)\s+\d+\b", "", ans_clean, flags=re.IGNORECASE)
+            ans_clean = re.sub(r"\bvu\b", "", ans_clean, flags=re.IGNORECASE)
+            ans_clean = re.sub(r"\bmodel\b", "", ans_clean, flags=re.IGNORECASE)
+            ans_clean = re.sub(r"\s+", " ", ans_clean).strip()
             logger.info("[WS FIXED ANSWER] mode=preserve_validated answer=%s", ans[:220])
-            return ans
+            return ans_clean
 
     def _finalize_definition_output(text: str) -> str:
         s = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(text or "").strip()))
         if not s:
             return not_found
+        # Remove short inline label fragments that often leak from OCR headings.
+        s = re.sub(r"\s*/\s*(?:model|vu)\b", " ", s, flags=re.IGNORECASE)
+        s = re.sub(r"\b(?:lesson|unit|chapter)\s+\d+\b", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bvu\b", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\bmodel\b", "", s, flags=re.IGNORECASE)
+        s = re.sub(r"\s+", " ", s).strip()
         s = re.sub(r"^\s*(?:earlier\s+schools?\s+of\s+thought|schools?\s+of\s+thought|important\s+terminology)\s*[:\-–—]*\s*", "", s, flags=re.IGNORECASE)
         if entity_l:
             m = re.search(rf"\b{re.escape(entity_l)}\b", s, flags=re.IGNORECASE)
@@ -3255,7 +3294,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                 return False
             if re.search(r"\b(?:and|or|to|of|for|with|by|in|on|at|from|because|however|therefore|thus|then)\b\s*$", ss.lower()):
                 return False
-            if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|describes|explains|studies)\b", ss.lower()):
+            if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|describes|explains|studies)\b", ss.lower()):
                 return False
             if require_entity and entity_l and not re.search(rf"\b{re.escape(entity_l)}\b", ss, flags=re.IGNORECASE):
                 return False
@@ -3267,9 +3306,12 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                 return s2
             if not entity_l:
                 return s2
-            if re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on)\b", s2, flags=re.IGNORECASE):
-                return s2
             ent = re.escape(entity_l)
+            s2 = re.sub(r"\b[Tt]he\s+that\b", "that", s2)
+            if re.match(rf"^\s*(?:the\s+)?{ent}\s+that\b", s2, flags=re.IGNORECASE):
+                s2 = re.sub(rf"^\s*((?:the\s+)?{ent})\s+that\b", r"\1 is an approach that", s2, flags=re.IGNORECASE)
+            if re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies)\b", s2, flags=re.IGNORECASE):
+                return s2
             if re.match(rf"^\s*(?:the\s+)?{ent}\s*[:\-]?\s+the\b", s2, flags=re.IGNORECASE):
                 s2 = re.sub(rf"^\s*((?:the\s+)?{ent})\s*[:\-]?\s+", r"\1 is ", s2, flags=re.IGNORECASE)
             elif re.match(rf"^\s*(?:the\s+)?{ent}\s+[A-Za-z]", s2, flags=re.IGNORECASE):
@@ -3278,8 +3320,8 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
             return s2
 
         def _enforce_one_sentence_25_35(seed: str, pool: list[str]) -> str:
-            min_words = 25
-            max_words = 35
+            min_words = 12
+            max_words = 30
             seed_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", seed)
             if len(seed_words) >= min_words:
                 clipped = " ".join(seed_words[:max_words]).strip(" ,;:-")
@@ -3335,12 +3377,14 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
             score = 0.0
             if entity_l and re.search(rf"\b{re.escape(entity_l)}\b", low):
                 score += 2.0
-            if re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", low):
+            if re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|characterized\s+by)\b", low):
                 score += 2.2
             if re.search(r"\b(?:approach|theory|model|process|study|system|framework)\b", low):
                 score += 0.8
             if re.search(r"\b(?:born|died|introduced\s+by|developed\s+by|founded|histor(?:y|ical)|century|in\s+\d{3,4})\b", low):
                 score -= 2.0
+            if re.search(r"\b(?:misconception|misconceptions|myth|myths|people\s+believe|frequent\s+thought)\b", low):
+                score -= 2.6
             if re.search(r"\b(?:believed|famous|educator|founder|stimulus\s+response)\b", low):
                 return -10**9
             if re.search(r"\bby\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", sent):
@@ -3349,7 +3393,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                 score -= 1.6
             if entity_l:
                 ent_m = re.search(rf"\b{re.escape(entity_l)}\b", low)
-                cue_m = re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on)\b", low)
+                cue_m = re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies)\b", low)
                 if ent_m and cue_m:
                     if abs(ent_m.start() - cue_m.start()) > 80:
                         return -10**9
@@ -3374,7 +3418,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                     rs_low = rs_clean.lower()
                     if entity_l and not re.search(rf"\b{re.escape(entity_l)}\b", rs_low):
                         continue
-                    if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", rs_low):
+                    if not re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|characterized\s+by)\b", rs_low):
                         continue
                     rs_clean = _repair_telegraphic_definition(rs_clean)
                     sc = _sent_score(rs_clean)
@@ -3455,7 +3499,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
 
     def _has_definition_signal(sentence: str) -> bool:
         sl = str(sentence or "").lower()
-        return bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|works|operates?)\b", sl))
+        return bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|focused\s+on|focused\s+upon|concentrates\s+on|concentrated\s+on|is\s+the\s+study\s+of|studies|works|operates?)\b", sl))
 
     def _has_explain_signal(sentence: str) -> bool:
         sl = str(sentence or "").lower()
@@ -8023,8 +8067,11 @@ def _is_definition_style_query(query_text: str) -> bool:
         r"^\s*(?:please\s+)?(?:explain|describe)\s+.+",
         r"^\s*what\s+does\s+.+\s+mean\s*\??\s*$",
         r"^\s*what\s+does\s+.+\s+focus\s+on\s*\??\s*$",
+        r"^\s*what\s+does\s+.+\s+study\s*\??\s*$",
+        r"^\s*what\s+does\s+.+\s+say\s+about\s+.+\s*\??\s*$",
         r"^\s*how\s+does\s+.+\s+work\s*\??\s*$",
         r"^\s*what\s+is\s+the\s+idea\s+(?:of|behind)\s+.+\s*\??\s*$",
+        r"^\s*what\s+idea\s+is\s+.+\s+known\s+for\s*\??\s*$",
     ]
     return any(re.match(pat, q, flags=re.IGNORECASE) for pat in explanation_patterns)
 
@@ -8094,10 +8141,13 @@ def _extract_entity_from_definition_query(query_text: str) -> tuple[bool, str]:
         r"^\s*(?:please\s+)?(?:give\s+)?(?:an?\s+)?explanation\s+of\s+(.+?)\s*\??\s*$",
         r"^\s*what\s+does\s+(.+?)\s+mean\s*\??\s*$",
         r"^\s*what\s+does\s+(.+?)\s+focus\s+on\s*\??\s*$",
+        r"^\s*what\s+does\s+(.+?)\s+study\s*\??\s*$",
+        r"^\s*what\s+does\s+(.+?)\s+say\s+about\s+.+\s*\??\s*$",
         r"^\s*how\s+does\s+(.+?)\s+work\s*\??\s*$",
         r"^\s*how\s+does\s+(.+?)\s+work\s+in\s+detail\s*\??\s*$",
         r"^\s*what\s+is\s+the\s+(?:goal|purpose)\s+of\s+(.+?)\s*\??\s*$",
         r"^\s*what\s+is\s+the\s+idea\s+(?:of|behind)\s+(.+?)\s*\??\s*$",
+        r"^\s*what\s+idea\s+is\s+(.+?)\s+known\s+for\s*\??\s*$",
     ]
     entity = ""
     for pat in patterns:
@@ -11721,9 +11771,11 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             return True
         if low in {"note", "notes"}:
             return True
-        if low in {"popular", "different", "various", "following", "areas", "branches", "types", "schools", "topics", "section"}:
+        if low in {"popular", "different", "various", "following", "areas", "branches", "types", "schools", "topics", "section", "thedifferent", "thevarious", "thefollowing", "adifferent", "avarious", "afollowing"}:
             return True
         if re.fullmatch(r"(?:the|a|an)\s+(?:different|various|following)", low):
+            return True
+        if re.fullmatch(r"(?:the|a|an)(?:different|various|following)", low):
             return True
         words = re.findall(r"[A-Za-z][A-Za-z\-']*", str(item_text or ""))
         item_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", low)}
@@ -12120,9 +12172,18 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     #     logger.info("[LIST ALIGNMENT OVERRIDE] enabled=True reason=single_window_focus_match")
 
     if len(aligned_items) < min_required_items or alignment_score < 0.70:
-        logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
-        logger.info("[LIST FINAL DECISION] accepted=False reason=alignment_failed")
-        return (False, "alignment_failed", None)
+        branch_alignment_override = False
+        if branch_category_query_mode and strict_label_query_mode and len(cleaned_items) >= min_required_items:
+            branch_labels = [it for it in cleaned_items if _is_clean_label_item(it)]
+            if len(branch_labels) >= min_required_items and (_list_internal_coherence(branch_labels) or len(branch_labels) >= 4):
+                aligned_items = branch_labels
+                alignment_score = max(alignment_score, 0.70)
+                branch_alignment_override = True
+                logger.info("[LIST ALIGNMENT RELAX] enabled=True reason=branch_category_compact_labels")
+        if not branch_alignment_override:
+            logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
+            logger.info("[LIST FINAL DECISION] accepted=False reason=alignment_failed")
+            return (False, "alignment_failed", None)
 
     if strict_label_query_mode:
         clean_label_count = sum(1 for it in aligned_items if _is_clean_label_item(it))
@@ -12998,6 +13059,10 @@ def detect_query_intent(query: str) -> str:
 def _is_targeted_list_question(query: str) -> bool:
     q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if not q:
+        return False
+    if re.match(r"^\s*(?:what|how|why)\s+does\b", q):
+        return False
+    if re.match(r"^\s*what\s+idea\s+is\b", q):
         return False
     if re.search(r"\blist\b", q):
         return True
@@ -13958,6 +14023,11 @@ def clean_ocr_noise(text: str) -> str:
     split_fixes = [
         (r"\bin\s+dividuals?\b", lambda m: "individual" if m.group(0).lower().endswith("ual") else "individuals"),
         (r"\bfor\s+mulas?\b", lambda m: "formula" if m.group(0).lower().endswith("ula") else "formulas"),
+        (r"\bor\s+ganized\b", "organized"),
+        (r"\binne\s+r\b", "inner"),
+        (r"\bfor\s+ces\b", "forces"),
+        (r"\bap\s+proach\b", "approach"),
+        (r"\bobta\s+in\b", "obtain"),
         (r"\bpsy\s+chology\b", "psychology"),
         (r"\bstruc\s+turalism\b", "structuralism"),
         (r"\bfunc\s+tionalism\b", "functionalism"),
@@ -13982,6 +14052,11 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
         (r"\bme\s*mory\b", "memory"),
         (r"\bin\s*dividuals?\b", "individual"),
         (r"\bfor\s*mulas?\b", "formula"),
+        (r"\bor\s*ganized\b", "organized"),
+        (r"\binne\s*r\b", "inner"),
+        (r"\bfor\s*ces\b", "forces"),
+        (r"\bap\s*proach\b", "approach"),
+        (r"\bobta\s*in\b", "obtain"),
         (r"\bpsy\s*chology\b", "psychology"),
         (r"\bfunc\s*tionalism\b", "functionalism"),
         (r"\bstruc\s*turalism\b", "structuralism"),
@@ -14011,7 +14086,7 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
         for prefix in glued_prefixes:
             if lowered.startswith(prefix) and len(word) > len(prefix) + 2:
                 tail = word[len(prefix):]
-                if tail.lower() in glued_suffixes or len(tail) >= 4:
+                if tail.lower() in glued_suffixes:
                     split_word = f"{word[:len(prefix)]} {tail}"
                     break
         rebuilt_words.append(split_word or word)
@@ -14020,6 +14095,29 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     txt = re.sub(r"\b([A-Z][a-z]{2,})\s+([A-Z])\s+([a-z]{2,})\b", r"\1 \2\3", txt)
     txt = re.sub(r"\b([A-Z][a-z]{2,})\s+([A-Z][a-z]{2,})\s+([A-Z][a-z]{2,})\b", r"\1 \2 \3", txt)
     txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
+    txt = re.sub(
+        r"\b([A-Za-z][A-Za-z\-]+)\s+(Approach|Theory|Method|Model|School)\s+The\s+\2\b",
+        r"\1 \2",
+        txt,
+        flags=re.IGNORECASE,
+    )
+    txt = re.sub(r"\b(is|was)\s+the\s+that\b", r"\1", txt, flags=re.IGNORECASE)
+    txt = re.sub(
+        r"^([A-Za-z][A-Za-z\-]*(?:\s+[A-Za-z][A-Za-z\-]*){0,3})\s+(An|A|The)\s+(approach|theory|method|system|process|school|perspective|framework)\b",
+        r"\1 is \2 \3",
+        txt,
+        flags=re.IGNORECASE,
+    )
+    txt = re.sub(r"\b(is|are|was|were)\s+\1\b", r"\1", txt, flags=re.IGNORECASE)
+    txt = re.sub(r"\b(is|was)\s+An\b", r"\1 an", txt)
+    txt = re.sub(r"\b(is|was)\s+A\b", r"\1 a", txt)
+    txt = re.sub(r"\b(is|was)\s+The\b", r"\1 the", txt)
+    txt = re.sub(
+        r"\b(?P<phrase>(?:[A-Za-z][A-Za-z\-']*\s+){3,12}[A-Za-z][A-Za-z\-']*)\s*(?:[,;:]\s*|\s+)(?P=phrase)\b",
+        r"\g<phrase>",
+        txt,
+        flags=re.IGNORECASE,
+    )
 
     parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", txt) if p.strip()]
     if parts:
@@ -14550,6 +14648,22 @@ def extract_list_items(text: str) -> List[str]:
             return False
         return True
 
+    def _looks_short_label_line(candidate: str) -> bool:
+        if not _valid_item(candidate):
+            return False
+        low = candidate.lower()
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", candidate)
+        wc = len(words)
+        if wc < 1 or wc > 6:
+            return False
+        if re.search(r"[.;:!?]", candidate):
+            return False
+        if re.search(r"\b(?:is|are|was|were|be|been|being|include|includes|included|consist|consists|comprise|comprises|focus|focuses|focused|study|studies|studied|explain|explains|explained|describe|describes|described)\b", low):
+            return False
+        if re.match(r"^\s*(?:popular|major|main|different|various|following)\s+(?:areas?|types?|kinds?|forms?|branches?|categories?)\s+of\b", low):
+            return False
+        return True
+
     bullet_or_num = re.compile(r"^\s*(?:[-•*]|\d+[.)])\s+(.+)$")
     for ln in lines:
         m = bullet_or_num.match(ln)
@@ -14574,6 +14688,19 @@ def extract_list_items(text: str) -> List[str]:
                 short_parts.append(part)
         if len(short_parts) >= 2:
             items.extend(short_parts)
+
+    # Fallback for lists spread across consecutive short lines without bullets.
+    run: List[str] = []
+    for ln in lines:
+        candidate = _clean_item(ln)
+        if _looks_short_label_line(candidate):
+            run.append(candidate)
+            continue
+        if len(run) >= 2:
+            items.extend(run)
+        run = []
+    if len(run) >= 2:
+        items.extend(run)
 
     ordered: List[str] = []
     seen: Set[str] = set()
@@ -15061,10 +15188,20 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
             return m.group(1).strip()
         return None
 
+    def _finalize_definition_output(raw_text: str, person_mode: bool) -> str:
+        cleaned = _cleanup_final_answer_text(str(raw_text or "").strip())
+        if not cleaned:
+            return ""
+        if not person_mode:
+            parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", cleaned) if p.strip()]
+            if parts:
+                cleaned = parts[0]
+        return cleaned
+
     if is_person_q and not _is_biography_sentence(best_sentence):
         best_name = _extract_person_name(best_sentence)
         if q_low.startswith("who introduced") and best_name and extracted_entity:
-            return f"{best_name} introduced {extracted_entity}."
+            return _finalize_definition_output(f"{best_name} introduced {extracted_entity}.", person_mode=True)
         if best_name:
             topic_prefix = ""
             name_pos = best_sentence.lower().find(best_name.lower())
@@ -15076,21 +15213,21 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
                     topic_prefix = raw_prefix.lower()
             if topic_prefix:
                 role = "scholar"
-                return f"{best_name} is a {role} known for {topic_prefix}."
-            return f"{best_name} was a scholar mentioned in the document."
+                return _finalize_definition_output(f"{best_name} is a {role} known for {topic_prefix}.", person_mode=True)
+            return _finalize_definition_output(f"{best_name} was a scholar mentioned in the document.", person_mode=True)
 
     if (not is_person_q) and (not _is_definition_sentence(best_sentence)) and extracted_entity:
         best_name = _extract_person_name(best_sentence)
         coined_pat = rf"coined\s+the\s+term\s+['\"]?{re.escape((extracted_entity or '').lower())}['\"]?"
         if re.search(coined_pat, best_sentence.lower()):
             if best_name:
-                return f"{extracted_entity.title()} is a term coined by {best_name}."
-            return f"{extracted_entity.title()} is a term mentioned in the document."
+                return _finalize_definition_output(f"{extracted_entity.title()} is a term coined by {best_name}.", person_mode=False)
+            return _finalize_definition_output(f"{extracted_entity.title()} is a term mentioned in the document.", person_mode=False)
         cleaned_best = re.sub(r"\s+", " ", best_sentence).strip(" :;,-")
-        return f"{extracted_entity.title()} refers to {cleaned_best}."
+        return _finalize_definition_output(f"{extracted_entity.title()} refers to {cleaned_best}.", person_mode=False)
 
     max_sents = 2 if is_person_q else 1
-    return _shorten_definition_output(best_sentence, max_sentences=max_sents)
+    return _finalize_definition_output(_shorten_definition_output(best_sentence, max_sentences=max_sents), person_mode=is_person_q)
 
 
 def _is_answer_grounded_in_docs(answer: str, retrieved_docs: list[dict], query_text: str = "") -> bool:
@@ -15495,7 +15632,8 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
         align = _list_query_alignment_metrics(query, shaped)
         mismatch_penalty = float(align.get("mismatch_penalty", 0.0) or 0.0)
         _effective_mismatch_threshold = 1.5
-        if mismatch_penalty > _effective_mismatch_threshold:
+        route_list_answer = str(dec.get("answer_type") or "").startswith("list_route")
+        if mismatch_penalty > _effective_mismatch_threshold and not route_list_answer:
             logger.info("[LIST TOKEN MISMATCH] rejected=true penalty=%.3f threshold=%.1f focus_hits=%s context_hits=%s items=%s", mismatch_penalty, _effective_mismatch_threshold, int(align.get("focus_hit_items", 0.0)), int(align.get("context_hit_items", 0.0)), int(align.get("item_count", 0.0)))
             dec["answer"] = RAG_NO_MATCH_RESPONSE
             dec["used_llm"] = False
@@ -17855,6 +17993,22 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             return False
         return True
 
+    def _is_short_label_line(item: str) -> bool:
+        if not _is_meaningful_item(item):
+            return False
+        low = item.lower()
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+        wc = len(words)
+        if wc < 1 or wc > 6:
+            return False
+        if re.search(r"[.!?;:]", item):
+            return False
+        if re.search(r"\b(?:is|are|was|were|be|been|being|include|includes|included|consist|consists|comprise|comprises|focus|focuses|focused|study|studies|studied|explain|explains|explained|describe|describes|described)\b", low):
+            return False
+        if re.match(r"^\s*(?:popular|major|main|different|various|following)\s+(?:areas?|types?|kinds?|forms?|branches?|categories?)\s+of\b", low):
+            return False
+        return True
+
     def _extract_items_from_line(line: str) -> List[str]:
         out: List[str] = []
         ln = (line or "").strip()
@@ -17996,12 +18150,28 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
         return out
 
     for block in candidate_blocks[:max_blocks]:
-        if query_tokens and _anchor_hits(block) == 0:
+        heading_low = str(block.get("heading") or "").lower()
+        heading_list_cue = bool(re.search(r"\b(?:list|types?|kinds?|forms?|areas?|branches?|categories?|schools?)\b", heading_low))
+        anchor_score = _anchor_hits(block)
+        if query_tokens and anchor_score == 0 and not (strict_label_query_mode and heading_list_cue):
             continue
         collected: List[str] = []
         for ln in block.get("lines") or []:
             collected.extend(_extract_items_from_line(ln))
         ordered = _dedupe_ordered(collected)
+        if len(ordered) < 2 and strict_label_query_mode and (anchor_score > 0 or heading_list_cue):
+            nearby_labels: List[str] = []
+            for ln in block.get("lines") or []:
+                candidate_label = _normalize_item(ln)
+                if _is_short_label_line(candidate_label):
+                    nearby_labels.append(candidate_label)
+                    continue
+                if nearby_labels and len(nearby_labels) >= 2:
+                    break
+                if nearby_labels and len(nearby_labels) < 2:
+                    nearby_labels = []
+            if len(nearby_labels) >= 2:
+                ordered = _dedupe_ordered(collected + nearby_labels)
         if len(ordered) < 2:
             continue
         if stage_list_query_mode:
