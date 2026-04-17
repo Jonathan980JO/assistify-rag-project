@@ -12324,8 +12324,81 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         return (False, "min_quality_failed", None)
 
     shaped_clean = "\n".join(f"- {it}" for it in aligned_items)
+    # Phase 4: Concept Match Validation
+    concept_ok, concept_reason = _validate_concept_match(query_text, aligned_items, q_family_v2, local_support)
+    if not concept_ok:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=concept_mismatch detail=%s", concept_reason)
+        return (False, "concept_mismatch", None)
+
     logger.info("[LIST FINAL DECISION] accepted=True reason=ok")
     return (True, "ok", shaped_clean)
+
+
+def _extract_query_concept_signature(query_text: str) -> dict[str, Any]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    relation_keywords = {
+        "principles": "principals",
+        "steps": "procedural",
+        "phases": "procedural",
+        "stages": "procedural",
+        "hierarchy": "structural",
+        "types": "categorical",
+        "kind": "categorical",
+        "form": "categorical",
+        "characteristics": "descriptive",
+        "six": "canonical_set",
+        "five": "canonical_set",
+        "seven": "canonical_set",
+        "ms": "canonical_set",
+        "factors": "canonical_set",
+        "elements": "canonical_set",
+    }
+    found_types = []
+    for k, v in relation_keywords.items():
+        if re.search(rf"\b{re.escape(k)}\b", q):
+            found_types.append(v)
+    return {
+        "intent_types": list(set(found_types)),
+        "is_canonical_set": "canonical_set" in found_types,
+        "is_procedural": "procedural" in found_types,
+        "query_text": q
+    }
+
+
+def _validate_concept_match(query_text: str, items: list[str], family_v2: str = "", local_support: dict[str, Any] | None = None) -> tuple[bool, str]:
+    if not items or len(items) < 2:
+        return True, "ok"
+    sig = _extract_query_concept_signature(query_text)
+    
+    # Pattern 1: Taxonomy Contamination
+    # If query asks for specific items/steps/principles but the list is taxonomical perspectives
+    # e.g. "X as a process", "X as a group"
+    prefix_freq = {}
+    for it in items:
+        m = re.match(r"^([A-Za-z\s]{3,15})\s+as\s+(?:a|an)\b", it, re.I)
+        if m:
+            prefix = m.group(1).lower().strip()
+            prefix_freq[prefix] = prefix_freq.get(prefix, 0) + 1
+            
+    for prefix, count in prefix_freq.items():
+        if count >= 3 and count >= len(items) - 1:
+            if sig["is_canonical_set"] or sig["is_procedural"]:
+                # High confidence taxonomical list where query asked for specific components
+                return False, f"taxonomy_contamination_prefix_{prefix}"
+
+    # Pattern 2: Generic Category Mismatch
+    # If the query asks for a specific count group (e.g. "six Ms")
+    # but the items are generic section labels from a top-level summary
+    # common in "Intro" chapters.
+    if sig["is_canonical_set"]:
+        # Logic: If items contain the core entity name + generic section markers
+        # but don't look like specific naming markers.
+        low_items = [it.lower() for it in items]
+        perspective_items = sum(1 for low in low_items if " as " in low or low.startswith("introduction to ") or low.startswith("principles of "))
+        if perspective_items >= len(items) - 1:
+             return False, "generic_category_perspective_mismatch"
+
+    return True, "ok"
 
 
 def _preclean_list_answer_for_assessment(answer_text: str) -> str:
