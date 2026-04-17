@@ -1,4 +1,4 @@
-﻿import os
+import os
 import warnings
 import uuid
 import json
@@ -13345,6 +13345,8 @@ def _is_placeholder_heading_text(text: str) -> bool:
     if not s:
         return True
     low = s.lower()
+    
+    # 1) Standard rejections
     if low in {"unknown", "document", "front matter", "body", "content", "contents", "table of contents"}:
         return True
     if re.match(r"^\[source:.*\]$", low):
@@ -13357,6 +13359,41 @@ def _is_placeholder_heading_text(text: str) -> bool:
         return True
     if re.match(r"^\d+$", low):
         return True
+
+    # 2) Generic Junk Filters (ISBN, URL, Metadata)
+    
+    # ISBN patterns: 978-81-...
+    if re.search(r"\b\d{2,}-\d{2,}-\d{2,}", low):
+        return True
+        
+    # URL/Domain patterns
+    if any(x in low for x in ["http", "www", ".com", ".in", ".org", ".net", ".edu"]):
+        if low.count(".") > 1 or "www" in low or "http" in low or "://" in low:
+            return True
+
+    # Repeated structural tokens: "Unit 1 Unit 1"
+    if re.search(r"\b(\w+\s+\d+)\s+\1\b", low):
+        return True
+
+    # Digit/Word ratio: metadata usually has many numbers vs real words
+    words = re.findall(r"[a-z]{3,}", low)
+    digits = re.findall(r"\d+", low)
+    if digits and len(digits) > len(words):
+        # Allow small headings like "3. Concepts" (len(digits)=1, len(words)=1)
+        if len(digits) > 2:
+            return True
+        
+    # Complexity/Junk check (long lines with high symbol/digit density)
+    if len(s) > 60:
+        symbols = re.findall(r"[^A-Za-z0-9\s]", s)
+        if len(symbols) > 5 or len(digits) > 4:
+            return True
+            
+    # Mostly Uppercase with no real words (excludes acronyms if they are part of words)
+    if s.isupper() and not any(len(w) > 2 for w in re.findall(r"[A-Z]+", s)):
+        if len(s) > 4: # Allow very short markers like "SECTION" or "PART"
+            return True
+
     return False
 
 
@@ -13442,6 +13479,8 @@ def _is_document_title_heading_text(text: str) -> bool:
     if not s:
         return True
     low = s.lower()
+    if _is_placeholder_heading_text(s):
+        return True
     words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
     title_case_words = sum(1 for w in words if re.match(r"^[A-Z][a-zA-Z\-']+$", w))
     title_ratio = (float(title_case_words) / float(max(1, len(words)))) if words else 0.0
