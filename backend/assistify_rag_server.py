@@ -11327,6 +11327,141 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
             if len(items) >= 2:
                 return "\n".join(f"- {it}" for it in items)
 
+    # Inline prose enumeration extraction: handles continuous-prose lists of the shape
+    #   "<introducer phrase>: a, b, c, d, e, and f"
+    #   "<introducer phrase> are/include/comprise/consist of a, b, c, ..., and f"
+    #   "<introducer phrase>, namely a, b, c, ..., and f"
+    # These never match the bullet/numbered walker above and never match the lettered
+    # OCR-table extractor below, but they are the single most common form authors use
+    # to enumerate a small fixed set inside narrative text. Generic across domains.
+    #
+    # Strict guards (anti-fabrication, anti-shortcut):
+    #   * Requires an explicit introducer cue (`:` or are/is/include/comprise/consist of/namely)
+    #     so we never split arbitrary comma-separated prose into a list.
+    #   * Items must be 1-5 words each, capitalized or lowercase noun-like, no verbs.
+    #   * Requires 3-12 items with a closing conjunction (and/or) before the last item.
+    #   * If the query specifies a count (digit or English cardinal), the enumeration MUST
+    #     contain exactly that many items. This is the strongest grounding gate.
+    #   * The sentence containing the enumeration must contain ALL discriminating query
+    #     tokens (same gate philosophy as `_list_relevance_ok`).
+    _q_low_inline = (query_text or "").lower()
+    _CARDINAL_WORDS = {
+        "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+        "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    }
+    _q_count_target: int | None = None
+    _q_count_match = re.search(r"\b(\d{1,2})\b", _q_low_inline)
+    if _q_count_match:
+        try:
+            _v = int(_q_count_match.group(1))
+            if 2 <= _v <= 20:
+                _q_count_target = _v
+        except Exception:
+            _q_count_target = None
+    if _q_count_target is None:
+        for _w, _v in _CARDINAL_WORDS.items():
+            if re.search(rf"\b{_w}\b", _q_low_inline):
+                _q_count_target = _v
+                break
+
+    _q_terms_inline = [
+        t for t in re.findall(r"[a-z0-9]{3,}", _q_low_inline)
+        if t not in {
+            "what", "which", "name", "give", "mention", "identify", "list", "from",
+            "document", "about", "are", "the", "and", "for", "with", "main", "major",
+            "only", "popular", "areas", "area", "mentioned", "chapter", "section",
+            "tell", "show", "explain", "define",
+        }
+    ]
+    _q_terms_inline_norm = [_light_normalize_query_token(t) for t in _q_terms_inline if t]
+
+    _enum_introducer_re = re.compile(
+        r"(?P<intro>[A-Za-z][A-Za-z0-9 ,\-]{2,80}?)"
+        r"(?:\s*:\s*|\s+(?:are|is|include|includes|comprise|comprises|consist\s+of|consists\s+of|namely)\s+)"
+        r"(?P<body>[A-Za-z][^.;\n]{8,400}?\band\s+[A-Za-z][A-Za-z\-']{1,30}(?:\s+[A-Za-z\-']{1,30}){0,4})"
+        r"(?=[.;\n]|$)",
+        flags=re.IGNORECASE,
+    )
+    _verb_in_item_re = re.compile(
+        r"\b(?:is|are|was|were|be|been|being|have|has|had|do|does|did|"
+        r"can|could|would|will|shall|may|might|must|"
+        r"include|includes|consist|consists|comprise|comprises|"
+        r"focus|focuses|focused|study|studies|studied|"
+        r"explain|explains|describe|describes|involve|involves|concern|concerns)\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _split_inline_enumeration(body_text: str) -> list[str]:
+        body = re.sub(r"\s+", " ", str(body_text or "")).strip(" ,;:.-")
+        if not body:
+            return []
+        # If the body contains a secondary introducer colon (e.g. when the outer match
+        # selected an "include"/"are" cue but a tighter ":" cue exists inside the body
+        # such as in "...would include the six Ms: people, money, ..."), take only the
+        # tail after the last colon, which is the actual enumeration.
+        if ":" in body:
+            body = body.rsplit(":", 1)[-1].strip(" ,;:.-")
+            if not body:
+                return []
+        # Split on commas; the trailing item is preceded by " and " / " or "
+        body = re.sub(r",\s*(?:and|or)\s+", ", ", body, flags=re.IGNORECASE)
+        body = re.sub(r"\s+(?:and|or)\s+", ", ", body, flags=re.IGNORECASE)
+        raw_parts = [p.strip(" ,;:.-") for p in body.split(",")]
+        out: list[str] = []
+        for p in raw_parts:
+            if not p:
+                continue
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", p)
+            wc = len(words)
+            if wc < 1 or wc > 5:
+                return []
+            if _verb_in_item_re.search(p):
+                return []
+            if list_noise_re.search(p):
+                return []
+            out.append(p)
+        return out
+
+    for _d_inline in docs[:3]:
+        _src_inline = str((_d_inline or {}).get("page_content") or (_d_inline or {}).get("text") or "")
+        if not _src_inline:
+            continue
+        for _sent in re.split(r"(?<=[.!?])\s+|\n+", _src_inline):
+            _sent_clean = re.sub(r"\s+", " ", str(_sent or "")).strip()
+            if len(_sent_clean) < 20 or len(_sent_clean) > 600:
+                continue
+            _sent_low = _sent_clean.lower()
+            if _q_terms_inline_norm:
+                _grounded = sum(
+                    1 for _qt in _q_terms_inline_norm if _token_match_light(_sent_low, _qt)
+                )
+                if _grounded < len(_q_terms_inline_norm):
+                    continue
+            _m = _enum_introducer_re.search(_sent_clean)
+            if not _m:
+                continue
+            _items_inline = _split_inline_enumeration(_m.group("body") or "")
+            if len(_items_inline) < 3 or len(_items_inline) > 12:
+                continue
+            if _q_count_target is not None and len(_items_inline) != _q_count_target:
+                continue
+            _formatted: list[str] = []
+            _seen_inline: set[str] = set()
+            for _it in _items_inline:
+                _shaped = _it[0].upper() + _it[1:] if _it else _it
+                if not re.search(r"[.!?]$", _shaped):
+                    _shaped += "."
+                _key = re.sub(r"[^a-z0-9]+", " ", _shaped.lower()).strip()
+                if not _key or _key in _seen_inline:
+                    continue
+                _seen_inline.add(_key)
+                _formatted.append(_shaped)
+            if len(_formatted) < 3:
+                continue
+            if _q_count_target is not None and len(_formatted) != _q_count_target:
+                continue
+            return "\n".join(f"- {it}" for it in _formatted)
+
     # Lightweight fallback (top 2 chunks only): reconstruct 3-5 meaningful items from commas/sentences.
     fallback_items: List[str] = []
     seen: set[str] = set()
@@ -11830,10 +11965,22 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
 
     normalized_cleaned: List[str] = []
     seen_norm_final: Set[str] = set()
+    # If the entire cleaned candidate set is a uniform parallel enumeration of
+    # single-word labels (>=3 items, all 1 word), do not apply the 1-word
+    # heading-artifact filter — a heading rarely appears N times in a row as
+    # identical-shaped single-word items, while a real prose enumeration of
+    # short labels (e.g. "People, Money, Machines, Materials, Methods, Markets")
+    # is exactly that uniform shape. Generic structural property, no domain words.
+    _uniform_single_word_set = bool(
+        len(cleaned) >= 3
+        and all(len(re.findall(r"[A-Za-z][A-Za-z\-']*", it)) == 1 for it in cleaned)
+    )
     for item in cleaned:
         adjusted = _strip_trailing_suffix_noise(item)
         adjusted = re.sub(r"\s+", " ", adjusted).strip(" ,;:-")
-        if not adjusted or _is_heading_artifact(adjusted):
+        if not adjusted:
+            continue
+        if (not _uniform_single_word_set) and _is_heading_artifact(adjusted):
             continue
         norm = re.sub(r"[^a-z0-9]+", " ", adjusted.lower()).strip()
         if not norm or norm in seen_norm_final:
@@ -12252,6 +12399,41 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     #     aligned_items = list(cleaned_items)
     #     alignment_score = max(0.70, alignment_score)
     #     logger.info("[LIST ALIGNMENT OVERRIDE] enabled=True reason=single_window_focus_match")
+
+    # Generic count-matched uniform-label override: when the query explicitly
+    # asks for a specific count (digit or cardinal word two..twelve) and the
+    # cleaned list is exactly that many uniform short single-word labels, the
+    # list itself IS the answer; items naturally do not repeat query tokens
+    # (a list of "People, Money, Machines, ..." in answer to a "six Ms" query
+    # cannot contain "six" or "Ms" in each item). Purely structural — no
+    # domain words, no topic-specific patterns.
+    if (len(aligned_items) < min_required_items or alignment_score < 0.70):
+        _q_low_for_count = str(query_text or "").lower()
+        _cardinal_words_q = {"two":2,"three":3,"four":4,"five":5,"six":6,"seven":7,"eight":8,"nine":9,"ten":10,"eleven":11,"twelve":12}
+        _q_count_target = None
+        _m_digit = re.search(r"\b(\d{1,2})\b", _q_low_for_count)
+        if _m_digit:
+            try:
+                _val = int(_m_digit.group(1))
+                if 2 <= _val <= 20:
+                    _q_count_target = _val
+            except Exception:
+                pass
+        if _q_count_target is None:
+            for _w, _v in _cardinal_words_q.items():
+                if re.search(r"\b" + _w + r"\b", _q_low_for_count):
+                    _q_count_target = _v
+                    break
+        if _q_count_target is not None and len(cleaned_items) == _q_count_target:
+            _all_uniform_single_word = all(
+                len(re.findall(r"[A-Za-z][A-Za-z\-']*", it)) == 1
+                and len(it.strip()) <= 20
+                for it in cleaned_items
+            )
+            if _all_uniform_single_word:
+                aligned_items = list(cleaned_items)
+                alignment_score = max(0.70, alignment_score)
+                logger.info("[LIST COUNT-MATCH OVERRIDE] enabled=True target=%d items=%d", _q_count_target, len(cleaned_items))
 
     if len(aligned_items) < min_required_items or alignment_score < 0.70:
         logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
@@ -13852,7 +14034,7 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
 
     missing = max(0, len(tokens) - matched)
     words = re.findall(r"[a-z0-9]+", low_txt)
-    density = (token_hits + (1.2 * heading_hits)) / max(12.0, float(len(words)))
+    density = token_hits / max(12.0, float(len(words)))
 
     phrase_hits = 0.0
     for ph in section_phrases:
@@ -16109,6 +16291,32 @@ def _shared_rag_final_answer_decision(
             return count
 
         list_ranked: list[tuple[float, dict, dict, int]] = []
+        # Generic IDF-like rarity signal computed across the candidate pool only.
+        # For each query token, count how many candidate chunks contain it (heading or body).
+        # A token appearing in only a small fraction of the pool is highly discriminative
+        # FOR THIS QUERY — chunks containing it deserve a coverage boost; chunks missing it
+        # deserve an extra penalty proportional to the token's pool-rarity. This rebalances
+        # the structural bonuses (heading_hits, marker_score, list_density) which can otherwise
+        # dominate when an off-topic chunk has a strong structural shape.
+        # Pure presence-counting on real chunk text — no domain words, no special cases.
+        _pool_docs_for_idf = list((routed_docs or doc_dicts or [])[:10])
+        _pool_tokens_for_idf = _query_section_tokens(query, family_v2)
+        _pool_size_for_idf = max(1, len(_pool_docs_for_idf))
+        _token_chunk_count_idf: dict[str, int] = {}
+        for _idf_tok in _pool_tokens_for_idf:
+            _hit_n = 0
+            for _idf_doc in _pool_docs_for_idf:
+                _idf_md = dict((_idf_doc or {}).get("metadata") or {})
+                _idf_heading = " ".join(
+                    str(_idf_md.get(k) or "") for k in ("heading", "section", "title", "chapter")
+                ).lower()
+                _idf_body = str(
+                    (_idf_doc or {}).get("page_content") or (_idf_doc or {}).get("text") or ""
+                ).lower()
+                if _token_match_light(_idf_heading, _idf_tok) or _token_match_light(_idf_body, _idf_tok):
+                    _hit_n += 1
+            _token_chunk_count_idf[_idf_tok] = _hit_n
+
         for d in (routed_docs or doc_dicts or [])[:10]:
             sig = _doc_query_token_signals(query, family_v2, d)
             cand_text = str((d or {}).get("page_content") or (d or {}).get("text") or "")
@@ -16164,7 +16372,29 @@ def _shared_rag_final_answer_decision(
             if _lp_gp >= 0.5 and _lp_phrase >= 0.3 and _supp_list >= 0.5:
                 _lp_adj += min(0.55, 0.45 * _lp_gp)
             sig["_supp_list_evidence"] = float(_supp_list)
-            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.9 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (0.45 * sig.get("missing_penalty", 0.0))
+
+            # Per-doc rarity coverage / missing-rare penalty (IDF-style; see precomputation above).
+            _doc_md_idf = dict((d or {}).get("metadata") or {})
+            _doc_heading_idf = " ".join(
+                str(_doc_md_idf.get(k) or "") for k in ("heading", "section", "title", "chapter")
+            ).lower()
+            _doc_body_idf = str(
+                (d or {}).get("page_content") or (d or {}).get("text") or ""
+            ).lower()
+            _rarity_coverage = 0.0
+            _rarity_missing = 0.0
+            _rare_threshold = max(1, _pool_size_for_idf // 3)
+            for _idf_tok in _pool_tokens_for_idf:
+                _df = _token_chunk_count_idf.get(_idf_tok, _pool_size_for_idf)
+                _idf_w = math.log(1.0 + (_pool_size_for_idf / max(1.0, float(_df))))
+                _present = _token_match_light(_doc_heading_idf, _idf_tok) or _token_match_light(_doc_body_idf, _idf_tok)
+                if _present:
+                    _rarity_coverage += _idf_w
+                else:
+                    if _df > 0 and _df <= _rare_threshold:
+                        _rarity_missing += _idf_w
+
+            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.5 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (2.5 * sig.get("missing_penalty", 0.0)) + (1.2 * _rarity_coverage) - (2.5 * _rarity_missing)
             list_ranked.append((float(local_score), d, sig, int(clean_label_count)))
         list_ranked.sort(key=lambda x: x[0], reverse=True)
 
