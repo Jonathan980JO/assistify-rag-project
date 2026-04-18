@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import websockets
 import json
 import sys
@@ -19,7 +19,7 @@ async def query_questions():
         async with websockets.connect(uri) as websocket:
             for q in questions:
                 print(f"Q: {q}")
-                await websocket.send(json.dumps({"question": q}))
+                await websocket.send(json.dumps({"text": q}))
                 full_answer = ""
                 while True:
                     try:

@@ -7569,6 +7569,7 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
     support = {
         "promoted_count": 0.0,
         "focus_hits": 0.0,
+        "phrase_hits": 0.0,
         "heading_match": 0.0,
         "list_density": 0.0,
         "confidence": 0.0,
@@ -7741,6 +7742,10 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
         support["focus_hits"] = max(
             support["focus_hits"],
             float(md.get("local_focus_hits") or md.get("_local_focus_hits") or 0.0),
+        )
+        support["phrase_hits"] = max(
+            support["phrase_hits"],
+            float(md.get("local_phrase_hits") or md.get("_local_phrase_hits") or 0.0),
         )
         support["heading_match"] = max(
             support["heading_match"],
@@ -11811,7 +11816,8 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
 
     q_family_v2_early = _classify_query_family_v2(query_text)
     q_context_tokens_early, q_focus_tokens_early = _split_query_context_focus_tokens(query_text, q_family_v2_early)
-    _early_query_tokens = list(dict.fromkeys([t for t in (q_focus_tokens_early + q_context_tokens_early) if len(str(t or "").strip()) >= 3]))
+    # ALLOW 2-char tokens like 'Ms' or '6'
+    _early_query_tokens = list(dict.fromkeys([t for t in (q_focus_tokens_early + q_context_tokens_early) if len(str(t or "").strip()) >= 2]))
 
     def _extract_inline_concept_items(text: str, query_tokens: List[str]) -> List[str]:
         src = re.sub(r"\s+", " ", str(text or "")).strip()
@@ -11846,12 +11852,24 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             return True
 
         best: List[str] = []
-        for seg in segments[:8]:
-            if len(seg) > 260:
+        best_matched_leadin = False
+        for seg in segments[:10]:
+            if len(seg) > 350:
                 continue
+            
+            target_segment = seg
+            matched_leadin = False
+            if ":" in seg:
+                parts_colon = seg.split(":", 1)
+                lead = parts_colon[0].lower()
+                # If the lead-in mentions core query tokens, focus on the list part
+                if any(_token_match_light(lead, tok) for tok in query_tokens):
+                    target_segment = parts_colon[1]
+                    matched_leadin = True
+            
             parts: List[str] = []
-            if "," in seg or ";" in seg:
-                parts.extend([_clean_part(p) for p in re.split(r",|;", seg) if _clean_part(p)])
+            if "," in target_segment or ";" in target_segment:
+                parts.extend([_clean_part(p) for p in re.split(r",|;", target_segment) if _clean_part(p)])
             if not parts and re.search(r"\s{2,}", seg):
                 parts.extend([_clean_part(p) for p in re.split(r"\s{2,}", seg) if _clean_part(p)])
             if not parts:
@@ -11873,9 +11891,13 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
                     continue
                 seen_filtered.add(norm)
                 filtered.append(item)
+            
+            if len(filtered) > 0:
+                logger.info("[INLINE DEBUG] segment='%s...' filtered=%d matched_leadin=%s", seg[:50], len(filtered), matched_leadin)
 
             if len(filtered) > len(best):
                 best = filtered
+                best_matched_leadin = matched_leadin
 
         if len(best) < 4:
             return []
@@ -11885,6 +11907,12 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             low = it.lower()
             if any(_token_match_light(low, tok) for tok in query_tokens):
                 focus_hits += 1
+        
+        # IMPROVEMENT: If the segment was a colon-introduced list where the head matched, accept it.
+        if best_matched_leadin and len(best) >= 3:
+             focus_hits = max(focus_hits, 1)
+
+        logger.info("[INLINE DEBUG] segments=%d best_len=%d matched_leadin=%s focus=%d", len(segments), len(best), best_matched_leadin, focus_hits)
         if focus_hits < 1:
             return []
 
@@ -11892,15 +11920,18 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
 
     inline_concept_recovered = False
     shaped = _sanitize_list_answer_text(query_text, answer_text)
-    if not shaped:
-        inline_items: List[str] = []
-        if strict_fast and _is_list_query_early:
-            inline_items = _extract_inline_concept_items(answer_text, _early_query_tokens)
-        if inline_items:
-            shaped = "\n".join(f"- {it}" for it in inline_items)
-            inline_concept_recovered = True
-            logger.info("[LIST INLINE CONCEPT] recovered=True items=%d", len(inline_items))
-        else:
+    raw_items_temp = [ln for ln in (shaped or "").splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
+    if not shaped or (len(raw_items_temp) < 2 and _is_list_query_early):
+        if not inline_concept_recovered:
+            inline_items: List[str] = []
+            if strict_fast and _is_list_query_early:
+                inline_items = _extract_inline_concept_items(answer_text, _early_query_tokens)
+            if inline_items:
+                shaped = "\n".join(f"- {it}" for it in inline_items)
+                inline_concept_recovered = True
+                logger.info("[LIST INLINE CONCEPT] recovered=True items=%d", len(inline_items))
+        
+        if not shaped:
             logger.info("[LIST FINAL DECISION] accepted=False reason=sanitize_failed")
             return (False, "sanitize_failed", None)
 
@@ -12060,18 +12091,20 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             return False
         return True
 
-    if strict_label_query_mode:
-        if stage_list_query_mode:
-            stage_only_items = [
-                it for it in cleaned_items
-                if re.search(r"\bstage\b", str(it or "").lower())
-            ]
-            if len(stage_only_items) >= 2:
-                cleaned_items = stage_only_items
-        cleaned_label_items = [it for it in cleaned_items if _is_clean_label_item(it)]
-        if len(cleaned_label_items) >= 2:
-            aligned_items = cleaned_label_items
-            alignment_score = max(alignment_score, 0.70)
+    total_items = len(raw_items)
+    if total_items < 2:
+        logger.info("[LIST FINAL DECISION] accepted=False reason=too_few_raw_items items=%d", total_items)
+        return (False, "too_few_raw_items", None)
+
+    # PURE SCORING SIGNAL: Generic detection for inline enumeration.
+    prose_indicators = [r"includes?\:", r"consists?\s+of", r"are\:", r"such\s+as"]
+    prose_hint_detected = any(re.search(pat, str(answer_text or "").lower()) for pat in prose_indicators)
+    prose_hint_score = 0.3 if prose_hint_detected else 0.0
+    
+    logger.info("[PROSE SIGNAL] detected=%s score=%.2f", prose_hint_detected, prose_hint_score)
+
+    aligned_items = [it for it in raw_items if _item_alignment(it)]
+    alignment_score = (float(len(aligned_items)) / float(max(1, len(raw_items)))) + prose_hint_score
 
     def _strong_focus_match(item_text: str) -> bool:
         low_item = item_text.lower()
@@ -12346,10 +12379,15 @@ def _extract_query_concept_signature(query_text: str) -> dict[str, Any]:
         "kind": "categorical",
         "form": "categorical",
         "characteristics": "descriptive",
-        "six": "canonical_set",
-        "five": "canonical_set",
-        "seven": "canonical_set",
-        "ms": "canonical_set",
+        "principles": "principals",
+        "steps": "procedural",
+        "phases": "procedural",
+        "stages": "procedural",
+        "hierarchy": "structural",
+        "types": "categorical",
+        "kind": "categorical",
+        "form": "categorical",
+        "characteristics": "descriptive",
         "factors": "canonical_set",
         "elements": "canonical_set",
     }
@@ -12357,10 +12395,24 @@ def _extract_query_concept_signature(query_text: str) -> dict[str, Any]:
     for k, v in relation_keywords.items():
         if re.search(rf"\b{re.escape(k)}\b", q):
             found_types.append(v)
+    
+    # Extract categorical count: "six", "6"
+    num_map = {"one":1, "two":2, "three":3, "four":4, "five":5, "six":6, "seven":7, "eight":8, "nine":9, "ten":10}
+    cat_count = None
+    m_num = re.search(r"\b(\d+)\b", q)
+    if m_num:
+        cat_count = int(m_num.group(1))
+    else:
+        for word, val in num_map.items():
+            if re.search(rf"\b{re.escape(word)}\b", q):
+                cat_count = val
+                break
+
     return {
         "intent_types": list(set(found_types)),
         "is_canonical_set": "canonical_set" in found_types,
         "is_procedural": "procedural" in found_types,
+        "categorical_count": cat_count,
         "query_text": q
     }
 
@@ -12382,9 +12434,8 @@ def _validate_concept_match(query_text: str, items: list[str], family_v2: str = 
             
     for prefix, count in prefix_freq.items():
         if count >= 3 and count >= len(items) - 1:
-            if sig["is_canonical_set"] or sig["is_procedural"]:
-                # High confidence taxonomical list where query asked for specific components
-                return False, f"taxonomy_contamination_prefix_{prefix}"
+            # High confidence taxonomical list where query asked for specific components
+            return False, f"taxonomy_contamination_prefix_{prefix}"
 
     # Pattern 2: Generic Category Mismatch
     # If the query asks for a specific count group (e.g. "six Ms")
@@ -13850,10 +13901,40 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
             else:
                 phrase_hits += 0.45
 
+    # Phase 5: Consolidated Prose Ranking Boost logic
+    prose_list_hint = 0.0
+    # (Generic hint logic removed to prevent noise/timeouts)
+
+    # Phase 5: Count-Focus Enumeration Boost
+    count_words = {"one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "twelve", "fourteen"}
+    q_low = str(query_text or "").lower()
+    # Find numbers: "six", "6"
+    q_counts = re.findall(r"\b(?:[a-z]{3,10}|\d+)\b", q_low)
+    q_counts = [w for w in q_counts if w in count_words or w.isdigit()]
+    
+    if q_counts:
+        # Extract ALL words of length >= 2 from query
+        all_q_words = set(re.findall(r"\b[a-z0-9]{2,}\b", q_low))
+        stop_brief = {"the", "and", "for", "with", "from", "are", "what", "which", "list", "that", "this", "describe"}
+        candidate_ft = [w for w in all_q_words if w not in stop_brief]
+        
+        for cw in q_counts:
+            matched_count = False
+            for ft in candidate_ft:
+                pattern = rf"\b{re.escape(cw)}\b(?:\s+\w+){{0,2}}\s+\b{re.escape(ft)}\b"
+                if re.search(pattern, low_txt):
+                    prose_list_hint = 8.5
+                    generic_penalty = 0.0
+                    # Log only on definitive match
+                    logger.info("[COUNT BOOST] matched pattern count='%s' focus='%s' boost=8.5", cw, ft)
+                    matched_count = True
+                    break
+            if matched_count: break
+
     return {
         "token_hits": float(token_hits),
         "heading_hits": float(heading_hits),
-        "phrase_hits": float(phrase_hits),
+        "phrase_hits": float(phrase_hits + prose_list_hint),
         "focus_hits": float(focus_hits),
         "marker_score": float(marker_score),
         "missing_penalty": float(0.45 * missing),
