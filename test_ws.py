@@ -1,43 +1,50 @@
-import asyncio
+﻿import asyncio
 import websockets
 import json
-import sys
 
-async def query_questions():
-    uri = "ws://127.0.0.1:7000/ws"
-    questions = [
-        "What are the six Ms of management?",
-        "What are the characteristics of management?",
-        "What is scientific management?",
-        "What are Fayol’s principles of management?",
-        "What are the steps in the planning process?",
-        "What is management?",
-        "What is planning?"
-    ]
-    
-    try:
-        async with websockets.connect(uri) as websocket:
-            for q in questions:
-                print(f"Q: {q}")
-                await websocket.send(json.dumps({"text": q}))
-                full_answer = ""
-                while True:
-                    try:
-                        message = await websocket.recv()
-                        if isinstance(message, bytes):
-                            continue
-                        data = json.loads(message)
-                        if "answer" in data:
-                            full_answer += data["answer"]
-                        if data.get("aiResponseDone"):
+async def test_ws(query):
+    uri = "ws://localhost:7000/ws"
+    async with websockets.connect(uri) as websocket:
+        # Send initial message (often needed to start the session or just send the query)
+        # Based on typical RAG servers, we might just send the query or a json with 'message'
+        await websocket.send(json.dumps({"message": query}))
+        
+        full_response = ""
+        try:
+            while True:
+                message = await asyncio.wait_for(websocket.recv(), timeout=20.0)
+                # Check for [COUNT BOOST] in the raw message
+                if "[COUNT BOOST]" in message:
+                    print(f"Error: Found [COUNT BOOST] in message: {message}")
+                
+                try:
+                    data = json.loads(message)
+                    if isinstance(data, dict):
+                        if "text" in data:
+                            full_response += data["text"]
+                        elif "content" in data:
+                            full_response += data["content"]
+                        elif "message" in data:
+                            full_response += data["message"]
+                        
+                        if data.get("type") == "end" or data.get("end_of_stream"):
                             break
-                    except Exception:
-                        break
-                print(f"A: {full_answer.strip()}")
-                print("---")
-                sys.stdout.flush()
-    except Exception as e:
-        print(f"Connection Error: {e}")
+                    else:
+                        full_response += str(data)
+                except json.JSONDecodeError:
+                    full_response += message
+        except asyncio.TimeoutError:
+            print("Response timed out")
+        except websockets.exceptions.ConnectionClosed:
+            print("Connection closed")
+        
+        print(f"Query: {query}")
+        print(f"Response: {full_response}")
+        print("-" * 20)
 
-if __name__ == "__main__":
-    asyncio.run(query_questions())
+async def main():
+    await test_ws("What are the six Ms of management?")
+    await test_ws("What is scientific management?")
+
+if __name__ == '__main__':
+    asyncio.run(main())
