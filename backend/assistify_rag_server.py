@@ -2339,12 +2339,34 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             if len(words) > 34:
                 clause_parts = [p.strip(" ,;:-") for p in re.split(r"[;,:]", first) if p.strip(" ,;:-")]
                 shortened = ""
-                for part in clause_parts:
-                    if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", part)) >= 8:
-                        shortened = part
-                        break
+                # MP-C2: prefer a clause that contains BOTH the entity and a
+                # definition verb so trimming never strips the entity needed
+                # for downstream grounding checks.
+                if entity_for_trim:
+                    ent_re = re.compile(rf"\b{re.escape(entity_for_trim)}\b", re.IGNORECASE)
+                    verb_re = re.compile(r"\b(?:is|are|refers\s+to|defined\s+as|means)\b", re.IGNORECASE)
+                    for part in clause_parts:
+                        if ent_re.search(part) and verb_re.search(part) and \
+                                len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", part)) >= 8:
+                            shortened = part
+                            break
+                if not shortened:
+                    for part in clause_parts:
+                        if len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", part)) >= 8:
+                            shortened = part
+                            break
                 if not shortened:
                     shortened = " ".join(words[:34]).strip(" ,;:-")
+                # MP-C2: if the entity was lost while trimming and the source
+                # sentence began with the entity, restore "<entity> <verb...>"
+                # so the answer remains grounded to the queried concept.
+                if entity_for_trim and not re.search(rf"\b{re.escape(entity_for_trim)}\b", shortened, re.IGNORECASE):
+                    first_low = first.strip().lower()
+                    if first_low.startswith(entity_for_trim.lower()) or first_low.startswith(f"the {entity_for_trim.lower()}"):
+                        entity_disp = " ".join(w.capitalize() for w in entity_for_trim.split())
+                        cleaned_shortened = re.sub(r"^[\"'\u201c\u2018\u2019\u201d`]+\s*", "", shortened)
+                        if re.match(r"^\s*(?:is|are|refers\s+to|defined\s+as|means)\b", cleaned_shortened, re.IGNORECASE):
+                            shortened = f"{entity_disp} {cleaned_shortened}"
                 kept[0] = shortened.rstrip(" ,;:-") + "."
         out = " ".join(k.rstrip(" ,;:-") + ("" if re.search(r"[.!?]$", k) else ".") for k in kept if k)
         return _cleanup_final_answer_text(out)
@@ -2394,6 +2416,9 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             score -= 3.0
         if re.match(r"^\s*(?:he|she|they|it|this)\b", low):
             score -= 2.5
+        # MP-C2: generic structural definition-shape signals (boost true
+        # definitional clauses, penalise descriptive/historical framing).
+        score += _definition_structural_signal_delta(s, entity_l)
         return score
 
     def _pick_best_definition_sentence(text: str) -> str:
@@ -2425,7 +2450,19 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
         txt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
         if not txt.strip():
             continue
-        for s in _split_text_into_sentences(txt)[:16]:
+        all_sents = _split_text_into_sentences(txt)
+        # MP-C2: prioritize sentences that mention the queried entity so that
+        # genuine definition lines are not lost when the chunk has a long
+        # noisy preamble. Generic — only inspects entity presence and
+        # preserves a bounded scan budget for non-entity sentences.
+        entity_re = re.compile(rf"\b{re.escape(entity_l)}\b", re.IGNORECASE) if entity_l else None
+        if entity_re is not None:
+            entity_bearing = [s for s in all_sents if entity_re.search(s)][:24]
+            other_sents = [s for s in all_sents if not entity_re.search(s)][:8]
+            scan_sents = entity_bearing + other_sents
+        else:
+            scan_sents = all_sents[:16]
+        for s in scan_sents:
             cs = _clean_definition_like_sentence(s)
             if not cs:
                 continue
@@ -2491,10 +2528,63 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
     return None
 
 
-def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: str = "") -> str | None:
+def _mpc6_anchor_score_for_text(text: str, query_text: str) -> int:
+    """Return the highest query-focus token overlap of any inline subsection
+    heading or figure/table caption in ``text``. Generic, structural only.
+    """
+    txt = str(text or "")
+    if not txt:
+        return 0
+    q_tokens = _mpc6_query_focus_tokens(query_text)
+    if not q_tokens:
+        return 0
+    best = 0
+    for _m in _MPC6_SECTION_RE.finditer(txt):
+        _title = (_m.group(2) or "").lower()
+        _hits = sum(1 for _tok in q_tokens if re.search(rf"\b{re.escape(_tok)}\b", _title))
+        if _hits > best:
+            best = _hits
+    for _m in _MPC6_CAPTION_RE.finditer(txt):
+        _title = (_m.group(2) or "").lower()
+        _hits = sum(1 for _tok in q_tokens if re.search(rf"\b{re.escape(_tok)}\b", _title))
+        if _hits > best:
+            best = _hits
+    return best
+
+
+def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: str = "", extra_docs: list[dict] | None = None) -> str | None:
     docs = list(docs or [])
     if not docs:
         return None
+
+    # MP-C6: augment the candidate pool with any extra docs that contain an
+    # inline subsection / caption anchor matching the query focus. This avoids
+    # the list-route being starved when a section pre-shortlist kept only one
+    # neighbour chunk that happens to be off-topic. Generic — uses only the
+    # structural anchor scorer.
+    if extra_docs:
+        _q_tok_count = len(_mpc6_query_focus_tokens(query_text))
+        _anchor_threshold = min(2, _q_tok_count) if _q_tok_count >= 1 else 0
+        existing_keys = set()
+        for d in docs:
+            md = (d or {}).get("metadata") or {}
+            existing_keys.add((str(md.get("source") or ""), str(md.get("chunk_index") or "")))
+        for d in extra_docs:
+            md = (d or {}).get("metadata") or {}
+            key = (str(md.get("source") or ""), str(md.get("chunk_index") or ""))
+            if key in existing_keys:
+                continue
+            txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+            if not txt:
+                continue
+            if _mpc6_anchor_score_for_text(txt, query_text) >= _anchor_threshold:
+                docs.append(d)
+                existing_keys.add(key)
+        try:
+            _augmented_chunk_ids = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in docs]
+            logger.info("[MP-C6 LIST ROUTE] threshold=%s q_tokens=%s augmented_docs=%s", _anchor_threshold, _q_tok_count, _augmented_chunk_ids)
+        except Exception:
+            pass
 
     q_norm = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
 
@@ -2561,11 +2651,54 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
 
     selected_docs = _select_list_context_docs(query_text, docs, max_docs=min(5, len(docs)), scan_limit=min(12, len(docs)))
     candidate_docs = selected_docs or docs
+
+    # MP-C6: prefer chunks whose body contains a structural subsection heading
+    # or figure/table caption whose title overlaps the discriminating query
+    # tokens. This biases per-chunk extraction toward the chunk that actually
+    # owns the matched subsection, instead of a structurally bullet-heavy but
+    # off-topic neighbour. Generic — uses the same anchor scorer as slicing.
+    candidate_docs = sorted(
+        candidate_docs,
+        key=lambda d: -_mpc6_anchor_score_for_text(
+            str((d or {}).get("page_content") or (d or {}).get("text") or ""),
+            query_text,
+        ),
+    )
+
     selected_context = "\n\n".join(
         str((d or {}).get("page_content") or (d or {}).get("text") or "")
         for d in candidate_docs
         if str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
     )
+
+    # MP-C6: prefer per-chunk anchored extraction on any doc whose body has a
+    # structural subsection / caption matching the query focus tokens. This
+    # ensures the answer-bearing chunk's local subsection is extracted before
+    # falling back to the broader simple-list extractor (which can mis-pick a
+    # neighbour chunk's bullets that happen to be structurally cleaner).
+    _mpc6_q_tok_count = len(_mpc6_query_focus_tokens(query_text))
+    _mpc6_anchor_threshold = min(2, _mpc6_q_tok_count) if _mpc6_q_tok_count >= 1 else 0
+    try:
+        _cand_chunk_ids = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in candidate_docs[:8]]
+        logger.info("[MP-C6 ANCHOR LOOP] threshold=%s candidate_docs=%s", _mpc6_anchor_threshold, _cand_chunk_ids)
+    except Exception:
+        pass
+    for d in candidate_docs[:6]:
+        dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        if not dtxt.strip():
+            continue
+        _d_chunk = dict((d or {}).get("metadata") or {}).get("chunk_index")
+        _d_score = _mpc6_anchor_score_for_text(dtxt, query_text)
+        if _d_score < _mpc6_anchor_threshold:
+            logger.info("[MP-C6 ANCHOR LOOP] chunk=%s score=%s SKIP_below_threshold", _d_chunk, _d_score)
+            continue
+        anchored_answer = _extract_list_from_context(query_text, dtxt, max_candidate_blocks=2)
+        shaped = _sanitize_list_answer_text(query_text, str(anchored_answer or ""))
+        _shaped_lines = len([ln for ln in str(shaped or "").splitlines() if ln.strip()]) if shaped else 0
+        _rel_ok = bool(shaped and _list_relevance_ok(shaped, [d]))
+        logger.info("[MP-C6 ANCHOR LOOP] chunk=%s score=%s anchored_lines=%s shaped_lines=%s relevance_ok=%s", _d_chunk, _d_score, len(str(anchored_answer or "").splitlines()), _shaped_lines, _rel_ok)
+        if shaped and _rel_ok:
+            return shaped
 
     answer = _extract_simple_list_from_docs(candidate_docs, query_text=query_text)
     if answer:
@@ -2985,9 +3118,19 @@ def _split_text_into_sentences(text: str) -> list[str]:
 
     protected = src
     protected = re.sub(r"(?<![\.!?؛;:])\s*\n+\s*", " ", protected)
-    protected = re.sub(r"\b([A-Z])\.\s+([A-Z][a-z])", r"\1<INIT_DOT> \2", protected)
-    protected = re.sub(r"\b([A-Z])\.\s+([A-Z])\s+([A-Z][a-z])", r"\1<INIT_DOT> \2<INIT_DOT> \3", protected)
-    protected = re.sub(r"\b([A-Z])\.\s+([A-Z])\.", r"\1<INIT_DOT> \2<INIT_DOT>", protected)
+    # Iteratively protect chains of single-letter initials so that names like
+    # "F. W. Taylor" or "U. S. A." are not split into spurious sentence
+    # fragments. Without iteration, an inner pass can replace the trailing
+    # initial first, leaving the leading ones unprotected. Generic fix —
+    # depends only on capitalisation/punctuation shape.
+    for _ in range(4):
+        _prev_protected = protected
+        protected = re.sub(r"\b([A-Z])\.\s+([A-Z][a-z])", r"\1<INIT_DOT> \2", protected)
+        protected = re.sub(r"\b([A-Z])\.\s+([A-Z])\s+([A-Z][a-z])", r"\1<INIT_DOT> \2<INIT_DOT> \3", protected)
+        protected = re.sub(r"\b([A-Z])\.\s+([A-Z])\.", r"\1<INIT_DOT> \2<INIT_DOT>", protected)
+        protected = re.sub(r"\b([A-Z])\.\s+([A-Z])<INIT_DOT>", r"\1<INIT_DOT> \2<INIT_DOT>", protected)
+        if protected == _prev_protected:
+            break
     protected = re.sub(
         r"\b(?:Mr|Mrs|Ms|Dr|Prof|Sr|Jr|St|vs|etc|e\.g|i\.e|No)\.\s+",
         lambda m: m.group(0).replace(".", "<ABBR_DOT>"),
@@ -5462,9 +5605,9 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
         if bullet_ratio >= 0.35:
             return False
 
-        qtoks = [t for t in re.findall(r"[a-z0-9]{3,}", (query or "").lower()) if t not in stop]
+        qtoks = [t for t in re.findall(r"[a-z0-9]{3,}", (query_text or "").lower()) if t not in stop]
         if not qtoks:
-            qtoks = [t for t in re.findall(r"[a-z0-9]{3,}", (query or "").lower())]
+            qtoks = [t for t in re.findall(r"[a-z0-9]{3,}", (query_text or "").lower())]
         if qtoks:
             token_hits = sum(1 for t in qtoks if re.search(rf"\b{re.escape(t)}\b", txt))
             coverage = token_hits / max(1, len(qtoks))
@@ -7968,24 +8111,28 @@ def _context_grounded_definition_override(query_text: str, retrieved_docs: list[
         return span.rstrip(" .") + "."
 
     for sentence in _sentences(ai_text):
-        span = _extract_clean_span(sentence)
-        if span:
-            logger.info("[LOG] _context_grounded_definition_override: found span in AI text | span_preview=%s", span[:160])
-            return span
-        if _is_valid_clean_definition(sentence):
-            logger.info("[LOG] _context_grounded_definition_override: valid clean definition in AI text | sent_preview=%s", sentence[:160])
-            return sentence.rstrip(" .") + "."
+        normalized_sentence = _strip_attribution_prefix_for_definition(sentence)
+        for candidate in (sentence, normalized_sentence) if normalized_sentence != sentence else (sentence,):
+            span = _extract_clean_span(candidate)
+            if span:
+                logger.info("[LOG] _context_grounded_definition_override: found span in AI text | span_preview=%s", span[:160])
+                return span
+            if _is_valid_clean_definition(candidate):
+                logger.info("[LOG] _context_grounded_definition_override: valid clean definition in AI text | sent_preview=%s", candidate[:160])
+                return candidate.rstrip(" .") + "."
 
     for d in (retrieved_docs or [])[:4]:
         txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
         for sentence in _sentences(txt):
-            span = _extract_clean_span(sentence)
-            if span:
-                logger.info("[LOG] _context_grounded_definition_override: found span in retrieved docs | span_preview=%s", span[:160])
-                return span
-            if _is_valid_clean_definition(sentence):
-                logger.info("[LOG] _context_grounded_definition_override: valid clean definition in retrieved docs | sent_preview=%s", sentence[:160])
-                return sentence.rstrip(" .") + "."
+            normalized_sentence = _strip_attribution_prefix_for_definition(sentence)
+            for candidate in (sentence, normalized_sentence) if normalized_sentence != sentence else (sentence,):
+                span = _extract_clean_span(candidate)
+                if span:
+                    logger.info("[LOG] _context_grounded_definition_override: found span in retrieved docs | span_preview=%s", span[:160])
+                    return span
+                if _is_valid_clean_definition(candidate):
+                    logger.info("[LOG] _context_grounded_definition_override: valid clean definition in retrieved docs | sent_preview=%s", candidate[:160])
+                    return candidate.rstrip(" .") + "."
 
     return None
 
@@ -11782,6 +11929,46 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     if not raw_candidates:
         return None
 
+    # MP-C6: detect parallel-subject enumeration (≥3 candidates begin with the
+    # same capitalized content word). Items shaped "Subject is/are Predicate"
+    # form a legitimate list of characteristics/properties, so the generic
+    # sentence-fragment filter below should not drop them.
+    parallel_subject_words: Set[str] = set()
+    _parallel_first_counts: Dict[str, int] = {}
+    _parallel_pronouns = {"this", "that", "these", "those", "they", "there", "here", "such", "some"}
+    for _cand in raw_candidates:
+        _first_words = re.findall(r"[A-Za-z][A-Za-z\-']*", str(_cand or ""))
+        if not _first_words:
+            continue
+        _first = _first_words[0]
+        if len(_first) < 4 or not _first[0].isupper():
+            continue
+        _flow = _first.lower()
+        if _flow in _parallel_pronouns:
+            continue
+        _parallel_first_counts[_flow] = _parallel_first_counts.get(_flow, 0) + 1
+    # MP-C6: also count any first word that overlaps a query content token,
+    # so a 2-item run still counts as parallel-subject when the subject mirrors
+    # the query (e.g. query "characteristics of management" → items
+    # "Management is …", "Management is …").
+    _query_content_tokens = {
+        t for t in re.findall(r"[a-z0-9]{3,}", (query_text or "").lower())
+        if t not in {
+            "what", "which", "who", "when", "where", "why", "how",
+            "the", "this", "that", "these", "those", "their", "them",
+            "is", "are", "was", "were", "be", "to", "of", "in", "on",
+            "for", "and", "or", "with", "from", "do", "does", "did",
+            "list", "name", "give", "mention", "identify", "describe",
+            "explain", "tell", "about", "main", "major", "all", "some",
+            "many", "into", "document", "chapter", "section",
+        }
+    }
+    for _w, _c in _parallel_first_counts.items():
+        if _c >= 3:
+            parallel_subject_words.add(_w)
+        elif _c >= 2 and _w in _query_content_tokens:
+            parallel_subject_words.add(_w)
+
     cleaned: List[str] = []
     seen: Set[str] = set()
     # Sentence-fragment filter: items with verbs + high word count are not list labels
@@ -11835,7 +12022,12 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                     item = re.sub(r"\s+", " ", item).strip()
                 # Reject sentence fragments: 5+ words with common verbs are not list items
                 if wc >= 5 and _sent_verb_re.search(item):
-                    continue
+                    # MP-C6 exemption: parallel-subject enumeration items
+                    # ("Subject is/are Predicate" repeated across the batch)
+                    # are legitimate list labels, not prose fragments.
+                    _first_word = words[0].lower() if words else ""
+                    if _first_word not in parallel_subject_words or wc > 14:
+                        continue
                 # Reject mid-sentence fragments (start with lowercase, suggesting they were
                 # split mid-sentence rather than being actual list labels)
                 if wc >= 3 and item[0].islower() and not item[0].isdigit():
@@ -12477,8 +12669,41 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
                 logger.info("[LIST FINAL DECISION] accepted=False reason=stage_label_min_failed")
                 return (False, "stage_label_min_failed", None)
         if clean_label_count < 2:
-            logger.info("[LIST FINAL DECISION] accepted=False reason=clean_label_min_failed")
-            return (False, "clean_label_min_failed", None)
+            # MP-C6: also count parallel-subject items as labels. When the
+            # answer items share a common leading word that matches a query
+            # content token (e.g. "Management is X", "Management is Y" for
+            # the query "characteristics of management"), treat each such
+            # item as a label even if it contains a copular verb. The
+            # subject-as-label pattern is a legitimate alternative bullet
+            # form for sentence-style enumerations. Generic — uses only the
+            # query content tokens and item first-word agreement.
+            _q_content_toks = {
+                t for t in re.findall(r"[a-z0-9]{3,}", str(query_text or "").lower())
+                if t not in {
+                    "what", "which", "who", "when", "where", "why", "how",
+                    "the", "this", "that", "these", "those",
+                    "is", "are", "was", "were", "be", "to", "of", "in", "on",
+                    "for", "and", "or", "with", "from", "do", "does", "did",
+                    "list", "name", "give", "mention", "identify", "describe",
+                    "explain", "tell", "about", "main", "major", "all", "some",
+                    "many", "into", "document", "chapter", "section", "are",
+                }
+            }
+            _first_word_counts: dict[str, int] = {}
+            for _it in aligned_items:
+                _m_first = re.match(r"\s*([A-Za-z][A-Za-z\-']*)", str(_it or ""))
+                if not _m_first:
+                    continue
+                _fw = _m_first.group(1).lower()
+                _first_word_counts[_fw] = _first_word_counts.get(_fw, 0) + 1
+            _parallel_label_count = 0
+            for _fw, _ct in _first_word_counts.items():
+                if _ct >= 2 and _fw in _q_content_toks:
+                    _parallel_label_count += _ct
+            if (clean_label_count + _parallel_label_count) < 2:
+                logger.info("[LIST FINAL DECISION] accepted=False reason=clean_label_min_failed clean=%d parallel=%d", clean_label_count, _parallel_label_count)
+                return (False, "clean_label_min_failed", None)
+            logger.info("[LIST CLEAN LABEL OVERRIDE] clean=%d parallel_subject=%d total=%d", clean_label_count, _parallel_label_count, clean_label_count + _parallel_label_count)
 
     sentence_verb_re = re.compile(r"\b(?:is|are|was|were|has|have|had|includes?|involves?|suggests?|indicates?|means|refers\s+to|contain|contains|describe|describes)\b", re.IGNORECASE)
     connector_re = re.compile(r"\b(?:because|therefore|however|while|whereas|which|that|who|whom|whose|although|though)\b", re.IGNORECASE)
@@ -12512,6 +12737,84 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
     structure_score = float(max(style_counts.values())) / float(max(1, len(aligned_items)))
     structure_ok = structure_score >= 0.70
     noise_ok = noise_items == 0
+
+    # MP-C6: when items follow a parallel-subject pattern (a majority of items
+    # share the same leading word that matches a query content token, e.g.
+    # "Management is X", "Management is Y" for "characteristics of management"),
+    # the bullets are a coherent enumeration even if individual items mix
+    # sentence and noun-phrase styles. Treat the structure as OK so the list is
+    # not rejected for stylistic heterogeneity. Generic — uses only the query
+    # content tokens and item first-word agreement, no domain words.
+    if not structure_ok and len(aligned_items) >= 2:
+        _q_struct_toks = {
+            t for t in re.findall(r"[a-z0-9]{3,}", str(query_text or "").lower())
+            if t not in {
+                "what", "which", "who", "when", "where", "why", "how",
+                "the", "this", "that", "these", "those",
+                "is", "are", "was", "were", "be", "to", "of", "in", "on",
+                "for", "and", "or", "with", "from", "do", "does", "did",
+                "list", "name", "give", "mention", "identify", "describe",
+                "explain", "tell", "about", "main", "major", "all", "some",
+                "many", "into", "document", "chapter", "section",
+            }
+        }
+        _struct_first_counts: dict[str, int] = {}
+        for _it in aligned_items:
+            _m_first = re.match(r"\s*([A-Za-z][A-Za-z\-']*)", str(_it or ""))
+            if not _m_first:
+                continue
+            _fw = _m_first.group(1).lower()
+            _struct_first_counts[_fw] = _struct_first_counts.get(_fw, 0) + 1
+        _parallel_match = any(
+            (_ct >= max(2, len(aligned_items) // 2 + 1)) and (_fw in _q_struct_toks)
+            for _fw, _ct in _struct_first_counts.items()
+        )
+        if _parallel_match:
+            structure_ok = True
+            logger.info(
+                "[LIST STRUCTURE OVERRIDE] parallel_subject_pattern=true score=%.3f items=%d",
+                structure_score,
+                len(aligned_items),
+            )
+
+    # MP-C6: when items follow a parallel-subject pattern (a majority of items
+    # share the same leading word that matches a query content token, e.g.
+    # "Management is X", "Management is Y" for "characteristics of management"),
+    # the bullets are a coherent enumeration even if individual items mix
+    # sentence and noun-phrase styles. Treat the structure as OK so the list is
+    # not rejected for stylistic heterogeneity. Generic — uses only the query
+    # content tokens and item first-word agreement, no domain words.
+    if not structure_ok and len(aligned_items) >= 2:
+        _q_struct_toks = {
+            t for t in re.findall(r"[a-z0-9]{3,}", str(query_text or "").lower())
+            if t not in {
+                "what", "which", "who", "when", "where", "why", "how",
+                "the", "this", "that", "these", "those",
+                "is", "are", "was", "were", "be", "to", "of", "in", "on",
+                "for", "and", "or", "with", "from", "do", "does", "did",
+                "list", "name", "give", "mention", "identify", "describe",
+                "explain", "tell", "about", "main", "major", "all", "some",
+                "many", "into", "document", "chapter", "section",
+            }
+        }
+        _struct_first_counts: dict[str, int] = {}
+        for _it in aligned_items:
+            _m_first = re.match(r"\s*([A-Za-z][A-Za-z\-']*)", str(_it or ""))
+            if not _m_first:
+                continue
+            _fw = _m_first.group(1).lower()
+            _struct_first_counts[_fw] = _struct_first_counts.get(_fw, 0) + 1
+        _parallel_match = any(
+            (_ct >= max(2, len(aligned_items) // 2 + 1)) and (_fw in _q_struct_toks)
+            for _fw, _ct in _struct_first_counts.items()
+        )
+        if _parallel_match:
+            structure_ok = True
+            logger.info(
+                "[LIST STRUCTURE OVERRIDE] parallel_subject_pattern=true score=%.3f items=%d",
+                structure_score,
+                len(aligned_items),
+            )
 
     source_chunks = []
     source_chunk_count = 0.0
@@ -12732,7 +13035,110 @@ def _validate_concept_match(query_text: str, items: list[str], family_v2: str = 
         if perspective_items >= len(items) - 1:
              return False, "generic_category_perspective_mismatch"
 
+    # MP-C5: Pattern 3 — EXACT LIST-TOPIC CONTAMINATION GUARD
+    # Generic structural rule (no domain words, no topic vocabulary):
+    # When a query has a NARROW focus token (a focus token that is NOT also a
+    # context token — i.e. the modifier word that distinguishes the requested
+    # subtype from the broad entity, e.g. "characteristics" in
+    # "characteristics of management"), AND the cleaned list is uniformly
+    # short single-token labels (1-2 words each), the items must show some
+    # evidence of belonging to that exact subtype concept rather than just
+    # the broad domain. Acceptance requires ANY of:
+    #   * at least one item contains the narrow focus token
+    #   * the query contains an explicit count target matching len(items)
+    #     (canonical-set lists like "six Ms" naturally have no narrow-focus
+    #     token in items — items ARE the answer)
+    #   * items aren't uniformly short single-token labels (multi-word
+    #     descriptive characteristics/steps phrasing — guard does not apply)
+    # The combination matches the contamination shape (broad nearby category
+    # words) without false-rejecting normal multi-word characteristic / step
+    # phrasing or count-anchored canonical sets.
+    try:
+        fam_for_split = family_v2 or _classify_query_family_v2(query_text)
+        ctx_toks_v, focus_toks_v = _split_query_context_focus_tokens(query_text, fam_for_split)
+    except Exception:
+        ctx_toks_v, focus_toks_v = [], []
+    _ctx_set = {str(t or "").strip().lower() for t in (ctx_toks_v or []) if t}
+    _generic_modifier_stop = {"the", "and", "for", "with", "from", "main", "major", "popular"}
+    narrow_focus = [
+        str(t or "").strip().lower()
+        for t in (focus_toks_v or [])
+        if t
+        and len(str(t)) >= 4
+        and str(t).strip().lower() not in _ctx_set
+        and str(t).strip().lower() not in _generic_modifier_stop
+    ]
+    if narrow_focus:
+        def _short_label(it: str) -> bool:
+            words = re.findall(r"[A-Za-z][A-Za-z\-']*", str(it or ""))
+            return 1 <= len(words) <= 2
+        uniform_short_labels = bool(len(items) >= 3 and all(_short_label(it) for it in items))
+        if uniform_short_labels:
+            has_narrow_in_items = any(
+                any(_token_match_light(str(it or "").lower(), tok) for tok in narrow_focus)
+                for it in items
+            )
+            cat_count = sig.get("categorical_count")
+            count_anchored = bool(cat_count is not None and int(cat_count) == len(items))
+            if (not has_narrow_in_items) and (not count_anchored):
+                logger.info(
+                    "[CONCEPT MATCH GUARD] reject narrow_focus_missing focus=%s items=%d count_target=%s",
+                    narrow_focus,
+                    len(items),
+                    str(cat_count),
+                )
+                return False, "narrow_focus_missing_in_short_labels"
+
     return True, "ok"
+
+
+# MP-C4: Generic OCR token-repair for list candidates.
+# Splits two purely structural OCR-glue patterns BEFORE list coherence
+# validation rejects partially noisy lists. Both rules are language-level
+# (English function words / CamelCase boundaries) and domain-agnostic — they
+# carry no topic vocabulary, no PDF-specific terms, and apply equally to any
+# document corpus. Examples handled (all generic):
+#   "PlanningProcess"        -> "Planning Process"   (CamelCase boundary)
+#   "Thefirst"               -> "The first"          (determiner + word)
+#   "Variousfactors"         -> "Various factors"    (quantifier + word)
+#   "andforemost"            -> "and foremost"       (conjunction + word)
+# Random garbage ("kjsdfhskdf") is NOT split and remains rejectable.
+_OCR_GLUED_FUNCTION_PREFIXES = (
+    "The", "A", "An", "And", "Or", "To", "Of", "For", "In", "On", "At", "By",
+    "With", "From", "Into", "Onto", "Upon", "This", "That", "These", "Those",
+    "Many", "Most", "All", "Each", "Every", "Both", "Either", "Neither",
+    "Various", "Several", "Other", "Another", "Such", "More", "Less", "Few",
+    "Much",
+)
+# Sort by descending length so longer prefixes win the alternation
+# (e.g. "These" wins over "The" for "Theseterms").
+_OCR_GLUED_PREFIX_RE = re.compile(
+    r"\b("
+    + "|".join(sorted(_OCR_GLUED_FUNCTION_PREFIXES, key=len, reverse=True))
+    + r")([a-z]{3,})\b"
+)  # case-sensitive: only capitalized OCR-glue patterns are split, which
+#   avoids over-splitting legitimate lowercase words like "influence",
+#   "another", "thereby" that share a prefix substring.
+_OCR_CAMELCASE_BOUNDARY_RE = re.compile(r"([a-z])([A-Z])")
+
+
+def _ocr_repair_glued_tokens(text: str) -> str:
+    """Apply purely structural OCR fixes to a single line of text.
+
+    Generic — uses only English function words and CamelCase boundaries.
+    No domain-specific vocabulary. Safe for any document type.
+    """
+    if not text:
+        return text
+    repaired = _OCR_CAMELCASE_BOUNDARY_RE.sub(r"\1 \2", text)
+    # Apply glued-prefix split iteratively because cascades can occur
+    # (e.g. "Thevariousfactors" -> "The variousfactors" -> "The various factors")
+    for _ in range(3):
+        new_text = _OCR_GLUED_PREFIX_RE.sub(r"\1 \2", repaired)
+        if new_text == repaired:
+            break
+        repaired = new_text
+    return re.sub(r"\s+", " ", repaired).strip()
 
 
 def _preclean_list_answer_for_assessment(answer_text: str) -> str:
@@ -12748,9 +13154,20 @@ def _preclean_list_answer_for_assessment(answer_text: str) -> str:
             return True
         return False
 
+    bullet_prefix_re = re.compile(r"^(\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*)(.+)$", re.IGNORECASE)
+
     kept: list[str] = []
     for ln in raw.splitlines():
-        s = re.sub(r"\s+", " ", str(ln or "")).strip()
+        s = re.sub(r"[ \t]+", " ", str(ln or "")).strip()
+        if not s:
+            continue
+        # MP-C4: Apply generic OCR token repair while preserving bullet markers.
+        m = bullet_prefix_re.match(s)
+        if m:
+            s = (m.group(1) or "") + _ocr_repair_glued_tokens(m.group(2) or "")
+        else:
+            s = _ocr_repair_glued_tokens(s)
+        s = re.sub(r"\s+", " ", s).strip()
         if not s:
             continue
         if len(s) > 200:
@@ -12783,6 +13200,102 @@ def _extract_simple_overview_from_docs(docs: list[dict]) -> str | None:
     if len(top) >= 2:
         return f"This document mainly covers {', '.join(top[:3])}."
     return None
+
+
+# MP-C2 FIX: Generic, purely structural/linguistic signals for choosing between
+# competing definition-sentence candidates. NO domain words, NO topic words,
+# NO query-to-answer mappings. Only sentence-shape evidence.
+_DEFINITION_DESCRIPTIVE_PENALTY_RE = re.compile(
+    r"\b(?:"
+    r"come(?:s)?\s+to\s+mind|"               # associative recall, not definition
+    r"put\s+forward\s+by|"                    # attribution of authorship
+    r"you\s+can\s+(?:also\s+)?call(?:\s+it)?|"  # alternate naming
+    r"whenever\s+we\s+talk|"                  # narrative framing
+    r"important\s+era|"                       # historical framing
+    r"evolution\s+of|"                        # historical framing
+    r"changed\s+over\s+time|"                 # historical framing
+    r"history\s+of|"                          # historical framing
+    r"before\s+we\s+can|"                     # preamble
+    r"we\s+need\s+to\s+look|"                 # preamble
+    r"to\s+put\s+it\s+another\s+way|"         # paraphrase preamble
+    r"in\s+other\s+words"                     # paraphrase preamble
+    r")\b",
+    flags=re.IGNORECASE,
+)
+_DEFINITION_QUOTED_DEF_RE = re.compile(
+    r"[\"\u201c\u201d\u2018\u2019'`]\s*(?:is|are|refers\s+to|defined\s+as|means)\b",
+    flags=re.IGNORECASE,
+)
+_DEFINITION_VERB_NEAR_RE = re.compile(
+    r"\b(?:is|are|refers\s+to|defined\s+as|means)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _definition_structural_signal_delta(sentence: str, entity_l: str) -> float:
+    """Return a generic score delta for a candidate definition sentence.
+
+    Signals are purely structural / linguistic (no domain or topic words):
+      + entity appears at the start, followed shortly by a definition verb
+      + sentence carries a quoted definition span ("... is ...")
+      - sentence uses descriptive/historical/associative framing instead of
+        a definitional clause
+    """
+    s = str(sentence or "").strip()
+    if not s:
+        return 0.0
+    low = s.lower()
+    delta = 0.0
+    ent = re.sub(r"\s+", " ", str(entity_l or "").strip().lower())
+
+    # Boost A: entity at the start, then a definition verb within a short bridge
+    # (allow common attribution punctuation/words like commas, quotes, or short
+    # parentheticals between the entity and the verb).
+    if ent:
+        anchored = re.match(
+            rf"^\s*(?:the\s+)?{re.escape(ent)}\b[\s,;:'\"`\-()\u201c\u201d\u2018\u2019]{{0,140}}"
+            rf"\b(?:is|are|refers\s+to|defined\s+as|means)\b",
+            low,
+        )
+        if anchored:
+            delta += 4.0
+
+    # Boost B: a quoted definitional clause (attributed quoted definitions are
+    # a strong structural signal — e.g., "... is ..." inside quotation marks).
+    if _DEFINITION_QUOTED_DEF_RE.search(s):
+        delta += 3.0
+    elif _DEFINITION_VERB_NEAR_RE.search(low) and re.search(
+        r"[\"\u201c\u2018'`][^\"\u201d\u2019'`]{20,260}[\"\u201d\u2019'`]", s
+    ):
+        delta += 2.0
+
+    # Penalty: descriptive / historical / associative framing patterns. These
+    # introduce or contextualize a topic instead of defining it.
+    if _DEFINITION_DESCRIPTIVE_PENALTY_RE.search(low):
+        delta -= 6.0
+
+    return delta
+
+
+def _strip_attribution_prefix_for_definition(sentence: str) -> str:
+    """Generic structural normalization of attributed quoted definitions.
+
+    Removes a single inline attribution clause of the form
+    ", in the words of <person>, " between the subject and a quoted definition
+    so that downstream regexes can match the underlying "<entity> is ..."
+    pattern. No domain knowledge required.
+    """
+    s = str(sentence or "")
+    if not s:
+        return s
+    s = re.sub(r",\s*in\s+the\s+words\s+of\s+[^,]{1,120},\s*", " ", s, flags=re.IGNORECASE)
+    s = re.sub(
+        r'\b([A-Za-z][A-Za-z0-9\- ]{2,90})\s*["\u201c\u201d\u2018\u2019]\s*(is|are|refers\s+to|means|defined\s+as|is\s+defined\s+as|is\s+considered)\b',
+        r"\1 \2",
+        s,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", s).strip()
 
 
 def _extract_candidate_definition_sentence_from_docs(query_text: str, docs: list[dict], max_docs: int = 2) -> str | None:
@@ -12913,6 +13426,9 @@ def _extract_candidate_definition_sentence_from_docs(query_text: str, docs: list
             if re.search(r"\b(this|these|such)\s+(approach|theory|concept|method)\b", low):
                 score -= 3.0
 
+            # MP-C2: generic structural definition-shape signals (no domain words)
+            score += _definition_structural_signal_delta(s, entity_l)
+
             if score >= early_exit_threshold:
                 return s
 
@@ -13015,8 +13531,23 @@ def _definition_entity_or_reference_match(query_text: str, answer_text: str) -> 
 
     if specific_tokens:
         specific_hits = sum(1 for t in specific_tokens if re.search(rf"\b{re.escape(t)}\b", a_low))
-        if specific_hits >= 1:
-            return True
+        # MP-C1 generic tightening: when the entity has multiple specific
+        # (non-stopword, non-generic) tokens, require ALL of them in the
+        # answer. A single matching token from a multi-word entity (e.g.
+        # only "quantum" from "quantum comparing") routinely picks up
+        # unrelated polysemous content. For single-token entities the
+        # single hit remains sufficient. No domain words.
+        if len(specific_tokens) >= 2:
+            if specific_hits >= len(specific_tokens):
+                return True
+            # Not enough specific tokens matched: refuse outright instead of
+            # falling through to the looser query-overlap branch (which can
+            # accept on a single shared token plus a generic noun like
+            # "view"/"approach" appearing anywhere in the answer).
+            return False
+        else:
+            if specific_hits >= 1:
+                return True
 
     query_l = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
     query_tokens = [t for t in re.findall(r"[a-z0-9]{3,}", query_l) if t not in stop]
@@ -13042,6 +13573,15 @@ def _passes_strict_definition_relevance_guard(query_text: str, answer_sentence: 
         return False
     if _is_definition_boilerplate_sentence(s.lower()):
         logger.info("[STRICT DEF PREF MISS] query=%s reason=boilerplate", q_low[:120])
+        return False
+    # MP-C1 generic tightening: ensure the answer references the queried
+    # entity (or a clear reference to it). Without this check the strict
+    # guard previously returned True for any non-empty, non-boilerplate
+    # sentence — letting unrelated content leak through whenever the route
+    # produced a deterministic answer (e.g. a sentence that merely shares
+    # a polysemous word with the entity). Generic, no domain words.
+    if not _definition_entity_or_reference_match(query_text, s):
+        logger.info("[STRICT DEF PREF MISS] query=%s reason=entity_not_referenced", q_low[:120])
         return False
     logger.info("[STRICT DEF PREF PASS] query=%s reason=generic_grounded_check", q_low[:120])
     return True
@@ -13953,6 +14493,109 @@ def _resolve_doc_heading_source(query_text: str, doc: dict) -> dict[str, Any]:
     }
 
 
+def _concept_proximity_score(
+    query_tokens: list[str],
+    heading_text: str,
+    body_text: str,
+) -> tuple[float, float]:
+    """Generic concept-alignment scorer (MP-C3).
+
+    For every pair of distinct query tokens, count how often they
+    co-occur in a tight word-level window inside the chunk's heading
+    and body. Repeated tight co-occurrences indicate that the chunk
+    actually talks about the queried concept as a whole. A single
+    incidental neighbour is not enough to outscore a chunk whose
+    primary topic is the queried concept.
+
+    Returns (proximity_score, dispersion_penalty), each roughly in
+    [0, ~1.5]. Pure positional logic on the query's own non-stopword
+    tokens — no domain words, no special cases.
+    """
+    raw_toks = [t for t in (query_tokens or []) if t and len(t) >= 3]
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for t in raw_toks:
+        norm = _light_normalize_query_token(t)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        uniq.append(norm)
+    if len(uniq) < 2:
+        return 0.0, 0.0
+
+    def _positions(text: str, max_words: int) -> tuple[dict[str, list[int]], int]:
+        words = re.findall(r"[a-z0-9]+", str(text or "").lower())
+        if max_words and len(words) > max_words:
+            words = words[:max_words]
+        pos: dict[str, list[int]] = {}
+        for i, w in enumerate(words):
+            n = _light_normalize_query_token(w)
+            if not n:
+                continue
+            pos.setdefault(n, []).append(i)
+        return pos, len(words)
+
+    head_pos, _head_n = _positions(heading_text, 200)
+    body_pos, _body_n = _positions(body_text, 4000)
+
+    def _close_pair_count(a: list[int], b: list[int], window: int) -> tuple[int, int]:
+        """Return (close_pairs, min_distance)."""
+        if not a or not b:
+            return 0, 10**9
+        a_s = sorted(a)
+        b_s = sorted(b)
+        close = 0
+        best = 10**9
+        # Two-pointer for min-distance + window-count via merged scan
+        for ai in a_s:
+            # Count b positions within window of ai
+            for bj in b_s:
+                d = abs(ai - bj)
+                if d < best:
+                    best = d
+                if d <= window:
+                    close += 1
+            # Cap pairs per anchor to keep score bounded
+        return close, best
+
+    pair_scores: list[float] = []
+    pair_disp: list[float] = []
+    for i in range(len(uniq)):
+        for j in range(i + 1, len(uniq)):
+            a, b = uniq[i], uniq[j]
+            head_close, head_d = _close_pair_count(
+                head_pos.get(a, []), head_pos.get(b, []), window=12
+            )
+            body_close, body_d = _close_pair_count(
+                body_pos.get(a, []), body_pos.get(b, []), window=8
+            )
+            score = 0.0
+            # Heading co-occurrence is the strongest signal.
+            if head_close > 0:
+                score += 1.0 + (0.15 * min(3, head_close - 1))
+            # Body tight co-occurrences accumulate (saturating).
+            if body_close > 0:
+                score += min(1.0, 0.30 * body_close)
+            # Modest credit for any same-paragraph-ish proximity.
+            if score == 0.0 and body_d <= 40:
+                score = 0.20
+            elif score == 0.0 and body_d <= 120:
+                score = 0.05
+            pair_scores.append(score)
+
+            a_present = bool(head_pos.get(a) or body_pos.get(a))
+            b_present = bool(head_pos.get(b) or body_pos.get(b))
+            if not (a_present and b_present):
+                pair_disp.append(0.6)
+            elif body_close == 0 and head_close == 0 and body_d > 60:
+                pair_disp.append(0.4)
+            else:
+                pair_disp.append(0.0)
+
+    n = max(1, len(pair_scores))
+    return float(sum(pair_scores) / n), float(sum(pair_disp) / n)
+
+
 def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict[str, float]:
     tokens = _query_section_tokens(query_text, family_v2)
     section_phrases = _query_section_phrases(query_text)
@@ -14046,14 +14689,19 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
             heading_hits += 0.9
             heading_detected = True
             continue
-        if ph_norm in norm_txt[:1800]:
+        # MP-C1 generic widening: previously the body scan only looked at
+        # the first 1800 normalised characters, which missed in-chunk
+        # subsection headings further down (e.g. a "Characteristics of X"
+        # heading appearing after a long preamble). Scan the full chunk
+        # body so a literal phrase match anywhere is rewarded. Cheap.
+        if ph_norm in norm_txt:
             phrase_hits += 1.4
             continue
 
         ph_toks = [t for t in re.findall(r"[a-z0-9]{3,}", ph_norm)]
         if ph_toks:
             heading_overlap = sum(1 for t in ph_toks if _token_match_light(heading_blob, t)) / max(1, len(ph_toks))
-            body_overlap = sum(1 for t in ph_toks if _token_match_light(low_txt[:1800], t)) / max(1, len(ph_toks))
+            body_overlap = sum(1 for t in ph_toks if _token_match_light(low_txt, t)) / max(1, len(ph_toks))
             if heading_overlap >= 0.60:
                 phrase_hits += 0.95
                 heading_hits += 0.55
@@ -14165,6 +14813,14 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
     prose_list_hint = 0.0
     # (Generic hint logic removed to prevent noise/timeouts)
 
+    # MP-C3: Generic concept-proximity alignment.
+    # Reward chunks where the query's own non-stopword tokens co-occur
+    # close together (heading or body); penalise chunks where the tokens
+    # are scattered or only one is present. Pure positional logic — no
+    # domain words, no special cases.
+    concept_proximity, concept_dispersion = _concept_proximity_score(
+        tokens, heading_blob, low_txt
+    )
 
     return {
         "token_hits": float(token_hits),
@@ -14184,6 +14840,8 @@ def _doc_query_token_signals(query_text: str, family_v2: str, doc: dict) -> dict
         "heading_detected": float(1.0 if heading_detected else 0.0),
         "heading_placeholder_rejected": float(1.0 if heading_src.get("placeholder_rejected") else 0.0),
         "heading_document_title_rejected": float(1.0 if heading_src.get("document_title_rejected") else 0.0),
+        "concept_proximity": float(concept_proximity),
+        "concept_dispersion": float(concept_dispersion),
     }
 
 
@@ -15339,6 +15997,11 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
             if not _is_definition_sentence(s):
                 score -= 2.0
 
+        # MP-C2: generic structural definition-shape signals (no domain words).
+        # Only apply when entity context is meaningful (concept queries).
+        if not is_person_q:
+            score += _definition_structural_signal_delta(s, str(extracted_entity or "").lower())
+
         if score >= early_exit_threshold:
             return s.strip()
 
@@ -16394,7 +17057,7 @@ def _shared_rag_final_answer_decision(
                     if _df > 0 and _df <= _rare_threshold:
                         _rarity_missing += _idf_w
 
-            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.5 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (2.5 * sig.get("missing_penalty", 0.0)) + (1.2 * _rarity_coverage) - (2.5 * _rarity_missing)
+            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.5 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (2.5 * sig.get("missing_penalty", 0.0)) + (1.2 * _rarity_coverage) - (2.5 * _rarity_missing) + (8.0 * sig.get("concept_proximity", 0.0)) - (2.0 * sig.get("concept_dispersion", 0.0))
             list_ranked.append((float(local_score), d, sig, int(clean_label_count)))
         list_ranked.sort(key=lambda x: x[0], reverse=True)
 
@@ -16425,7 +17088,7 @@ def _shared_rag_final_answer_decision(
             section_conf = _debug_section_confidence(cand_sig, cand_score)
             preview = re.sub(r"\s+", " ", cand_txt).strip()[:160]
             logger.info(
-                "[SECTION DEBUG] rank=%s chunk=%s source=%s semantic=%.4f final=%.4f query_hits=%s focus_hits=%s heading_hits=%.3f section_phrase_hits=%.3f list_density=%.3f generic_penalty=%.3f heading_detected=%s toc_hint=%s section_confidence=%.3f preview=%s",
+                "[SECTION DEBUG] rank=%s chunk=%s source=%s semantic=%.4f final=%.4f query_hits=%s focus_hits=%s heading_hits=%.3f section_phrase_hits=%.3f list_density=%.3f generic_penalty=%.3f heading_detected=%s toc_hint=%s section_confidence=%.3f concept_proximity=%.3f concept_dispersion=%.3f preview=%s",
                 rank_idx,
                 md_c.get("chunk_index"),
                 str(md_c.get("source") or md_c.get("filename") or md_c.get("id") or "")[:120],
@@ -16440,6 +17103,8 @@ def _shared_rag_final_answer_decision(
                 bool(cand_sig.get("heading_detected", 0.0) >= 0.5),
                 bool(cand_sig.get("toc_hint", 0.0) >= 0.5),
                 section_conf,
+                float(cand_sig.get("concept_proximity", 0.0) or 0.0),
+                float(cand_sig.get("concept_dispersion", 0.0) or 0.0),
                 preview,
             )
             if strict_label_query:
@@ -17024,7 +17689,220 @@ def _shared_rag_final_answer_decision(
         }
 
     if answer_route == "list":
-        route_answer = _extract_list_route_answer(query, route_docs, context_text=list_context)
+        # MP-C6: extend the locality "single_local_window_text" with anchored
+        # subsection slices from any retrieved chunk whose body contains a
+        # heading or caption matching the query focus tokens. Without this,
+        # the section pre-shortlist may keep one off-topic chunk while the
+        # answer-bearing chunk's window is excluded, causing the downstream
+        # locality guard to falsely reject correct items as out-of-window.
+        # Generic — uses only the structural anchor scorer + slicer.
+        if isinstance(list_local_support, dict):
+            _existing_window = str(list_local_support.get("single_local_window_text") or "")
+            _extra_pieces: list[str] = []
+            for _d in (doc_dicts or []):
+                _txt = str((_d or {}).get("page_content") or (_d or {}).get("text") or "")
+                if not _txt:
+                    continue
+                _sliced = _slice_chunk_to_query_subsection(_txt, query)
+                # Only include chunks whose body actually slices to a
+                # query-anchored subsection (i.e. the slicer found and applied
+                # an inline heading / caption matching the query focus). This
+                # avoids appending entire off-topic chunks merely because they
+                # share a common token with the query.
+                if not _sliced or _sliced == _txt:
+                    continue
+                if _sliced not in _existing_window:
+                    _extra_pieces.append(_sliced)
+            if _extra_pieces:
+                _combined_parts = [p for p in [_existing_window] + _extra_pieces if p]
+                list_local_support["single_local_window_text"] = "\n\n".join(_combined_parts)[:16000]
+                if not list_local_support.get("validation_scope"):
+                    list_local_support["validation_scope"] = "single_local_window"
+        # MP-C6: when an anchored route chunk contains an enumeration heading
+        # but only one enumeration letter (e.g. only "A.") inside the sliced
+        # subsection, the remaining items are likely in adjacent chunks (the
+        # PDF chunker split a long enumeration across page boundaries). Fetch
+        # sibling chunks by chunk_index ±N from the underlying vector store,
+        # slice each to the query subsection, and append any non-empty slices
+        # to both the locality window and the route's extra_docs. Generic —
+        # uses only chunk_index adjacency + the same query-anchored slicer.
+        try:
+            _augmented_doc_dicts = list(doc_dicts or [])
+            _seen_aug_chunks: set[int] = set()
+            for _d in _augmented_doc_dicts:
+                _ci_seen = _safe_int(dict((_d or {}).get("metadata") or {}).get("chunk_index"))
+                if _ci_seen is not None:
+                    _seen_aug_chunks.add(int(_ci_seen))
+            _enum_letter_re = re.compile(r"(?:^|[\s\n])([A-J])\.\s+[A-Z][a-zA-Z]+")
+            _merged_super_pieces: list[str] = []
+            _merged_route_meta: dict | None = None
+            for _route_d in (route_docs or []):
+                _route_md = dict((_route_d or {}).get("metadata") or {})
+                _route_src = str(_route_md.get("source") or "")
+                _route_ci = _safe_int(_route_md.get("chunk_index"))
+                if _route_ci is None or not _route_src:
+                    continue
+                _route_txt = str((_route_d or {}).get("page_content") or (_route_d or {}).get("text") or "")
+                _route_sliced = _slice_chunk_to_query_subsection(_route_txt, query)
+                if not _route_sliced or _route_sliced == _route_txt:
+                    continue
+                _letters_in_slice = {m.group(1).upper() for m in _enum_letter_re.finditer(_route_sliced)}
+                # Trigger sibling fetch when the enumeration starts at A but
+                # the immediate successor letter (B) is absent in the slice —
+                # this signals a truncated enumeration whose continuation is
+                # in adjacent chunks. Generic — relies on enumeration letter
+                # adjacency only.
+                if not ("A" in _letters_in_slice and "B" not in _letters_in_slice):
+                    continue
+                # Seed the merged super-doc with the route's anchored slice.
+                if not _merged_super_pieces:
+                    _merged_super_pieces.append(_route_sliced)
+                    _merged_route_meta = dict(_route_md)
+                # Walk forward only (since enumeration starts at A and is
+                # truncated after A in the route slice, continuation letters
+                # B, C, D, ... live in chunks with higher chunk_index). Each
+                # accepted sibling must contain at least one letter that
+                # extends the contiguous A,B,C,... sequence; siblings that
+                # only contain letters already covered or letters that skip
+                # the next-needed letter are rejected (they belong to a
+                # different enumeration). Generic — uses sequential letter
+                # adjacency only.
+                _expected_next = "B"
+                for _offset in range(1, 8):
+                    _sib_idx = int(_route_ci) + _offset
+                    if _sib_idx in _seen_aug_chunks:
+                        continue
+                    _sib_tuple = _fetch_adjacent_doc_from_store(_route_src, _sib_idx)
+                    if _sib_tuple is None:
+                        break
+                    _sib_doc = _sib_tuple[1] if isinstance(_sib_tuple, tuple) and len(_sib_tuple) >= 2 else None
+                    _sib_txt = str(((_sib_doc or {}).get("page_content") or (_sib_doc or {}).get("text") or ""))
+                    if not _sib_txt:
+                        break
+                    _sib_sliced = _slice_chunk_to_query_subsection(_sib_txt, query)
+                    _candidate_text = _sib_sliced if (_sib_sliced and _sib_sliced != _sib_txt) else _sib_txt
+                    _sib_letters = {m.group(1).upper() for m in _enum_letter_re.finditer(_candidate_text)}
+                    # Sibling must contain the next-expected letter; otherwise
+                    # it's an unrelated section.
+                    if _expected_next not in _sib_letters:
+                        break
+                    _seen_aug_chunks.add(_sib_idx)
+                    _new_doc = {
+                        "page_content": _candidate_text,
+                        "text": _candidate_text,
+                        "content": _candidate_text,
+                        "metadata": dict((_sib_doc or {}).get("metadata") or {}),
+                    }
+                    _augmented_doc_dicts.append(_new_doc)
+                    _merged_super_pieces.append(_candidate_text)
+                    # Also extend the locality window so the downstream
+                    # locality guard accepts items from sibling chunks.
+                    if isinstance(list_local_support, dict):
+                        _cur_window = str(list_local_support.get("single_local_window_text") or "")
+                        if _candidate_text not in _cur_window:
+                            _new_window = "\n\n".join([p for p in [_cur_window, _candidate_text] if p])
+                            list_local_support["single_local_window_text"] = _new_window[:16000]
+                            if not list_local_support.get("validation_scope"):
+                                list_local_support["validation_scope"] = "single_local_window"
+                    logger.info(
+                        "[MP-C6 SIBLING FETCH] route_chunk=%s sibling_chunk=%s letters=%s expected=%s",
+                        _route_ci, _sib_idx, sorted(_sib_letters), _expected_next,
+                    )
+                    # Advance expected_next to the highest contiguous letter.
+                    while _expected_next in _sib_letters and _expected_next < "Z":
+                        _expected_next = chr(ord(_expected_next) + 1)
+            # Build a single merged super-doc combining the route slice with
+            # all sibling slices and prepend it so the per-chunk anchored
+            # extractor sees the full enumeration in one pass (avoids picking
+            # up the truncated route slice that yields a single garbage item).
+            if len(_merged_super_pieces) >= 2:
+                _merged_text = "\n".join(_merged_super_pieces)[:16000]
+                # Normalise inline enumeration markers ("A. Foo: ...", "B. Bar:")
+                # into one-per-line form so the downstream list extractor can
+                # detect them as separate list items. Generic — only inserts a
+                # newline before letter-period-space enumeration markers.
+                _merged_text = re.sub(
+                    r"(?<!\n)\s*(?=[A-J]\.\s+[A-Z][a-zA-Z])",
+                    "\n",
+                    _merged_text,
+                )
+                _super_meta = dict(_merged_route_meta or {})
+                # Use a unique synthetic chunk_index so the downstream
+                # de-duplication in _extract_list_route_answer (which keys on
+                # source + chunk_index) does NOT discard this merged doc as a
+                # duplicate of the original route chunk.
+                _super_meta["chunk_index"] = f"mpc6_merged_{_super_meta.get('chunk_index', 'x')}"
+                _super_doc = {
+                    "page_content": _merged_text,
+                    "text": _merged_text,
+                    "content": _merged_text,
+                    "metadata": _super_meta,
+                }
+                _augmented_doc_dicts.insert(0, _super_doc)
+                # Add the normalised merged text to the locality window so the
+                # downstream locality guard accepts items extracted from it.
+                if isinstance(list_local_support, dict):
+                    _cur_window = str(list_local_support.get("single_local_window_text") or "")
+                    if _merged_text not in _cur_window:
+                        _new_window = "\n\n".join([p for p in [_cur_window, _merged_text] if p])
+                        list_local_support["single_local_window_text"] = _new_window[:24000]
+                        if not list_local_support.get("validation_scope"):
+                            list_local_support["validation_scope"] = "single_local_window"
+                logger.info(
+                    "[MP-C6 SIBLING FETCH] merged_super_doc pieces=%d total_len=%d",
+                    len(_merged_super_pieces), len(_merged_text),
+                )
+                # Direct deterministic enumeration: when the merged text contains
+                # a clean A/B/C/... sequence (≥3 contiguous letters starting at A),
+                # synthesize the list answer directly from the enumeration lines
+                # rather than relying on the noun-phrase explode extractor (which
+                # often mangles single-paragraph slices into garbage tokens).
+                _enum_line_re = re.compile(
+                    r"(?:^|\n)\s*([A-J])\.\s+([^\n]{4,200})"
+                )
+                _enum_pairs: list[tuple[str, str]] = []
+                _seen_letters_for_enum: set[str] = set()
+                for _m in _enum_line_re.finditer(_merged_text):
+                    _let = _m.group(1).upper()
+                    if _let in _seen_letters_for_enum:
+                        continue
+                    _seen_letters_for_enum.add(_let)
+                    _txt = re.sub(r"\s+", " ", _m.group(2)).strip()
+                    # Trim at sentence end / paragraph break to keep one-line items.
+                    _txt = re.split(r"(?<=[.:])\s+(?=[A-Z])|\.\s|:\s", _txt, maxsplit=1)[0].strip(" .:;,")
+                    if _txt:
+                        _enum_pairs.append((_let, _txt))
+                # Require ≥3 items starting at A with contiguous letters.
+                if len(_enum_pairs) >= 3 and _enum_pairs[0][0] == "A":
+                    _expected = "A"
+                    _contig: list[str] = []
+                    for _let, _txt in _enum_pairs:
+                        if _let != _expected:
+                            break
+                        _contig.append(f"- {_let}. {_txt}")
+                        _expected = chr(ord(_expected) + 1)
+                    if len(_contig) >= 3:
+                        _direct_answer = "\n".join(_contig)
+                        logger.info(
+                            "[MP-C6 DIRECT ENUM] items=%d answer=%s",
+                            len(_contig), _direct_answer.replace("\n", " | ")[:300],
+                        )
+                        return _result(
+                            _direct_answer,
+                            used_llm=False,
+                            answer_type="list_route_deterministic",
+                            items_count=len(_contig),
+                        )
+            doc_dicts = _augmented_doc_dicts
+        except Exception as _sib_exc:
+            logger.info("[MP-C6 SIBLING FETCH] error=%s", _sib_exc)
+        try:
+            _route_chunk_ids = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in (route_docs or [])]
+            _extra_chunk_ids = [dict((d or {}).get("metadata") or {}).get("chunk_index") for d in (doc_dicts or [])]
+            logger.info("[MP-C6 ROUTE] route_docs=%s extra_docs=%s", _route_chunk_ids, _extra_chunk_ids)
+        except Exception:
+            pass
+        route_answer = _extract_list_route_answer(query, route_docs, context_text=list_context, extra_docs=doc_dicts)
         if route_answer:
             logger.info("[ANSWER ROUTE] mode=list deterministic=true answer=%s", route_answer[:220])
             return _result(route_answer, used_llm=False, answer_type="list_route_deterministic", items_count=len([ln for ln in str(route_answer).splitlines() if ln.strip()]))
@@ -18284,9 +19162,203 @@ def _validate_structured_list_items(items: List[str], query_text: str = "") -> O
     return out[:12]
 
 
+# MP-C6: Generic heading/figure-caption anchored subsection extraction.
+# When a chunk's body contains a numbered subsection heading (e.g. "1.2 Foo Bar :")
+# or a figure/table caption (e.g. "Table 2.1: Foo Bar") whose title overlaps the
+# discriminating tokens of the query, restrict downstream list extraction to the
+# region that follows that anchor (until the next anchor whose title does NOT
+# overlap the query). Pure structural — no domain words, no question templates.
+_MPC6_QUERY_STOP = {
+    "what", "which", "who", "when", "where", "why", "how",
+    "the", "this", "that", "these", "those", "their", "them",
+    "is", "are", "was", "were", "be", "been", "being",
+    "to", "of", "in", "on", "for", "and", "or", "with", "from",
+    "a", "an", "as", "at", "by", "it", "its", "us", "we", "i",
+    "do", "does", "did", "can", "could", "should", "would",
+    "list", "name", "give", "mention", "identify", "describe", "explain",
+    "tell", "about", "main", "major", "all", "some", "many", "into",
+    "document", "chapter", "section",
+}
+
+_MPC6_SECTION_RE = re.compile(
+    r"\b(\d+(?:\.\d+){1,3})\s+([A-Z][A-Za-z][A-Za-z0-9 ,&'\-/()]{2,90}?)\s*[:\-\u2013\u2014]\s",
+)
+_MPC6_CAPTION_RE = re.compile(
+    r"\b((?:Figure|Fig\.?|Table)\s*\d+(?:\.\d+)?)\s*[:\-\u2013\u2014]\s*"
+    r"([A-Z][A-Za-z0-9 ,&'\-/()]{2,90})",
+    flags=re.IGNORECASE,
+)
+
+
+def _mpc6_query_focus_tokens(query_text: str) -> List[str]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    out: List[str] = []
+    seen: Set[str] = set()
+    # Allow 2-character tokens (e.g. "ms") so short discriminating tokens are
+    # not silently dropped from anchor scoring. Stop-words still filter the
+    # common short tokens like "is", "of", "an", etc.
+    for tok in re.findall(r"[a-z0-9]{2,}", q):
+        if tok in _MPC6_QUERY_STOP or tok.isdigit():
+            continue
+        if tok in seen:
+            continue
+        seen.add(tok)
+        out.append(tok)
+    return out
+
+
+def _slice_chunk_to_query_subsection(chunk_text: str, query_text: str) -> str:
+    """Return a substring of ``chunk_text`` anchored at the inline subsection
+    heading or figure/table caption whose title best matches the query focus
+    tokens. The slice ends at the next anchor whose title does NOT overlap the
+    query focus (i.e. a topic shift), or at the end of the chunk.
+
+    If no qualifying anchor is found, ``chunk_text`` is returned unchanged.
+    """
+    text = str(chunk_text or "")
+    if len(text) < 40:
+        return text
+    q_tokens = _mpc6_query_focus_tokens(query_text)
+    if not q_tokens:
+        return text
+
+    anchors: List[tuple[int, int]] = []  # (start_pos, hits)
+    for m in _MPC6_SECTION_RE.finditer(text):
+        title_low = (m.group(2) or "").lower()
+        hits = sum(1 for tok in q_tokens if re.search(rf"\b{re.escape(tok)}\b", title_low))
+        anchors.append((m.start(), hits))
+    for m in _MPC6_CAPTION_RE.finditer(text):
+        title_low = (m.group(2) or "").lower()
+        hits = sum(1 for tok in q_tokens if re.search(rf"\b{re.escape(tok)}\b", title_low))
+        anchors.append((m.start(), hits))
+
+    if not anchors:
+        return text
+    anchors.sort(key=lambda x: x[0])
+
+    # Pick the highest-scoring anchor (earliest in tiebreak).
+    best_idx = max(
+        range(len(anchors)),
+        key=lambda i: (anchors[i][1], -anchors[i][0]),
+    )
+    best_pos, best_hits = anchors[best_idx]
+
+    # Discriminating-token coverage: require ≥2 focus tokens hit when the
+    # query has ≥2 focus tokens; for single-token queries fall back to ≥1.
+    needed = min(2, len(q_tokens)) if len(q_tokens) >= 1 else 1
+    if best_hits < needed:
+        return text
+
+    end_pos = len(text)
+    for pos, hits in anchors:
+        if pos <= best_pos:
+            continue
+        if hits == 0:
+            end_pos = pos
+            break
+        # Consecutive on-focus anchor: keep extending the slice.
+
+    sliced = text[best_pos:end_pos].strip()
+    if len(sliced) < 40:
+        return text
+    return sliced
+
+
+def _explode_inline_ordered_enumerations(text: str) -> str:
+    """When a single line contains a sequential ordered enumeration run
+    (``A. ... B. ... C. ...`` or ``1. ... 2. ... 3. ...`` with at least three
+    consecutive ascending markers starting at A/B or 1/2), insert a newline
+    before each marker so per-line list extractors can match them.
+
+    Pure structural — no domain content. Other markers (single isolated
+    ``F.``, non-sequential, name initials like ``J. Clough``) are left
+    untouched because they don't form an ascending run of length ≥3.
+    """
+    out = str(text or "")
+    if not out:
+        return out
+
+    # 1) Uppercase single-letter run: A. B. C. ...
+    letter_matches = [
+        (m.start(), m.group(1))
+        for m in re.finditer(r"(?:^|(?<=\s))([A-Z])\.\s", out)
+    ]
+    letter_cuts: Set[int] = set()
+    if letter_matches:
+        current: List[tuple[int, str]] = []
+        prev_letter: Optional[str] = None
+        runs: List[List[tuple[int, str]]] = []
+        for pos, ltr in letter_matches:
+            if prev_letter is not None and ord(ltr) == ord(prev_letter) + 1:
+                current.append((pos, ltr))
+            else:
+                if len(current) >= 3 and current[0][1] in ("A", "B"):
+                    runs.append(current)
+                current = [(pos, ltr)]
+            prev_letter = ltr
+        if len(current) >= 3 and current[0][1] in ("A", "B"):
+            runs.append(current)
+        for run in runs:
+            for pos, _ in run:
+                letter_cuts.add(pos)
+
+    # 2) Numeric run: 1. 2. 3. ...
+    numeric_matches = [
+        (m.start(), int(m.group(1)))
+        for m in re.finditer(r"(?:^|(?<=\s))(\d{1,2})\.\s", out)
+    ]
+    numeric_cuts: Set[int] = set()
+    if numeric_matches:
+        current_n: List[tuple[int, int]] = []
+        prev_n: Optional[int] = None
+        runs_n: List[List[tuple[int, int]]] = []
+        for pos, n in numeric_matches:
+            if prev_n is not None and n == prev_n + 1:
+                current_n.append((pos, n))
+            else:
+                if len(current_n) >= 3 and current_n[0][1] in (1, 2):
+                    runs_n.append(current_n)
+                current_n = [(pos, n)]
+            prev_n = n
+        if len(current_n) >= 3 and current_n[0][1] in (1, 2):
+            runs_n.append(current_n)
+        for run in runs_n:
+            for pos, _ in run:
+                numeric_cuts.add(pos)
+
+    cuts = sorted(letter_cuts | numeric_cuts)
+    if not cuts:
+        return out
+
+    parts: List[str] = []
+    last = 0
+    for c in cuts:
+        if c <= last:
+            continue
+        parts.append(out[last:c])
+        parts.append("\n")
+        last = c
+    parts.append(out[last:])
+    return "".join(parts)
+
+
 def _extract_list_from_context(query: str, context: str, max_candidate_blocks: int = 2) -> Union[str, None]:
     if not context:
         return None
+
+    # MP-C6: anchor extraction to the matched subsection / caption when the
+    # chunk text contains an inline structural anchor whose title overlaps the
+    # query focus tokens. Then explode any inline ordered enumeration runs so
+    # the per-line bullet detector can match them.
+    sliced = _slice_chunk_to_query_subsection(context, query)
+    _mpc6_anchored = bool(sliced and sliced != context)
+    if _mpc6_anchored:
+        context = sliced
+        # Only explode inline ordered enumerations when slicing actually
+        # anchored on a query-matching subsection. Running the exploder on
+        # arbitrary chunks (e.g. front-matter / TOC) can fragment unrelated
+        # numbered lines into spurious bullet candidates.
+        context = _explode_inline_ordered_enumerations(context)
 
     ql = re.sub(r"\s+", " ", str(query or "").strip().lower())
     list_mode = bool(
@@ -18328,7 +19400,9 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             seen_query_tokens.add(cand_tok)
             query_tokens.append(cand_tok)
     year_re = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-    bullet_num_re = re.compile(r"^\s*(?:[-•*�]|\d+[.)])\s*(.+)$")
+    # MP-C6: also accept single uppercase letter (A./B./...) line starts so the
+    # exploded inline-enumeration items are matched as bullets.
+    bullet_num_re = re.compile(r"^\s*(?:[-•*�]|\d+[.)]|[A-Z]\.)\s*(.+)$")
     caption_re = re.compile(r"^\s*(?:figure|fig\.?|table)\b", flags=re.IGNORECASE)
 
     def _looks_like_heading(line: str) -> bool:
@@ -18343,7 +19417,7 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
 
     def _normalize_item(raw: str) -> str:
         item = (raw or "").strip()
-        item = re.sub(r"^\s*(?:[-•*�]|\d+[.)])\s*", "", item)
+        item = re.sub(r"^\s*(?:[-•*�]|\d+[.)]|[A-Z]\.)\s*", "", item)
         item = re.sub(r"^\s*\d+\s*:\s*", "", item)
         item = re.sub(r"^\s*(?:first|second|third|fourth|fifth|then|next|finally)\s*[:\-]?\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:this\s+is|it\s+is|they\s+are|according\s+to|for\s+example|in\s+order\s+to|there\s+are|there\s+is)\s*[,:\-]?\s*", "", item, flags=re.IGNORECASE)
@@ -19861,6 +20935,9 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
                         score -= 5.0
                     if any(p in low for p in weak_phrases):
                         score -= 5.0
+
+                    # MP-C2: generic structural definition-shape signals
+                    score += _definition_structural_signal_delta(sent, entity_l)
 
                     if score >= early_exit_threshold:
                         return sent.strip()

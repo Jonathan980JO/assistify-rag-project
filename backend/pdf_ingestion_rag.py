@@ -812,6 +812,36 @@ class VectorStore:
                 # keep similarity separately; use rerank_score as semantic refinement
                 candidates[i]["score"] = float(score)
 
+        # --- MP-C0: STRICT SEMANTIC FILTER ---
+        # Drop chunks whose semantic relevance is non-positive. After reranking
+        # the cross-encoder logit is the most reliable semantic signal; before
+        # rerank we fall back to cosine similarity. Purely structural — no
+        # query-specific or domain-specific logic. Safety net: if the filter
+        # would empty the pool, keep the original candidates so downstream
+        # stages still get something to work with.
+        _semantic_threshold = 0.0
+        if candidates:
+            _pre_semantic_count = len(candidates)
+            def _semantic_signal(c: Dict[str, Any]) -> float:
+                if c.get("rerank_score") is not None:
+                    return float(c.get("rerank_score") or 0.0)
+                if c.get("reranker_score") is not None:
+                    return float(c.get("reranker_score") or 0.0)
+                return float(c.get("similarity", 0.0) or 0.0)
+            _semantic_kept = [c for c in candidates if _semantic_signal(c) > _semantic_threshold]
+            if _semantic_kept:
+                _dropped_semantic = _pre_semantic_count - len(_semantic_kept)
+                logger.info(
+                    "[RAG SEMANTIC FILTER] threshold=%.2f before=%d after=%d dropped=%d",
+                    _semantic_threshold, _pre_semantic_count, len(_semantic_kept), _dropped_semantic,
+                )
+                candidates = _semantic_kept
+            else:
+                logger.info(
+                    "[RAG SEMANTIC FILTER] threshold=%.2f before=%d after=0 dropped=0 reason=empty_after_filter_keep_original",
+                    _semantic_threshold, _pre_semantic_count,
+                )
+
         before_filter_candidates = list(candidates)
         dropped_chunks: List[Dict[str, Any]] = []
 
