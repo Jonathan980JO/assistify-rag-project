@@ -820,6 +820,116 @@ def _evidence_has_explicit_explanation(item_name: str, evidence_text: str) -> bo
     return False
 
 
+# ---- controlled-explanation mode (follow-up only) -----------------------
+# Suffix appended to LLM-inferred explanations so the user can tell the
+# explanation was reconstructed from context rather than quoted from the
+# document verbatim.
+_FOLLOWUP_INFERRED_SUFFIX = (
+    "(The document mentions this concept but does not provide a detailed explanation.)"
+)
+
+
+def _followup_items_anchored(
+    items: list[str], excerpts_block: str, last_a: str
+) -> list[str]:
+    """Return the subset of *items* whose name appears (whole-word) in the
+    retrieved chunks (``excerpts_block``) or in the previous answer
+    (which itself was generated from those chunks). Used as the safety
+    gate for the controlled-explanation mode: an item that never appears
+    in the document context is NEVER explained by the LLM.
+    """
+    if not items:
+        return []
+    haystack = ((excerpts_block or "") + "\n" + (last_a or "")).lower()
+    if not haystack.strip():
+        return []
+    anchored: list[str] = []
+    for it in items:
+        head = (it.split(":", 1)[0]).strip().lower()
+        if not head:
+            continue
+        if _re_followup.search(
+            r"\b" + _re_followup.escape(head) + r"\b", haystack
+        ):
+            anchored.append(it)
+    return anchored
+
+
+async def _followup_controlled_explanation(
+    items: list[str],
+    last_q: str,
+    last_a: str,
+    excerpts_block: str,
+    user_text: str,
+) -> str:
+    """Build a strict, contextual explanation prompt and call the LLM.
+
+    This is NOT open-domain QA. The prompt forces the model to:
+      * stay consistent with the document's domain / topic,
+      * give one short explanation per provided item,
+      * not invent unrelated facts, names, dates, or numbers.
+
+    Returns the cleaned LLM text, or an empty string on failure.
+    Caller is responsible for appending the inferred-suffix disclaimer.
+    """
+    if not items:
+        return ""
+    items_block = "\n".join(f"- {it}" for it in items)
+    if len(items) == 1:
+        shape_rule = (
+            "Output EXACTLY one short paragraph (1-3 sentences) explaining the item. "
+            "Do NOT prefix with the item name and a colon; just write the explanation."
+        )
+    else:
+        shape_rule = (
+            "Output one line per item using EXACTLY this format:\n"
+            "ItemName: brief explanation (1-2 sentences).\n"
+            "Keep the original order. Do not skip, merge, or rename items."
+        )
+    instruction = (
+        "The user is asking a follow-up clarification on the PREVIOUS ANSWER. "
+        "The document mentions the following item(s) but does not give a "
+        "detailed definition for them:\n\n"
+        f"{items_block}\n\n"
+        f"{shape_rule}\n\n"
+        "Hard rules:\n"
+        "- Stay strictly consistent with the topic / domain established by "
+        "the PREVIOUS USER QUESTION, PREVIOUS ANSWER, and SOURCE EXCERPTS.\n"
+        "- Explain what each item commonly means within that topic / domain.\n"
+        "- Do NOT introduce unrelated facts, people, dates, statistics, or "
+        "examples that are not implied by the provided context.\n"
+        "- Do NOT contradict anything in the PREVIOUS ANSWER or SOURCE EXCERPTS.\n"
+        "- Do NOT add disclaimers, meta-commentary, or phrases like 'Not found', "
+        "'Based on the document', 'According to', or 'as an AI'."
+    )
+    system_prompt = (
+        "You are a contextual clarification assistant. " + instruction
+    )
+    context_text = (
+        f"PREVIOUS USER QUESTION: {last_q}\n\n"
+        f"PREVIOUS ANSWER:\n{last_a}\n\n"
+        f"SOURCE EXCERPTS:\n{excerpts_block if excerpts_block else '(none)'}"
+    )
+    try:
+        out = await call_llm_with_context(
+            (user_text or "").strip(), context_text, system_prompt
+        )
+    except Exception:
+        logger.exception("[FOLLOWUP EXPLANATION MODE] LLM call failed")
+        return ""
+    out = (out or "").strip()
+    # Strip any stray not-found sentinel that the model may emit.
+    _nf = RAG_NO_MATCH_RESPONSE.strip()
+    _nf_re = _re_followup.compile(
+        r"\s*" + _re_followup.escape(_nf).replace(r"\.", r"\.?") + r"\s*",
+        _re_followup.IGNORECASE,
+    )
+    out = _nf_re.sub(" ", out).strip()
+    if not out or out.lower() == _nf.lower():
+        return ""
+    return out
+
+
 async def _handle_followup_query(text: str, connection_id: str):
     """Answer a follow-up clarification using ONLY the previous answer +
     a small window of the previously retrieved chunks. No new retrieval
@@ -1277,16 +1387,33 @@ async def _handle_followup_query(text: str, connection_id: str):
                     ai_text = retry_text
 
         # Final per-item enforcement: if neither attempt produced per-item
-        # coverage at or above the threshold, render a deterministic per-
-        # item answer using only the extracted item names. This honours the
-        # required output shape without inventing source content.
+        # coverage at or above the threshold, try the controlled
+        # explanation mode (LLM, anchored to the document's domain) for
+        # the items that actually appear in the retrieved chunks before
+        # falling back to a deterministic placeholder.
         final_coverage = _per_item_coverage(ai_text, extracted_items)
         if final_coverage < needed:
             logger.info(
-                "[FOLLOWUP LIST DETERMINISTIC] final_coverage=%d/%d -> per-item placeholder render",
+                "[FOLLOWUP LIST DETERMINISTIC] final_coverage=%d/%d -> attempt controlled explanation",
                 final_coverage, len(extracted_items),
             )
-            if targeted_item is not None and len(extracted_items) == 1:
+            _anchored = _followup_items_anchored(
+                extracted_items, excerpts_block, last_a
+            )
+            _ce = ""
+            if _anchored:
+                logger.info("[FOLLOWUP EXPLANATION MODE TRIGGERED]")
+                for _it in _anchored:
+                    logger.info("[FOLLOWUP EXPLANATION ITEM = %s]", _it)
+                _ce = await _followup_controlled_explanation(
+                    _anchored, last_q, last_a, excerpts_block, text
+                )
+            if _ce:
+                logger.info(
+                    "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                )
+                ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
+            elif targeted_item is not None and len(extracted_items) == 1:
                 _itm = extracted_items[0]
                 ai_text = (
                     f"{_itm} is listed in the document as one of the items, "
@@ -1340,16 +1467,33 @@ async def _handle_followup_query(text: str, connection_id: str):
         ratio = overlap / max(1, len(content_tokens))
         if ratio < _FOLLOWUP_GROUND_RATIO_MIN:
             # If the previous answer was a list and we have explicit items,
-            # honour the per-item shape with a deterministic placeholder for
-            # each item rather than collapsing to a generic not-found. This
-            # is grounded by construction (only item names are emitted) and
-            # gives the user the requested format.
+            # honour the per-item shape. First try a controlled explanation
+            # (LLM, anchored to the document's domain) for the items that
+            # actually appear in the retrieved chunks; only fall back to a
+            # deterministic placeholder when no item is anchored or the LLM
+            # produces nothing usable.
             if prev_is_list and extracted_items:
                 logger.info(
-                    "[FOLLOWUP LIST FALLBACK] grounding_ratio=%.2f -> deterministic per-item rendering of %d items",
+                    "[FOLLOWUP LIST FALLBACK] grounding_ratio=%.2f -> attempt controlled explanation for %d items",
                     ratio, len(extracted_items),
                 )
-                if targeted_item is not None and len(extracted_items) == 1:
+                _anchored = _followup_items_anchored(
+                    extracted_items, excerpts_block, last_a
+                )
+                _ce = ""
+                if _anchored:
+                    logger.info("[FOLLOWUP EXPLANATION MODE TRIGGERED]")
+                    for _it in _anchored:
+                        logger.info("[FOLLOWUP EXPLANATION ITEM = %s]", _it)
+                    _ce = await _followup_controlled_explanation(
+                        _anchored, last_q, last_a, excerpts_block, text
+                    )
+                if _ce:
+                    logger.info(
+                        "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                    )
+                    ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
+                elif targeted_item is not None and len(extracted_items) == 1:
                     _itm = extracted_items[0]
                     ai_text = (
                         f"{_itm} is listed in the document as one of the items, "
@@ -1372,8 +1516,11 @@ async def _handle_followup_query(text: str, connection_id: str):
     # --- weak-evidence anti-inference guard (targeted items only) ----------
     # Even after grounding passes, the LLM may over-explain an item from
     # evidence that merely *mentions* it (incidental co-occurrence) rather
-    # than truly *explaining* it.  Downgrade when the evidence lacks a real
-    # explanatory sentence about the targeted item.
+    # than truly *explaining* it.  When the evidence lacks a real
+    # explanatory sentence about the targeted item we no longer collapse
+    # straight to a placeholder; instead we enter a controlled
+    # explanation mode that gives the user a useful, contextual answer
+    # while clearly disclosing it was inferred from context.
     if (
         targeted_item is not None
         and prev_is_list
@@ -1381,14 +1528,38 @@ async def _handle_followup_query(text: str, connection_id: str):
         and not _evidence_has_explicit_explanation(targeted_item, excerpts_block)
     ):
         _itm = extracted_items[0]
-        logger.info(
-            "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
-            _itm,
-        )
-        ai_text = (
-            f"{_itm} is mentioned in the document, "
-            "but the available text does not provide a further explanation for it."
-        )
+        _anchored = _followup_items_anchored([_itm], excerpts_block, last_a)
+        if _anchored:
+            logger.info("[FOLLOWUP EXPLANATION MODE TRIGGERED]")
+            logger.info(
+                "[FOLLOWUP EXPLANATION ITEM = %s]", _anchored[0]
+            )
+            _ce = await _followup_controlled_explanation(
+                _anchored, last_q, last_a, excerpts_block, text
+            )
+            if _ce:
+                logger.info(
+                    "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                )
+                ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
+            else:
+                logger.info(
+                    "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
+                    _itm,
+                )
+                ai_text = (
+                    f"{_itm} is mentioned in the document, "
+                    "but the available text does not provide a further explanation for it."
+                )
+        else:
+            logger.info(
+                "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
+                _itm,
+            )
+            ai_text = (
+                f"{_itm} is mentioned in the document, "
+                "but the available text does not provide a further explanation for it."
+            )
 
     # Update state so successive "explain more" works on the latest explanation,
     # but PRESERVE the original chunks (never broaden the grounding window).
