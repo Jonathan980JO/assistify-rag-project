@@ -444,8 +444,969 @@ def clear_all_conversation_history():
     count = len(conversation_history)
     conversation_history.clear()
     conversation_timestamps.clear()
+    try:
+        last_answer_state.clear()
+    except Exception:
+        pass
     if count:
         logger.info(f"Cleared {count} conversation(s) after KB reindex")
+
+
+# ========== FOLLOW-UP / EXPLANATION MODE ==========
+# Per-connection cache of the most recently grounded answer so that
+# follow-up clarifications ("what do you mean?", "explain more",
+# "simplify that") can be answered locally WITHOUT re-running heavy
+# retrieval. The system stays strictly grounded in the previously
+# retrieved chunks + the previous answer text — no open-domain leakage.
+last_answer_state: dict = {}
+_FOLLOWUP_STATE_TTL = 1800  # seconds (30 min)
+_FOLLOWUP_MAX_QUERY_LEN = 140
+_FOLLOWUP_CHUNK_CHAR_BUDGET = 1800
+_FOLLOWUP_KEEP_TOP_K = 3
+# Loose grounding ratio: paraphrased explanations legitimately use connector
+# words and synonyms, so we only require a modest overlap with the saved
+# prior-answer + saved chunks. Open-domain hallucinations still fall well
+# below this floor in practice.
+_FOLLOWUP_GROUND_RATIO_MIN = 0.20
+
+import re as _re_followup
+# Generic, domain-agnostic intent patterns. They describe a request FOR
+# clarification of a prior answer, not document content.
+#
+# Two tiers:
+#  * STRONG: explicit clarification phrases that are unmistakable
+#    follow-ups regardless of conversation history (e.g. "what do you
+#    mean", "explain more", "rephrase that"). Always route as follow-up.
+#  * CONTEXTUAL: clarification-shaped phrases that need an OBJECT and
+#    only make sense as a follow-up when there IS a recent grounded
+#    answer to clarify (e.g. "explain Money", "what does X mean",
+#    "what about that", "tell me more about Y"). Routed as follow-up
+#    ONLY when prior state exists for the connection.
+#  * SHORT-CONTEXTUAL FALLBACK: a very short utterance (≤ 7 words) that
+#    does NOT look like a brand-new question is treated as a follow-up
+#    ONLY when prior state exists. Brand-new question shapes
+#    ("what is X", "how", "why", "list ...", "define ...") are excluded
+#    so a short standalone question still goes through full RAG.
+_FOLLOWUP_PATTERNS = [
+    _re_followup.compile(p, _re_followup.IGNORECASE) for p in [
+        r"^\s*what\s+do\s+you\s+mean\b",
+        r"^\s*what\s+are\s+you\s+saying\b",
+        r"^\s*what\s+does\s+that\s+mean\b",
+        r"^\s*explain\s+(more|further|that|it|again|please|this)\b",
+        r"^\s*explain\s*[?.!]?\s*$",
+        r"^\s*(can|could)\s+you\s+explain\b",
+        r"^\s*tell\s+me\s+more\b",
+        r"^\s*say\s+more\b",
+        r"^\s*go\s+on\s*[?.!]?\s*$",
+        r"^\s*continue\s*[?.!]?\s*$",
+        r"^\s*more\s+(detail|details|info|information)\b",
+        r"^\s*(give|show)\s+me\s+more\b",
+        r"^\s*elaborate\b",
+        r"^\s*clarify\b",
+        r"^\s*simplify\b",
+        r"^\s*make\s+it\s+(simpler|easier|clearer|shorter)\b",
+        r"^\s*in\s+simpler\s+(terms|words)\b",
+        r"^\s*rephrase\b",
+        r"^\s*reword\b",
+        r"^\s*break\s+(it|this|that)\s+down\b",
+        r"^\s*(can|could)\s+you\s+(simplify|clarify|rephrase|elaborate|explain)\b",
+        r"^\s*i\s+don'?t\s+(get|understand)\s*(it|that|this)?\s*[?.!]?\s*$",
+    ]
+]
+
+# Contextual follow-up patterns. Match a clarification verb/phrase that
+# carries an OBJECT referring back to the prior answer. They are only
+# applied when the connection has a recent saved answer state.
+_FOLLOWUP_CONTEXT_PATTERNS = [
+    _re_followup.compile(p, _re_followup.IGNORECASE) for p in [
+        # "explain Money", "explain what does Money means in this process",
+        # "explain the second one", etc. (any "explain ..." form)
+        r"^\s*explain\b",
+        # "what does Money mean", "what does that mean", "what does X means"
+        r"^\s*what\s+does\s+.+\bmean(s|ing)?\b",
+        # "what about Money", "what about that"
+        r"^\s*what\s+about\s+\S+",
+        # "how about Money"
+        r"^\s*how\s+about\s+\S+",
+        # "tell me about Money", "tell me more about Money"
+        r"^\s*tell\s+me\s+(more\s+)?about\s+\S+",
+        # "simplify that", "rephrase that", "clarify that", "elaborate that"
+        r"^\s*(simplify|rephrase|clarify|elaborate|reword)\s+\S+",
+        # "and Money?", "and the second?"  — short anaphoric pivot
+        r"^\s*and\s+\S+\s*\??\s*$",
+    ]
+]
+
+# Brand-new question shapes — used to EXCLUDE from the short-utterance
+# contextual fallback so a standalone short question still gets full
+# retrieval. Domain-agnostic.
+_FOLLOWUP_NEW_QUESTION_PATTERNS = [
+    _re_followup.compile(p, _re_followup.IGNORECASE) for p in [
+        r"^\s*(what|which)\s+(is|are|was|were)\b",
+        r"^\s*(how|why|when|where|who)\b",
+        r"^\s*(list|name|enumerate)\b",
+        r"^\s*(define|definition\s+of)\b",
+        r"^\s*give\s+me\s+(a\s+)?(list|definition|example)\b",
+    ]
+]
+
+_FOLLOWUP_SHORT_WORD_LIMIT = 7
+
+
+def _has_recent_followup_state(connection_id) -> bool:
+    """True iff there is a non-expired saved answer state for this conn."""
+    if not connection_id:
+        return False
+    state = last_answer_state.get(connection_id)
+    if not state:
+        return False
+    try:
+        return (time.time() - float(state.get("ts", 0))) <= _FOLLOWUP_STATE_TTL
+    except Exception:
+        return False
+
+
+# ---- Conversational definition normalization ----
+# Rewrites natural conversational definition re-asks into the canonical
+# "what is X?" form so the strong definition pipeline picks them up
+# instead of the weak generic prose path. Strictly generic — no domain
+# words, no entity allowlists.
+_CONV_LEAD_STRIP = _re_followup.compile(
+    r"^\s*(?:"
+    r"ok(?:ay)?(?:\s+so)?|"
+    r"so|well|now|actually|alright|right|hmm|hey|"
+    r"i\s+mean|i\s+wanted\s+to\s+ask|"
+    r"can\s+you\s+(?:please\s+)?tell\s+me|please\s+tell\s+me|tell\s+me|"
+    r"could\s+you\s+(?:please\s+)?tell\s+me|"
+    r"please|just"
+    r")\b[\s,]*",
+    _re_followup.IGNORECASE,
+)
+_CONV_TRAIL_STRIP = _re_followup.compile(
+    r"\s+(?:exactly|really|then|though|now|please)\s*([?.!]*)\s*$",
+    _re_followup.IGNORECASE,
+)
+# "what about (the )?(definition|meaning|concept|idea) of X"
+# "what is the (definition|meaning|...) of X"
+# "(definition|meaning|...) of X"
+# "tell me (about )?the (definition|meaning) of X"
+_CONV_DEF_RE_ASK_PATTERNS = [
+    _re_followup.compile(p, _re_followup.IGNORECASE) for p in [
+        r"^\s*what\s+about\s+(?:the\s+)?(?:definition|meaning|concept|idea|notion|sense)\s+of\s+(.+?)\s*\??\s*$",
+        r"^\s*what\s+(?:is|was|'?s)\s+(?:the\s+)?(?:definition|meaning|concept|idea|notion|sense)\s+of\s+(.+?)\s*\??\s*$",
+        r"^\s*(?:the\s+)?(?:definition|meaning|concept|idea|notion|sense)\s+of\s+(.+?)\s*\??\s*$",
+        r"^\s*(?:can|could)\s+you\s+(?:please\s+)?(?:define|explain)\s+(.+?)\s*\??\s*$",
+    ]
+]
+
+
+def _normalize_conversational_definition_query(text: str) -> str:
+    """Rewrite conversational definition re-asks into canonical
+    "what is X?" form. Returns the original text if no rewrite applies.
+    Generic; no domain words.
+    """
+    if not text:
+        return text
+    t = text.strip()
+    # Strip leading conversational fillers (possibly stacked).
+    prev = None
+    while prev != t:
+        prev = t
+        t = _CONV_LEAD_STRIP.sub("", t).strip()
+    # Strip trailing intensifiers ("exactly?", "really?", "then?")
+    m = _CONV_TRAIL_STRIP.search(t)
+    if m:
+        # Preserve the trailing punctuation
+        tail_punc = m.group(1) or ""
+        t = _CONV_TRAIL_STRIP.sub(tail_punc, t).strip()
+    if not t:
+        return text
+    # Apply rewrite patterns: extract entity tail and produce "what is X?"
+    for pat in _CONV_DEF_RE_ASK_PATTERNS:
+        m = pat.match(t)
+        if m:
+            ent = (m.group(1) or "").strip().strip(" \t\n\r\"'`.,;:!?-")
+            if len(ent) >= 2:
+                return f"what is {ent}?"
+    return t
+
+
+def _is_followup_query(text: str, connection_id=None) -> bool:
+    """Generic follow-up intent detector. Domain-agnostic.
+
+    Tiering:
+      1. STRONG patterns -> always follow-up (no context needed).
+      2. CONTEXTUAL patterns -> follow-up ONLY if a recent saved answer
+         state exists for ``connection_id``.
+      3. SHORT-utterance fallback (≤ _FOLLOWUP_SHORT_WORD_LIMIT words)
+         -> follow-up ONLY if prior state exists AND the utterance
+         does NOT look like a brand-new question.
+    Callers without a connection (e.g. plain helpers) may omit
+    ``connection_id`` to use only the strong tier.
+    """
+    t = (text or "").strip()
+    if not t or len(t) > _FOLLOWUP_MAX_QUERY_LEN:
+        return False
+    for pat in _FOLLOWUP_PATTERNS:
+        if pat.search(t):
+            return True
+    if not _has_recent_followup_state(connection_id):
+        return False
+    for pat in _FOLLOWUP_CONTEXT_PATTERNS:
+        if pat.search(t):
+            return True
+    if len(t.split()) <= _FOLLOWUP_SHORT_WORD_LIMIT:
+        for pat in _FOLLOWUP_NEW_QUESTION_PATTERNS:
+            if pat.search(t):
+                return False
+        return True
+    return False
+
+
+def _classify_followup_intent(text: str) -> str:
+    t = (text or "").lower()
+    if "simpl" in t or "easier" in t or "clearer" in t or "shorter" in t:
+        return "simplify"
+    if "rephrase" in t or "reword" in t or ("break" in t and "down" in t):
+        return "rephrase"
+    return "explain"
+
+
+def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
+    """Persist the most recent grounded answer for follow-up explanations.
+
+    Skips storage for empty answers and for the strict not-found response so
+    that follow-ups never explain a non-answer.
+    """
+    try:
+        if not connection_id:
+            return
+        ans = (answer or "").strip()
+        if not ans:
+            return
+        try:
+            if ans.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                return
+        except Exception:
+            pass
+        kept = []
+        for d in (doc_dicts or [])[:_FOLLOWUP_KEEP_TOP_K]:
+            if not isinstance(d, dict):
+                continue
+            txt = str(
+                d.get("text")
+                or d.get("page_content")
+                or d.get("content")
+                or ""
+            ).strip()
+            if not txt:
+                continue
+            src = d.get("source")
+            md = d.get("metadata")
+            if (not src) and isinstance(md, dict):
+                src = md.get("source") or md.get("doc_id") or md.get("file")
+            kept.append({"text": txt[:600], "source": src})
+        last_answer_state[connection_id] = {
+            "query": (query or "").strip(),
+            "answer": ans,
+            "chunks": kept,
+            "ts": time.time(),
+        }
+    except Exception:
+        logger.exception("[FOLLOWUP] failed to save last answer state")
+
+
+def _get_last_answer_state(connection_id):
+    state = last_answer_state.get(connection_id)
+    if not state:
+        return None
+    try:
+        if (time.time() - float(state.get("ts", 0))) > _FOLLOWUP_STATE_TTL:
+            last_answer_state.pop(connection_id, None)
+            return None
+    except Exception:
+        return None
+    return state
+
+
+# --------------- weak-evidence anti-inference guard helper ---------------
+# Compiled once; used by _evidence_has_explicit_explanation.
+_EXPLAIN_VERB_RE = _re_followup.compile(
+    r"\b(?:"
+    r"is|are|was|were|means?|refer(?:s|red|ring)?\s+to|"
+    r"defin(?:e[ds]?|ing)\b|involv(?:e[ds]?|ing)|"
+    r"represent(?:s|ed|ing)?|consist(?:s|ed|ing)?\s+of|"
+    r"denot(?:e[ds]?|ing)|signif(?:ies|ied|ying)|"
+    r"pertain(?:s|ed|ing)?\s+to|deal(?:s|t|ing)?\s+with|"
+    r"describ(?:e[ds]?|ing)|provid(?:e[ds]?|ing)|"
+    r"ensur(?:e[ds]?|ing)|focus(?:es|ed|ing)?\s+on|"
+    r"entail(?:s|ed|ing)?|cover(?:s|ed|ing)?|"
+    r"requir(?:e[ds]?|ing)|necessitat(?:e[ds]?|ing)"
+    r")\b"
+)
+_EVIDENCE_STOPWORDS = frozenset({
+    "this", "that", "these", "those", "with", "from", "into", "than",
+    "then", "have", "been", "being", "were", "they", "them", "their",
+    "there", "which", "what", "when", "where", "while", "about", "also",
+    "such", "some", "more", "most", "many", "much", "will", "would",
+    "could", "should", "does", "done", "other", "each", "every", "only",
+    "just", "very", "here", "well", "like", "same", "used", "make",
+    "made", "take", "give", "need", "know", "keep", "even", "still",
+    "back", "over", "under", "between", "work", "said", "says",
+    "listed", "items", "item", "list", "above", "below", "following",
+    "mentioned", "presents", "presented",
+})
+
+
+def _evidence_has_explicit_explanation(item_name: str, evidence_text: str) -> bool:
+    """Return True when *evidence_text* contains a sentence that genuinely
+    explains *item_name* — a definition, description, or substantive
+    predicate about the item — rather than a passing mention or list
+    membership.
+
+    Heuristic signals (generic, no domain vocabulary):
+      1. Item appears in a sentence with an explanatory verb within a
+         proximity window AND >= 3 substantive content words nearby.
+      2. Item appears in a window with >= 6 content words (high
+         informational density even without an explicit verb).
+
+    Bare-list sentences (>=3 bullet/dash/comma separators with low word
+    density) are skipped automatically.
+    """
+    if not item_name or not evidence_text:
+        return False
+    item_low = item_name.strip().lower()
+    if not item_low:
+        return False
+    ev_low = evidence_text.lower()
+    item_re = _re_followup.compile(r"\b" + _re_followup.escape(item_low) + r"\b")
+    if not item_re.search(ev_low):
+        return False
+
+    # Rough sentence splitting
+    sents = _re_followup.split(r"(?<=[.!?:;])\s+|\n+|---+", ev_low)
+
+    for sent in sents:
+        sent = sent.strip()
+        if len(sent) < 20 or not item_re.search(sent):
+            continue
+        # Skip bare-list sentences (many items separated by delimiters)
+        seps = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", sent))
+        words = _re_followup.findall(r"[a-z]{3,}", sent)
+        if seps >= 3 and len(words) < seps * 5:
+            continue
+
+        for m in item_re.finditer(sent):
+            ws = max(0, m.start() - 40)
+            we = min(len(sent), m.end() + 120)
+            window = sent[ws:we]
+
+            has_verb = bool(_EXPLAIN_VERB_RE.search(window))
+            # Count substantive content words (4+ chars, not stopwords,
+            # not the item itself)
+            win_words = _re_followup.findall(r"[a-z]{4,}", window)
+            content = [
+                w for w in win_words
+                if w not in _EVIDENCE_STOPWORDS
+                and w != item_low
+                and not w.startswith(item_low[:min(4, len(item_low))])
+            ]
+            n = len(content)
+
+            if has_verb and n >= 3:
+                return True
+            if n >= 6:
+                return True
+    return False
+
+
+async def _handle_followup_query(text: str, connection_id: str):
+    """Answer a follow-up clarification using ONLY the previous answer +
+    a small window of the previously retrieved chunks. No new retrieval
+    is performed in the primary path, keeping latency well below a normal
+    query. Returns (answer_text, doc_dicts_list)."""
+    state = _get_last_answer_state(connection_id)
+    if not state:
+        logger.info("[FOLLOWUP] no prior state for connection_id=%s -> not_found", connection_id)
+        return (RAG_NO_MATCH_RESPONSE, [])
+
+    intent = _classify_followup_intent(text)
+    last_q = state.get("query", "") or ""
+    last_a = state.get("answer", "") or ""
+    last_chunks = state.get("chunks", []) or []
+
+    excerpt_parts = []
+    total_chars = 0
+    for c in last_chunks[:_FOLLOWUP_KEEP_TOP_K]:
+        ct = (c.get("text") or "").strip()
+        if not ct:
+            continue
+        remaining = _FOLLOWUP_CHUNK_CHAR_BUDGET - total_chars
+        if remaining <= 0:
+            break
+        snippet = ct[:remaining]
+        excerpt_parts.append(snippet)
+        total_chars += len(snippet)
+    excerpts_block = "\n\n---\n\n".join(excerpt_parts)
+
+    # --- detect whether the previous answer was a list ---
+    list_lines = [
+        ln.strip() for ln in last_a.splitlines()
+        if _re_followup.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", ln)
+    ]
+    prev_is_list = len(list_lines) >= 2
+
+    # --- extract explicit list items for structured prompting ---
+    extracted_items: list[str] = []
+    if prev_is_list:
+        for ln in list_lines:
+            # Strip bullet/number prefix
+            item = _re_followup.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", ln).strip()
+            if item:
+                extracted_items.append(item)
+    # Fallback A: single-line bullet/numbered list rendered without newlines,
+    # e.g. "- People - Money - Machines - Materials - Methods - Markets" or
+    # "1) Foo 2) Bar 3) Baz". The earlier per-line scan misses these because
+    # there is only one physical line. Split on inline bullet/number markers.
+    if not extracted_items and not prev_is_list:
+        bullet_parts_raw = _re_followup.split(
+            r"(?:^|\s)(?:[-*\u2022]|\d+[.)])\s+", last_a
+        )
+        bullet_parts = [p.strip().rstrip(".") for p in bullet_parts_raw if p and p.strip()]
+        if len(bullet_parts) >= 3 and all(len(p) <= 60 for p in bullet_parts):
+            extracted_items = bullet_parts
+            prev_is_list = True
+    # Fallback B: try comma/semicolon separated single-line list
+    if not extracted_items and not prev_is_list:
+        # Check if last_a is essentially "X, Y, Z, ..." pattern (≥3 items)
+        comma_parts = [p.strip().rstrip(".") for p in _re_followup.split(r"[,;]", last_a) if p.strip()]
+        # Heuristic: each part is short (≤60 chars) and there are ≥3 → treat as inline list
+        if len(comma_parts) >= 3 and all(len(p) <= 60 for p in comma_parts):
+            # Remove intro prefix from first part (e.g. "The six Ms are Men")
+            first = comma_parts[0]
+            # Strip common intro phrases: "The X are Y" → "Y"
+            intro_m = _re_followup.search(r"\b(?:are|include|includes|consist of|consists of|namely)\s+", first, _re_followup.IGNORECASE)
+            if intro_m:
+                first = first[intro_m.end():].strip()
+            # Also strip "and" prefix from last item
+            if comma_parts:
+                last_item = comma_parts[-1]
+                last_item = _re_followup.sub(r"^\s*and\s+", "", last_item, flags=_re_followup.IGNORECASE).strip()
+                comma_parts[-1] = last_item
+            comma_parts[0] = first
+            extracted_items = [p for p in comma_parts if p]
+            if len(extracted_items) >= 3:
+                prev_is_list = True
+
+    # --- single-item targeting -------------------------------------
+    # If the user's follow-up query mentions exactly ONE of the items
+    # we extracted from the previous answer, restrict the rest of the
+    # follow-up flow to just that item. Matching is purely against the
+    # previously extracted list items (no hardcoded vocabulary).
+    targeted_item: str | None = None
+    if prev_is_list and extracted_items:
+        try:
+            _q_low = (text or "").lower()
+            _q_tokens = set(_re_followup.findall(r"[a-z0-9]+", _q_low))
+            _matches: list[str] = []
+            for _it in extracted_items:
+                _head = (_it.split(":", 1)[0]).strip()
+                if not _head:
+                    continue
+                _head_low = _head.lower()
+                # Whole-phrase containment for multi-word item names.
+                if " " in _head_low:
+                    if _re_followup.search(
+                        r"\b" + _re_followup.escape(_head_low) + r"\b", _q_low
+                    ):
+                        _matches.append(_it)
+                    continue
+                # Single-word item: require a whole-word token match so
+                # "machines" does not also match inside "machinery".
+                if _head_low in _q_tokens:
+                    _matches.append(_it)
+            # Deduplicate while preserving order.
+            _seen = set()
+            _matches = [m for m in _matches if not (m in _seen or _seen.add(m))]
+            if len(_matches) == 1:
+                targeted_item = _matches[0]
+                logger.info(
+                    "[FOLLOWUP ITEM TARGET] item=%r query=%r",
+                    targeted_item, (text or "")[:120],
+                )
+            elif len(_matches) > 1:
+                logger.info(
+                    "[FOLLOWUP ITEM TARGET] multiple matches=%d -> full-list path",
+                    len(_matches),
+                )
+        except Exception:
+            logger.exception("[FOLLOWUP ITEM TARGET] detection failed")
+            targeted_item = None
+
+    # When a single item is targeted, narrow the working item list to
+    # just that item. Everything downstream (prompt template, retry,
+    # coverage check, deterministic placeholder) then operates on the
+    # single item only.
+    if targeted_item is not None:
+        extracted_items = [targeted_item]
+
+    # --- targeted micro-retrieval (item rescue) --------------------
+    # When ONE item is targeted from a previous list answer and the
+    # already-saved follow-up chunks do not mention that item, perform
+    # a tiny same-source retrieval to give the LLM a chance to produce
+    # a real grounded explanation instead of "(not described in the
+    # source)". Bounded: top_k=3, scoped to the source(s) of the saved
+    # chunks, no rerank, no cross-document leakage.
+    if targeted_item is not None and prev_is_list:
+        try:
+            _item_head = (targeted_item.split(":", 1)[0]).strip().lower()
+            _haystack_low = (excerpts_block or "").lower()
+            # Only spend the round-trip when the saved excerpts clearly
+            # don't carry an explanation for this specific item. If the
+            # item name already appears alongside other content in the
+            # saved excerpts, the existing prompt path is sufficient.
+            _item_in_excerpts = bool(_item_head) and bool(
+                _re_followup.search(r"\b" + _re_followup.escape(_item_head) + r"\b", _haystack_low)
+            )
+            # Threshold: even if the name is present, if the surrounding
+            # text is very short we still try a rescue.
+            _excerpts_len = len(_haystack_low)
+            _needs_rescue = (not _item_in_excerpts) or (_excerpts_len < 200)
+            if _needs_rescue and _item_head:
+                # Scope to the source(s) of the previously saved chunks.
+                _allowed_sources = {
+                    (c.get("source") or "").strip()
+                    for c in (last_chunks or [])
+                    if isinstance(c, dict) and c.get("source")
+                }
+                _rescue_query = f"{targeted_item} meaning {last_q}".strip()
+                _rescue_docs = []
+                try:
+                    _raw_rescue = live_rag.search(
+                        query=_rescue_query,
+                        top_k=3,
+                        return_dicts=True,
+                        enable_rerank=False,
+                    ) or []
+                except Exception:
+                    logger.exception("[FOLLOWUP MICRO-RETRIEVAL] search failed")
+                    _raw_rescue = []
+                _kept_rescue = []
+                for _d in _raw_rescue:
+                    if not isinstance(_d, dict):
+                        continue
+                    _txt = (
+                        _d.get("text")
+                        or _d.get("page_content")
+                        or _d.get("content")
+                        or ""
+                    ).strip()
+                    if not _txt:
+                        continue
+                    _src = _d.get("source")
+                    _md = _d.get("metadata")
+                    if (not _src) and isinstance(_md, dict):
+                        _src = _md.get("source") or _md.get("doc_id") or _md.get("file")
+                    _src = (_src or "").strip()
+                    # Same-document gate: only keep chunks from a source
+                    # that was already part of the prior answer's chunks.
+                    # If we have no allowed-source whitelist (older state
+                    # without source metadata), fall back to keeping a
+                    # single best-effort chunk to avoid a hard miss.
+                    if _allowed_sources and _src and _src not in _allowed_sources:
+                        continue
+                    # Require the targeted item name to actually appear in
+                    # the rescue chunk; otherwise it is not a real rescue.
+                    if not _re_followup.search(
+                        r"\b" + _re_followup.escape(_item_head) + r"\b", _txt.lower()
+                    ):
+                        continue
+                    _kept_rescue.append({"text": _txt[:600], "source": _src})
+                    if len(_kept_rescue) >= 2:
+                        break
+                if _kept_rescue:
+                    logger.info(
+                        "[FOLLOWUP MICRO-RETRIEVAL] item=%r rescued=%d sources=%r",
+                        targeted_item, len(_kept_rescue),
+                        sorted({c.get("source") for c in _kept_rescue if c.get("source")}),
+                    )
+                    # Append to excerpts_block (do not replace the prior
+                    # context; just enrich it). Keeps the LLM grounded on
+                    # everything we know.
+                    _rescue_text = "\n\n---\n\n".join(c["text"] for c in _kept_rescue)
+                    if excerpts_block:
+                        excerpts_block = excerpts_block + "\n\n---\n\n" + _rescue_text
+                    else:
+                        excerpts_block = _rescue_text
+                else:
+                    logger.info(
+                        "[FOLLOWUP MICRO-RETRIEVAL] item=%r no usable rescue chunks",
+                        targeted_item,
+                    )
+        except Exception:
+            logger.exception("[FOLLOWUP MICRO-RETRIEVAL] unexpected failure")
+
+    # --- build instruction by intent + prior-answer shape ---
+    if prev_is_list and extracted_items:
+        items_block = "\n".join(f"- {item}" for item in extracted_items)
+        if intent == "simplify":
+            instruction = (
+                "The PREVIOUS ANSWER contains the following list items:\n\n"
+                f"{items_block}\n\n"
+                "OUTPUT REQUIREMENT: For EACH item above, output EXACTLY one line in this format:\n"
+                "ItemName: one short plain-language clarification (max ~15 words)\n\n"
+                "Rules:\n"
+                "- Each line MUST start with the item name followed by a colon.\n"
+                "- Use simpler language than the original.\n"
+                "- Draw information ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "- Do NOT invent new items, names, numbers, or examples.\n"
+                "- Do NOT skip any item.\n"
+                "- If you do not explain each item individually, the answer is INCORRECT."
+            )
+        elif intent == "rephrase":
+            instruction = (
+                "The PREVIOUS ANSWER contains the following list items:\n\n"
+                f"{items_block}\n\n"
+                "OUTPUT REQUIREMENT: For EACH item above, output EXACTLY one line in this format:\n"
+                "ItemName: one short rephrased description using different wording\n\n"
+                "Rules:\n"
+                "- Each line MUST start with the item name followed by a colon.\n"
+                "- Use different wording than the original.\n"
+                "- Draw information ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "- Do NOT add new items or facts.\n"
+                "- Do NOT skip any item.\n"
+                "- If you do not explain each item individually, the answer is INCORRECT."
+            )
+        else:  # explain
+            instruction = (
+                "The PREVIOUS ANSWER contains the following list items:\n\n"
+                f"{items_block}\n\n"
+                "OUTPUT REQUIREMENT: For EACH item above, output EXACTLY one line in this format:\n"
+                "ItemName: brief explanation of what this item means (1-2 sentences max)\n\n"
+                "Rules:\n"
+                "- Each line MUST start with the item name followed by a colon.\n"
+                "- Explain what the item MEANS, do NOT just repeat it.\n"
+                "- Draw information ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "- Do NOT add any new item, name, number, or example not already present.\n"
+                "- Do NOT skip any item.\n"
+                "- Do NOT write a paragraph summary — explain EACH item separately.\n"
+                "- If you do not explain each item individually, the answer is INCORRECT."
+            )
+    elif prev_is_list:
+        # Fallback: we know it's a list but couldn't extract items cleanly.
+        # Still force per-item format.
+        if intent == "simplify":
+            instruction = (
+                "The PREVIOUS ANSWER is a list. For EACH item in the list, output one line:\n"
+                "ItemName: short plain-language clarification (max ~15 words)\n\n"
+                "Each line MUST start with the item name followed by a colon.\n"
+                "Draw ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "Do NOT invent new items. Do NOT skip any item.\n"
+                "If you do not explain each item individually, the answer is INCORRECT."
+            )
+        elif intent == "rephrase":
+            instruction = (
+                "The PREVIOUS ANSWER is a list. For EACH item in the list, output one line:\n"
+                "ItemName: rephrased description in different wording\n\n"
+                "Each line MUST start with the item name followed by a colon.\n"
+                "Draw ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "Do NOT add new items. Do NOT skip any item.\n"
+                "If you do not explain each item individually, the answer is INCORRECT."
+            )
+        else:  # explain
+            instruction = (
+                "The PREVIOUS ANSWER is a list. For EACH item in the list, output one line:\n"
+                "ItemName: brief explanation of what this item means (1-2 sentences)\n\n"
+                "Each line MUST start with the item name followed by a colon.\n"
+                "Explain what each item MEANS — do NOT just repeat it.\n"
+                "Draw ONLY from SOURCE EXCERPTS or PREVIOUS ANSWER.\n"
+                "Do NOT add new items. Do NOT skip any item.\n"
+                "If you do not explain each item individually, the answer is INCORRECT."
+            )
+    else:
+        if intent == "simplify":
+            instruction = (
+                "Restate the PREVIOUS ANSWER in 2-4 short sentences using simpler, plainer "
+                "language. Use ONLY information already present in the PREVIOUS ANSWER and "
+                "SOURCE EXCERPTS. Do NOT add any fact, name, number, definition, or example "
+                "that is not already there."
+            )
+        elif intent == "rephrase":
+            instruction = (
+                "Rephrase the PREVIOUS ANSWER in 2-4 sentences using clearer, different "
+                "wording. Use ONLY information already present in the PREVIOUS ANSWER and "
+                "SOURCE EXCERPTS. Do NOT introduce any new fact."
+            )
+        else:  # explain
+            instruction = (
+                "Briefly expand on the PREVIOUS ANSWER in 2-5 short sentences using ONLY the "
+                "SOURCE EXCERPTS and the previous answer itself. Stay close to their wording. "
+                "Do NOT introduce any new fact, name, number, definition, example, or concept "
+                "that is not already present in those texts."
+            )
+
+    # IMPORTANT: do NOT instruct the LLM to write "Not found in the document."
+    # itself — that often gets appended to otherwise-grounded explanations.
+    # The grounding gate below decides not_found instead.
+    system_prompt = (
+        "You are a strict grounded clarification assistant. " + instruction +
+        " Output ONLY the clarification text. Do NOT add disclaimers, meta-commentary, "
+        "or phrases like 'Not found' / 'Based on the document' / 'According to the previous "
+        "answer'. Do NOT invent content beyond the provided PREVIOUS ANSWER and SOURCE EXCERPTS."
+    )
+
+    context_text = (
+        f"PREVIOUS USER QUESTION: {last_q}\n\n"
+        f"PREVIOUS ANSWER:\n{last_a}\n\n"
+        f"SOURCE EXCERPTS:\n{excerpts_block if excerpts_block else '(none)'}"
+    )
+
+    try:
+        ai_text = await call_llm_with_context(text.strip(), context_text, system_prompt)
+    except Exception:
+        logger.exception("[FOLLOWUP] LLM call failed")
+        ai_text = ""
+
+    ai_text = (ai_text or "").strip()
+
+    # ---- LIST-SHAPED RETRY -------------------------------------------
+    # When the previous answer is a list AND we extracted item names,
+    # require that the LLM output contains per-item "ItemName: ..."
+    # lines for at least half the items. If not, retry once with an
+    # even stricter prompt that pre-fills the item names. Lightweight:
+    # no new retrieval — same saved chunks.
+    def _per_item_coverage(out: str, items: list[str]) -> int:
+        if not out or not items:
+            return 0
+        out_l = out.lower()
+        hits = 0
+        for it in items:
+            head = (it.split(":", 1)[0]).strip().lower()
+            if not head:
+                continue
+            # Look for "<item>:" on a line (allow leading bullets/whitespace)
+            if _re_followup.search(
+                r"(?m)^\s*(?:[-*\u2022]|\d+[.)])?\s*" + _re_followup.escape(head) + r"\s*:\s*\S",
+                out_l,
+            ):
+                hits += 1
+        return hits
+
+    if prev_is_list and extracted_items:
+        needed = min(len(extracted_items), max(2, (len(extracted_items) + 1) // 2))
+        coverage = _per_item_coverage(ai_text, extracted_items)
+        if coverage < needed:
+            logger.info(
+                "[FOLLOWUP LIST RETRY] coverage=%d/%d items=%d -> stricter retry",
+                coverage, len(extracted_items), len(extracted_items),
+            )
+            stricter_items_block = "\n".join(
+                f"{i+1}. {item}" for i, item in enumerate(extracted_items)
+            )
+            stricter_instruction = (
+                "Your previous response was REJECTED because it did not follow the "
+                "required format.\n\n"
+                "You MUST output one line per item below, in the SAME ORDER, using "
+                "EXACTLY this format (no preamble, no summary, no extra text):\n\n"
+                f"{stricter_items_block}\n\n"
+                "Replace each numbered line with:\n"
+                "ItemName: <one short grounded explanation, 1-2 sentences>\n\n"
+                "Hard rules:\n"
+                "- Output EXACTLY one line per item, in the order listed above.\n"
+                "- Each line MUST start with the item name followed by ': '.\n"
+                "- Use ONLY information from PREVIOUS ANSWER and SOURCE EXCERPTS.\n"
+                "- Do NOT add a header, intro, conclusion, or summary paragraph.\n"
+                "- Do NOT skip, merge, rename, or invent items.\n"
+                "- If a source does not explain an item, write: "
+                "'<ItemName>: (not described in the source)' for that one line."
+            )
+            stricter_system = (
+                "You are a strict grounded clarification assistant. "
+                + stricter_instruction
+                + " Output ONLY the per-item lines."
+            )
+            try:
+                retry_text = await call_llm_with_context(
+                    text.strip(), context_text, stricter_system
+                )
+            except Exception:
+                logger.exception("[FOLLOWUP LIST RETRY] LLM call failed")
+                retry_text = ""
+            retry_text = (retry_text or "").strip()
+            if retry_text:
+                retry_coverage = _per_item_coverage(retry_text, extracted_items)
+                # Quick local grounding check so we do not swap a grounded
+                # paragraph for a per-item retry that hallucinates content
+                # not present in the source. Same token math as the gate
+                # below; kept inline to keep the swap decision local.
+                def _local_ground_ratio(_t: str) -> float:
+                    _toks = _re_followup.findall(r"[a-zA-Z0-9]{4,}", (_t or "").lower())
+                    _content = [
+                        w for w in _toks if w not in {
+                            "this","that","these","those","with","from","into","than","then",
+                            "have","been","being","were","they","them","their","there","which",
+                            "what","when","where","while","about","also","such","some","more",
+                            "most","many","much","your","would","could","should","will","shall",
+                            "does","doing","done","answer","previous","above","below","thus",
+                            "because","however","therefore","based","means","meaning","refers",
+                            "include","includes","including","example","examples","simply",
+                            "essentially","namely","specifically","respectively","various",
+                            "different","important","things","thing","people","person","each",
+                            "every","another","other",
+                        }
+                    ]
+                    if not _content:
+                        return 1.0
+                    _corpus = (last_a + " " + excerpts_block).lower()
+                    _hit = sum(1 for w in _content if w in _corpus)
+                    return _hit / max(1, len(_content))
+                retry_ground = _local_ground_ratio(retry_text)
+                orig_ground = _local_ground_ratio(ai_text)
+                logger.info(
+                    "[FOLLOWUP LIST RETRY] retry_coverage=%d/%d retry_ground=%.2f orig_ground=%.2f",
+                    retry_coverage, len(extracted_items), retry_ground, orig_ground,
+                )
+                # Only swap to the retry when it (a) materially improves
+                # coverage AND (b) does not regress grounding below the
+                # acceptance threshold and not worse than the original.
+                if (
+                    (retry_coverage >= needed or retry_coverage > coverage)
+                    and retry_ground >= _FOLLOWUP_GROUND_RATIO_MIN
+                    and retry_ground >= orig_ground - 0.05
+                ):
+                    ai_text = retry_text
+
+        # Final per-item enforcement: if neither attempt produced per-item
+        # coverage at or above the threshold, render a deterministic per-
+        # item answer using only the extracted item names. This honours the
+        # required output shape without inventing source content.
+        final_coverage = _per_item_coverage(ai_text, extracted_items)
+        if final_coverage < needed:
+            logger.info(
+                "[FOLLOWUP LIST DETERMINISTIC] final_coverage=%d/%d -> per-item placeholder render",
+                final_coverage, len(extracted_items),
+            )
+            if targeted_item is not None and len(extracted_items) == 1:
+                _itm = extracted_items[0]
+                ai_text = (
+                    f"{_itm} is listed in the document as one of the items, "
+                    "but the available text does not provide a further explanation for it."
+                )
+            else:
+                ai_text = "\n".join(
+                    f"{item}: the document lists this item but does not explain it further"
+                    for item in extracted_items
+                )
+
+    # Strip a trailing not-found sentinel that the model sometimes appends
+    # despite the instruction. Done BEFORE the empty/not-found check so a
+    # genuinely good explanation isn't thrown away.
+    _nf = RAG_NO_MATCH_RESPONSE.strip()
+    _nf_re = _re_followup.compile(
+        r"\s*" + _re_followup.escape(_nf).replace(r"\.", r"\.?") + r"\s*$",
+        _re_followup.IGNORECASE,
+    )
+    cleaned_ai = _nf_re.sub("", ai_text).strip()
+    # Also handle a stray leading not-found.
+    cleaned_ai = _nf_re.sub("", cleaned_ai).strip()
+    if cleaned_ai and cleaned_ai.lower() != _nf.lower():
+        ai_text = cleaned_ai
+
+    if (not ai_text) or ai_text.lower() == _nf.lower():
+        logger.info("[FOLLOWUP] empty/not-found from LLM -> strict not_found")
+        return (RAG_NO_MATCH_RESPONSE, [])
+
+    # Lightweight grounding check: a modest portion of the answer's content
+    # tokens must appear in the combined corpus of (previous answer + source
+    # excerpts). Threshold is loose so paraphrased clarifications pass; open-
+    # domain hallucinations still fall below it because they introduce many
+    # foreign content words.
+    grounded_corpus = (last_a + " " + excerpts_block).lower()
+    ans_tokens = _re_followup.findall(r"[a-zA-Z0-9]{4,}", ai_text.lower())
+    _FU_STOPWORDS = {
+        "this", "that", "these", "those", "with", "from", "into", "than", "then",
+        "have", "been", "being", "were", "they", "them", "their", "there", "which",
+        "what", "when", "where", "while", "about", "also", "such", "some", "more",
+        "most", "many", "much", "your", "would", "could", "should", "will", "shall",
+        "does", "doing", "done", "answer", "previous", "above", "below", "thus",
+        "because", "however", "therefore", "based", "means", "meaning", "refers",
+        "include", "includes", "including", "example", "examples", "simply", "essentially",
+        "namely", "specifically", "respectively", "various", "different", "important",
+        "things", "thing", "people", "person", "each", "every", "another", "other",
+    }
+    content_tokens = [w for w in ans_tokens if w not in _FU_STOPWORDS]
+    if content_tokens:
+        overlap = sum(1 for w in content_tokens if w in grounded_corpus)
+        ratio = overlap / max(1, len(content_tokens))
+        if ratio < _FOLLOWUP_GROUND_RATIO_MIN:
+            # If the previous answer was a list and we have explicit items,
+            # honour the per-item shape with a deterministic placeholder for
+            # each item rather than collapsing to a generic not-found. This
+            # is grounded by construction (only item names are emitted) and
+            # gives the user the requested format.
+            if prev_is_list and extracted_items:
+                logger.info(
+                    "[FOLLOWUP LIST FALLBACK] grounding_ratio=%.2f -> deterministic per-item rendering of %d items",
+                    ratio, len(extracted_items),
+                )
+                if targeted_item is not None and len(extracted_items) == 1:
+                    _itm = extracted_items[0]
+                    ai_text = (
+                        f"{_itm} is listed in the document as one of the items, "
+                        "but the available text does not provide a further explanation for it."
+                    )
+                else:
+                    ai_text = "\n".join(
+                        f"{item}: the document lists this item but does not explain it further"
+                        for item in extracted_items
+                    )
+            else:
+                logger.info(
+                    "[FOLLOWUP GROUNDING WEAK] overlap_ratio=%.2f threshold=%.2f -> not_found",
+                    ratio, _FOLLOWUP_GROUND_RATIO_MIN,
+                )
+                return (RAG_NO_MATCH_RESPONSE, [])
+        else:
+            logger.info("[FOLLOWUP GROUNDING OK] overlap_ratio=%.2f", ratio)
+
+    # --- weak-evidence anti-inference guard (targeted items only) ----------
+    # Even after grounding passes, the LLM may over-explain an item from
+    # evidence that merely *mentions* it (incidental co-occurrence) rather
+    # than truly *explaining* it.  Downgrade when the evidence lacks a real
+    # explanatory sentence about the targeted item.
+    if (
+        targeted_item is not None
+        and prev_is_list
+        and len(extracted_items) == 1
+        and not _evidence_has_explicit_explanation(targeted_item, excerpts_block)
+    ):
+        _itm = extracted_items[0]
+        logger.info(
+            "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
+            _itm,
+        )
+        ai_text = (
+            f"{_itm} is mentioned in the document, "
+            "but the available text does not provide a further explanation for it."
+        )
+
+    # Update state so successive "explain more" works on the latest explanation,
+    # but PRESERVE the original chunks (never broaden the grounding window).
+    try:
+        last_answer_state[connection_id] = {
+            "query": (text or "").strip(),
+            "answer": ai_text,
+            "chunks": last_chunks,
+            "ts": time.time(),
+        }
+    except Exception:
+        pass
+
+    logger.info(
+        "[FOLLOWUP] answered locally | intent=%s prev_list=%s len=%d",
+        intent, prev_is_list, len(ai_text),
+    )
+    return (ai_text, [])
 
 
 async def flush_ollama_cache():
@@ -2333,6 +3294,30 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
         if not sents:
             return ""
         kept = sents[:2]
+        # MP-C7: drop trailing transition-only fragments that add no
+        # substantive content (e.g. "To put it another way.", "In other
+        # words.", "i.e."). Pure structural English connective cues —
+        # applies regardless of document domain. Also drop very short
+        # orphan tails (< 7 substantive words) that have no entity / def
+        # verb / informative noun, which are typically clipped continuation
+        # fragments rather than real second sentences of the definition.
+        if len(kept) > 1:
+            _trans_re = re.compile(
+                r"^\s*[\"'\u201c\u2018\u2019\u201d`]?\s*"
+                r"(?:in\s+other\s+words|to\s+put\s+it\s+(?:another|differently)\s+way|"
+                r"put\s+(?:it\s+)?(?:another\s+way|simply|differently)|"
+                r"that\s+is(?:\s+to\s+say)?|"
+                r"in\s+short|in\s+essence|in\s+summary|to\s+summari[sz]e|"
+                r"simply\s+put|stated\s+(?:simply|differently)|"
+                r"in\s+plain\s+terms|namely|alternatively|"
+                r"i\.?\s*e\.?|e\.?\s*g\.?)\b[^A-Za-z0-9]*$",
+                flags=re.IGNORECASE,
+            )
+            _tail = str(kept[-1] or "").strip()
+            _tail_words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", _tail)
+            _is_short_orphan = len(_tail_words) <= 6
+            if _trans_re.match(_tail) or _is_short_orphan:
+                kept = kept[:1]
         if kept:
             first = kept[0]
             words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", first)
@@ -3352,6 +4337,565 @@ def _is_ws_definition_query_mode(query: str) -> bool:
     )
 
 
+# MP-C15 — Structure-aware definition recovery.
+# When the strict definition route returns nothing, real documents often
+# express a concept's definition through structure rather than a single
+# "X is Y" sentence:
+#   A) heading/label line followed by explanatory prose
+#   B) table/classification row whose label matches the entity, followed
+#      by an adjacent paragraph that explains it
+#   C) concept paragraph followed by a list of defining characteristics
+# This helper looks for an entity-anchored heading/label/row in the
+# retrieved chunks and returns the best-scored adjacent defining sentence.
+# Pronoun-led sentences are allowed only when their antecedent is the
+# heading anchor we just located. Generic — no domain words; uses
+# structural cues only.
+_MPC15_DEF_CUE_RE = re.compile(
+    r"\b(?:is|are|refers\s+to|defined\s+as|means|"
+    r"characteri[sz]ed\s+by|consists?\s+of|involves|includes|"
+    r"emphasi[sz]e[sd]?|focus(?:es|ed)?\s+on|aims?\s+at|"
+    r"can\s+be\s+(?:defined|described|viewed)|"
+    r"is\s+a\s+type\s+of)\b",
+    re.IGNORECASE,
+)
+_MPC15_BIO_REJECT_RE = re.compile(
+    r"\b(?:born|died|coined\s+the\s+term|"
+    r"\d{4}\s*[\-–—]\s*\d{4}|"
+    r"contributed\s+by|proposed\s+by|developed\s+by|"
+    r"introduced\s+by|founded\s+by|written\s+by|"
+    r"author\s+of|sociologist|engineer|entrepreneur|"
+    r"attended|graduated|quit\s+school|professional\s+journey|"
+    r"father\s+of|claimed\s+that|thought\s+that)\b",
+    re.IGNORECASE,
+)
+_MPC15_ALIAS_ONLY_RE = re.compile(
+    r"^\s*(?:these\s+(?:ideas|concepts|principles|theories)\s+are\s+"
+    r"(?:also\s+|alternatively\s+)?(?:referred\s+to\s+as|known\s+as|called)|"
+    r"(?:also|alternatively)\s+(?:referred\s+to\s+as|known\s+as|called))\b",
+    re.IGNORECASE,
+)
+_MPC15_GENERIC_CONCEPT_SUFFIX = {
+    "theory", "management", "model", "approach", "system",
+    "method", "framework", "science", "process", "concept",
+    "organization", "organisation",
+}
+_MPC15_BAD_ANCHOR_PREFIX_RE = re.compile(
+    r"\b(?:criticism|critique|critic|limitations?|drawbacks?|"
+    r"advantages?|disadvantages?|benefits?|merits?|demerits?|"
+    r"applications?|examples?|impact|effects?|history|origins?|"
+    r"importance|significance|features?\s+and\s+limitations?|"
+    r"strengths?|weakness(?:es)?|comparison)\b",
+    re.IGNORECASE,
+)
+_MPC15_NEXT_HEADING_RE = re.compile(
+    r"\n\s*(?:[A-Z]\.\s+[A-Z][A-Za-z][^\n:]{2,80}:|"
+    r"\d+\.\d+(?:\.\d+)?\s+[A-Z][^\n]{2,80}|"
+    r"[A-Z][A-Za-z][A-Za-z\s]{2,40}\s+(?:Approach|Theory|Model|Management|Method|System)\s*:)"
+)
+
+# MP-C15 corpus cache — small lazy snapshot of every chunk in the active
+# vector store. The retrieval pipeline's quality filter caps results at
+# 3 chunks, so structurally-anchored content (e.g. an "Elements of X:"
+# block) often never reaches the structure-aware helper through normal
+# search. We bypass that cap by scanning the raw collection text once
+# and filtering by entity-stem occurrence at query time. Generic — no
+# domain words. Safe for small corpora (≤ a few thousand chunks).
+_MPC15_CORPUS_CACHE: dict = {"chunks": None, "version": None}
+
+
+def _mpc15_load_full_corpus_chunks() -> list[dict]:
+    try:
+        vs = getattr(live_rag, "vs", None)
+        coll = getattr(vs, "collection", None) if vs is not None else None
+        if coll is None:
+            return []
+        version_key = (getattr(coll, "name", ""), int(coll.count() or 0))
+        cached = _MPC15_CORPUS_CACHE.get("chunks")
+        if cached is not None and _MPC15_CORPUS_CACHE.get("version") == version_key:
+            return cached
+        data = coll.get(include=["documents", "metadatas"]) or {}
+        docs_text = data.get("documents") or []
+        metas = data.get("metadatas") or [{} for _ in docs_text]
+        out: list[dict] = []
+        for txt, meta in zip(docs_text, metas):
+            if not txt:
+                continue
+            md = dict(meta or {})
+            out.append({
+                "page_content": str(txt),
+                "text": str(txt),
+                "source": md.get("source") or md.get("file") or "",
+                "metadata": md,
+            })
+        _MPC15_CORPUS_CACHE["chunks"] = out
+        _MPC15_CORPUS_CACHE["version"] = version_key
+        logger.info("[STRUCT-AWARE DEF] corpus_cache_loaded count=%s", len(out))
+        return out
+    except Exception as e:
+        logger.warning("[STRUCT-AWARE DEF] corpus_cache_failed: %s", e)
+        return []
+
+
+def _mpc15_corpus_filter_by_entity(entity: str, allowed_sources: set[str] | None = None, limit: int = 12) -> list[dict]:
+    """Return chunks from the full corpus whose text mentions the entity
+    stem or an entity-anchored heading, restricted to ``allowed_sources``
+    when provided."""
+    chunks = _mpc15_load_full_corpus_chunks()
+    if not chunks:
+        return []
+    e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if not e:
+        return []
+    e_tokens_all = [t for t in re.findall(r"[a-z0-9]+", e) if t not in {"the", "a", "an", "of", "and", "in", "to", "for"}]
+    e_tokens = [t for t in e_tokens_all if t not in _MPC15_GENERIC_CONCEPT_SUFFIX] or e_tokens_all
+    if not e_tokens:
+        return []
+    e_root = e_tokens[0]
+    e_stem = e_root[:6] if len(e_root) >= 7 else e_root
+    stem_re = re.compile(rf"\b{re.escape(e_stem)}[a-z]*\b", re.IGNORECASE)
+    heading_re = re.compile(
+        rf"(?:^|\n|\.\s)(?:elements?|principles?|characteristics?|features?|components?|nature|definition|introduction)\s+(?:of|to)\s+(?:the\s+)?{re.escape(e_stem)}[a-z]*",
+        re.IGNORECASE,
+    )
+    # Score: heading hits ×3, stem hits ×1, all-token presence ×2.
+    scored: list[tuple[float, dict]] = []
+    for c in chunks:
+        txt = str(c.get("page_content") or c.get("text") or "")
+        if not txt:
+            continue
+        src = str(c.get("source") or (c.get("metadata") or {}).get("source") or "")
+        if allowed_sources and src and src not in allowed_sources:
+            # also try basename match — sources may be path vs basename
+            import os as _os
+            if _os.path.basename(src) not in {_os.path.basename(s) for s in allowed_sources}:
+                continue
+        stem_hits = len(stem_re.findall(txt))
+        if stem_hits == 0:
+            continue
+        heading_hits = len(heading_re.findall(txt))
+        all_tokens_present = all(re.search(rf"\b{re.escape(t)}", txt, re.IGNORECASE) for t in e_tokens)
+        score = heading_hits * 3.0 + stem_hits * 1.0 + (2.0 if all_tokens_present else 0.0)
+        scored.append((score, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:limit]]
+
+
+def _extract_structure_aware_definition(
+    query_text: str, docs: list[dict], entity: str
+) -> tuple[str | None, dict]:
+    """Generic structure-aware definition recovery.
+
+    Returns ``(sentence_or_None, debug_info)``. Debug info exposes the
+    structural anchor that fired, the focused window preview, the
+    candidate definition sentences considered, and the candidate list
+    items collected from the same window. No domain-specific terms; the
+    function only relies on heading shape, label colon, lettered/numbered
+    list rows, and shared sentence validators.
+    """
+    debug: dict = {
+        "structure_recovery_mode": None,
+        "anchor_preview": "",
+        "focused_window_preview": "",
+        "candidate_definition_sentences": [],
+        "candidate_definition_list_items": [],
+        "final_recovery_reason": "",
+    }
+    docs = list(docs or [])
+    e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if not e or not docs:
+        debug["final_recovery_reason"] = "no_entity_or_docs"
+        return None, debug
+
+    e_tokens_all = [t for t in re.findall(r"[a-z0-9]+", e) if t not in {"the", "a", "an", "of", "and", "in", "to", "for"}]
+    e_tokens = [t for t in e_tokens_all if t not in _MPC15_GENERIC_CONCEPT_SUFFIX]
+    if not e_tokens:
+        e_tokens = e_tokens_all
+    if not e_tokens:
+        debug["final_recovery_reason"] = "empty_entity_tokens"
+        return None, debug
+
+    e_root = e_tokens[0]
+    e_stem = e_root[:6] if len(e_root) >= 7 else e_root
+    stem_chunk = (
+        rf"{re.escape(e_stem)}[a-z]*"
+        + "".join(rf"(?:\s+{re.escape(t)}[a-z]*)?" for t in e_tokens[1:3])
+        + r"(?:\s+(?:model|theory|management|approach|system|method|organization|organisation))?"
+    )
+    heading_patterns: list[tuple[str, str]] = [
+        ("lettered_label", rf"(?:(?:^|\n)\s*|[\.!?•]\s+)(?:[A-Z]\.|\d+\.)\s*{stem_chunk}\s*[:\-–—]"),
+        ("label_line", rf"(?:(?:^|\n)\s*|[\.!?•]\s+){stem_chunk}\s*[:\-–—](?!\s*$)"),
+        ("inline_label", rf"(?<![A-Za-z0-9]){stem_chunk}\s*[:\-–—](?!\s*$)"),
+        ("elements_of", rf"(?:^|\n|\.\s)(?:elements?|principles?|characteristics?|features?|components?|nature)\s+of\s+(?:the\s+)?{stem_chunk}\s*[:\-–—]"),
+    ]
+
+    def _score(s: str, sl: str) -> float:
+        score = 0.0
+        if re.search(r"\b(?:defined\s+as|is\s+a\s+type\s+of|characteri[sz]ed\s+by|consists?\s+of)\b", sl):
+            score += 4.0
+        if re.search(r"\b(?:emphasi[sz]e[sd]?|focus(?:es|ed)?\s+on|involves|includes|aims?\s+at)\b", sl):
+            score += 2.0
+        if re.search(rf"\b{re.escape(e)}\b", sl):
+            score += 2.0
+        if re.search(rf"\b{re.escape(e_stem)}[a-z]*\b", sl):
+            score += 1.0
+        if re.match(r"^\s*(?:it|its|this|these|the)\b", sl):
+            score += 0.5
+        words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", s)
+        n = len(words)
+        if 12 <= n <= 30:
+            score += 1.0
+        elif n > 40:
+            score -= (n - 40) * 0.05
+        return score
+
+    best_overall: tuple[float, str, str] | None = None
+    for d in docs[:24]:
+        txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
+        if not txt:
+            continue
+        # Find every anchor in the doc; pick the EARLIEST that survives the
+        # bad-prefix filter so we don't skip the real concept heading just
+        # because an "Elements of X:" / "Criticism of X:" appears later.
+        anchor_matches: list[tuple[int, int, str, str]] = []
+        for mode_name, pat in heading_patterns:
+            for m in re.finditer(pat, txt, flags=re.IGNORECASE):
+                pre = txt[max(0, m.start() - 40): m.start() + len(m.group(0))]
+                if _MPC15_BAD_ANCHOR_PREFIX_RE.search(pre):
+                    continue
+                anchor_matches.append((m.start(), m.end(), m.group(0).strip(), mode_name))
+        if not anchor_matches:
+            continue
+        anchor_matches.sort(key=lambda x: x[0])
+        # Try anchors in document order; first one that yields a passing
+        # candidate wins for this doc.
+        for a_start, a_end, a_text, a_mode in anchor_matches[:3]:
+            raw_window = txt[a_end:a_end + 1500]
+            cut = _MPC15_NEXT_HEADING_RE.search(raw_window)
+            window = raw_window[: cut.start()] if cut else raw_window
+
+            sents = [
+                re.sub(r"\s+", " ", s).strip()
+                for s in re.split(r"(?<=[.!?])\s+|\n+", window)
+                if s and s.strip()
+            ][:14]
+            # Defining-element list extraction. Only collect list items
+            # when the anchor is of an "Elements/Features/Characteristics
+            # of X" shape — those windows are the only ones where
+            # following labels are semantically the entity's defining
+            # parts. For other anchor modes (label_line / lettered_label
+            # / inline_label), the following lines may be biographical
+            # captions ("Max Weber : ...") that must NOT be treated as
+            # defining elements.
+            list_items: list[str] = []
+            if a_mode == "elements_of":
+                # True bullet markers — works whether bullets are at line
+                # start or inline.
+                list_items = re.findall(
+                    r"(?:^|\n|\s)[•\u2022\*]\s+([^•\u2022\*\n]{8,200})",
+                    window[:1500],
+                )
+                # Heading-like labels: short capitalised label followed
+                # by ":" then descriptive prose. Anchored to start-of-
+                # line OR a bullet character to avoid pulling biographical
+                # name labels like "Max Weber :" out of running prose.
+                for hm in re.finditer(
+                    r"(?:^|\n|[•\u2022\*])\s*([A-Z][A-Za-z][A-Za-z \-/&]{2,40}?)\s*:\s+(?=[A-Z])",
+                    window[:1500],
+                ):
+                    _label = re.sub(r"\s+", " ", hm.group(1)).strip()
+                    if 1 <= len(_label.split()) <= 5 and _label.lower() != a_text.strip(" :.-\u2013\u2014").lower():
+                        list_items.append(_label)
+            if not debug["structure_recovery_mode"]:
+                debug["structure_recovery_mode"] = a_mode
+                debug["anchor_preview"] = a_text[:160]
+                debug["focused_window_preview"] = re.sub(r"\s+", " ", window).strip()[:280]
+            # Always merge list items from every anchor we explore — the
+            # entity-defining bullets often live under an "Elements of X:"
+            # anchor while the first-matched anchor (e.g. "X Model:")
+            # contains only narrative prose.
+            if list_items:
+                _existing = debug.get("candidate_definition_list_items") or []
+                _seen_li = {str(li).lower() for li in _existing}
+                for li in list_items[:6]:
+                    _li_clean = li.strip()[:140]
+                    if _li_clean.lower() not in _seen_li:
+                        _seen_li.add(_li_clean.lower())
+                        _existing.append(_li_clean)
+                debug["candidate_definition_list_items"] = _existing
+
+            pronoun_led_allowed = a_mode in {"lettered_label", "label_line", "inline_label"}
+
+            def _rank_window(_window: str) -> list[tuple[float, str]]:
+                _ranked: list[tuple[float, str]] = []
+                _sents = [
+                    re.sub(r"\s+", " ", s).strip()
+                    for s in re.split(r"(?<=[.!?])\s+|\n+", _window)
+                    if s and s.strip()
+                ][:24]
+                for idx, s in enumerate(_sents):
+                    sl = s.lower()
+                    words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", s)
+                    if len(words) < 8:
+                        continue
+                    if _MPC15_BIO_REJECT_RE.search(sl):
+                        continue
+                    if _MPC15_ALIAS_ONLY_RE.search(sl):
+                        continue
+                    try:
+                        if _is_table_or_classification_sentence(s):
+                            continue
+                    except Exception:
+                        pass
+                    if not _MPC15_DEF_CUE_RE.search(sl):
+                        continue
+                    if defines_other_concept(sl, e):
+                        continue
+                    entity_present = bool(re.search(rf"\b{re.escape(e)}\b", sl))
+                    stem_present = bool(re.search(rf"\b{re.escape(e_stem)}[a-z]*\b", sl))
+                    pronoun_led = bool(re.match(r"^\s*(?:it|its|this|these|the|he|she|they)\b", sl))
+                    if entity_present or stem_present:
+                        pass
+                    elif pronoun_led and pronoun_led_allowed and idx < 6:
+                        pass
+                    else:
+                        continue
+                    sc = _score(s, sl)
+                    _ranked.append((sc, s))
+                    debug["candidate_definition_sentences"].append(f"score={sc:.2f} :: {s[:200]}")
+                return _ranked
+
+            ranked = _rank_window(window)
+
+            # Cross-chunk window extension + sub-list scan: always do
+            # this for letter/label anchors so that (a) weak ranked
+            # candidates can be improved with adjacent-chunk context and
+            # (b) defining-element lists in the next chunk are surfaced
+            # for the assembly fallback. Generic — uses chunk_index
+            # adjacency only.
+            do_extend = a_mode in {"lettered_label", "label_line", "inline_label", "elements_of"}
+            extended = window
+            if do_extend:
+                meta = (d or {}).get("metadata") or {}
+                src_n = str(meta.get("source") or (d or {}).get("source") or "")
+                ci = meta.get("chunk_index")
+                try:
+                    ci = int(ci)
+                except Exception:
+                    ci = None
+                if src_n and ci is not None:
+                    extended = window
+                    for _adj_n in (1, 2):
+                        for _cc in _mpc15_load_full_corpus_chunks():
+                            _cm = (_cc or {}).get("metadata") or {}
+                            if str(_cm.get("source") or "") != src_n:
+                                continue
+                            try:
+                                if int(_cm.get("chunk_index")) == ci + _adj_n:
+                                    extended = extended + "\n" + str(_cc.get("page_content") or _cc.get("text") or "")
+                                    break
+                            except Exception:
+                                continue
+                    if extended != window:
+                        # cap at 3500 chars; cut at next heading.
+                        extended = extended[:3500]
+                        _cut2 = _MPC15_NEXT_HEADING_RE.search(extended[len(window):])
+                        if _cut2:
+                            extended = window + "\n" + extended[len(window):][: _cut2.start()]
+                        # Re-rank only if we previously had no ranked
+                        # candidate; otherwise keep the in-chunk ranking.
+                        if not ranked:
+                            ranked = _rank_window(extended)
+                            if ranked:
+                                debug["focused_window_preview"] = (debug.get("focused_window_preview") or "") + " [+adjacent]"
+                    # Sub-list detection on the (extended) window.
+                    for sm in re.finditer(
+                        r"(?:elements?|principles?|functions?|characteristics?|components?)\s+of\s+"
+                        r"(?:management|theory|administration|business|leadership|organi[sz]ation|"
+                        r"(?:the\s+)?(?:concept|approach|model|system|method))"
+                        r"(?:\s*[:\-\u2013\u2014]|(?=\s+\d+\s*\.))",
+                        extended,
+                        flags=re.IGNORECASE,
+                    ):
+                        sub_window = extended[sm.end(): sm.end() + 800]
+                        sub_items = re.findall(
+                            r"(?:^|\n|\.\s|\s|•|\u2022|\*)(?:\d+\s*\.|[a-z]\s*\.)\s+"
+                            r"([A-Z][A-Za-z][A-Za-z \-,/&()]{2,80}?)\s*[\.\n]",
+                            sub_window,
+                        )
+                        for li in sub_items[:8]:
+                            _li_clean = re.sub(r"\s+", " ", li).strip(" .;,")
+                            if 1 <= len(_li_clean.split()) <= 6 and len(_li_clean) >= 4:
+                                _existing = debug.get("candidate_definition_list_items") or []
+                                if _li_clean.lower() not in {x.lower() for x in _existing}:
+                                    _existing.append(_li_clean)
+                                    debug["candidate_definition_list_items"] = _existing
+
+            if ranked:
+                ranked.sort(key=lambda x: x[0], reverse=True)
+                top_sc, top_s = ranked[0]
+                cleaned = _cleanup_final_answer_text(re.sub(r"\s+", " ", top_s).strip())
+                if cleaned and not re.search(r"[.!?]$", cleaned):
+                    cleaned += "."
+                if best_overall is None or top_sc > best_overall[0]:
+                    best_overall = (top_sc, cleaned, a_mode)
+                break  # next doc (we accepted from this doc's first viable anchor)
+
+    # Determine assembly availability up front so we can prefer it over
+    # weak ranked candidates (e.g. a low-score pronoun-led sentence that
+    # would not survive the grounding check downstream).
+    _list_items_now = debug.get("candidate_definition_list_items") or []
+    _assembly_labels: list[str] = []
+    for li in _list_items_now:
+        li_clean = re.sub(r"\s+", " ", str(li or "")).strip()
+        head = re.split(r"\s*[:\-\u2013\u2014]\s+", li_clean, maxsplit=1)[0].strip(" .;,•")
+        if 1 <= len(head.split()) <= 6 and re.search(r"[A-Za-z]", head) and len(head) >= 4:
+            _assembly_labels.append(head)
+    _assembly_labels_dedup: list[str] = []
+    _seen_a: set[str] = set()
+    for h in _assembly_labels:
+        k = h.lower()
+        if k in _seen_a:
+            continue
+        _seen_a.add(k)
+        _assembly_labels_dedup.append(h)
+    _assembly_available = len(_assembly_labels_dedup) >= 3 and debug.get("structure_recovery_mode") in {
+        "elements_of", "label_line", "lettered_label", "inline_label",
+    }
+
+    if best_overall is not None and not (best_overall[0] < 3.0 and _assembly_available):
+        debug["final_recovery_reason"] = f"accepted_via_{best_overall[2]}"
+        return best_overall[1], debug
+
+    # Fallback C — concept + defining-list assembly.
+    # Some documents don't put a defining sentence near the concept
+    # heading; instead they give a heading then a bulleted list of the
+    # concept's defining characteristics ("Elements of X:", "Features of
+    # X:"). When the structural pass located such a list, synthesise a
+    # short grounded answer by enumerating those bullet labels. This is
+    # NOT generation — every label comes verbatim from the chunk.
+    list_items = debug.get("candidate_definition_list_items") or []
+    if list_items and debug.get("structure_recovery_mode") in {"elements_of", "label_line", "lettered_label", "inline_label"}:
+        # Pull the head label of each bullet (text before ":" / "—" / "-").
+        labels: list[str] = []
+        for li in list_items:
+            li_clean = re.sub(r"\s+", " ", str(li or "")).strip()
+            head = re.split(r"\s*[:\-\u2013\u2014]\s+", li_clean, maxsplit=1)[0].strip(" .;,•")
+            if 1 <= len(head.split()) <= 6 and re.search(r"[A-Za-z]", head) and len(head) >= 4:
+                labels.append(head)
+        # Dedupe preserving order.
+        seen_l: set[str] = set()
+        deduped = []
+        for h in labels:
+            k = h.lower()
+            if k in seen_l:
+                continue
+            seen_l.add(k)
+            deduped.append(h)
+        if len(deduped) >= 3:
+            # Cap to first 6 items to keep the assembled sentence focused
+            # and to avoid concatenating items from sibling sub-lists
+            # picked up in the extended window (which would dilute the
+            # answer's groundedness).
+            deduped = deduped[:6]
+            entity_disp = " ".join(w.capitalize() for w in e.split())
+            joined = ", ".join(deduped[:-1]) + ", and " + deduped[-1] if len(deduped) >= 2 else deduped[0]
+            assembled = f"{entity_disp} is described in the document by the following defining elements: {joined}."
+            debug["final_recovery_reason"] = f"accepted_via_{debug['structure_recovery_mode']}_list_assembly"
+            return assembled, debug
+
+    if not debug["structure_recovery_mode"]:
+        debug["final_recovery_reason"] = "no_anchor_in_any_doc"
+    else:
+        debug["final_recovery_reason"] = f"anchor_{debug['structure_recovery_mode']}_no_definition"
+    return None, debug
+
+
+def _is_valid_definition_sentence(sentence: str, entity: str) -> bool:
+    """STRICT generic validator for "what is X?" answers.
+
+    Precision-over-recall gate: an answer is accepted only when it actually
+    DEFINES the entity, not merely mentions it or attributes it to someone.
+    Generic — no domain-specific terms.
+
+    Rules:
+      1. Must contain the entity (or its tokens) — surface or lemma-level.
+      2. Must contain a definition cue: is / are / refers to / can be defined / means.
+      3. Must NOT be attribution-only ("contributed by", "proposed by",
+         "developed by", "introduced by", "founded by", "given by").
+      4. Must NOT be pronoun-led ("he said", "they believed", ...).
+      5. Must have at least 6 substantive word tokens.
+      6. Must NOT look like a table or list fragment.
+    """
+    s = re.sub(r"\s+", " ", str(sentence or "").strip())
+    if not s:
+        return False
+    sl = s.lower()
+
+    # 5. Length gate.
+    words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", s)
+    if len(words) < 6:
+        return False
+
+    # 6. Table / list fragment.
+    try:
+        if _is_table_or_classification_sentence(s):
+            return False
+    except Exception:
+        pass
+
+    # 1. Entity presence (surface or substantive tokens).
+    e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+    if e:
+        if not re.search(rf"\b{re.escape(e)}\b", sl):
+            etoks = [
+                t for t in re.findall(r"[a-z0-9]+", e)
+                if t not in {"the", "a", "an", "of", "and", "in", "to", "for"}
+            ]
+            if not etoks:
+                return False
+            hits = sum(1 for t in etoks if re.search(rf"\b{re.escape(t)}\b", sl))
+            if hits < max(1, len(etoks) - 1):
+                return False
+
+    # 2. Definition cue.
+    if not re.search(
+        r"\b(?:is|are|refers\s+to|can\s+be\s+defined|defined\s+as|means)\b",
+        sl,
+    ):
+        return False
+
+    # 4. Pronoun-led narrative.
+    if re.match(
+        r"^\s*(?:he|she|they|it|we|i|you|his|her|their|its|our|my|your)\b",
+        sl,
+    ):
+        return False
+
+    # 3. Attribution-only patterns: "X is contributed/proposed/... by Y".
+    # Reject when the predicate after "is/are" is *only* attribution and the
+    # sentence contains no further descriptive content.
+    attribution_pred = (
+        r"\b(?:is|are|was|were)\s+(?:first\s+|originally\s+|mainly\s+)?"
+        r"(?:contributed|proposed|developed|introduced|founded|given|"
+        r"presented|formulated|created|written|authored|established)\s+by\b"
+    )
+    if re.search(attribution_pred, sl):
+        # Check whether the sentence has substantive content beyond the
+        # attribution clause (e.g. "X is proposed by Y and focuses on Z").
+        m = re.search(attribution_pred, sl)
+        tail = sl[m.end():] if m else ""
+        tail_words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", tail)
+        # If only a person/short phrase follows the "by", treat as attribution-only.
+        descriptive_cue = re.search(
+            r"\b(?:and|which|that|to|for|in\s+order|focuses?\s+on|involves|includes|deals\s+with|describes|emphasi[sz]es|aims?\s+to)\b",
+            tail,
+        )
+        if not descriptive_cue or len(tail_words) < 4:
+            return False
+
+    return True
+
+
 def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str:
     ans = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(answer or "").strip()))
     is_explain_mode = _is_ws_explain_query_mode(query)
@@ -3362,6 +4906,58 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     not_found = "Not found in the document."
     has_entity, entity = _extract_entity_from_definition_query(query)
     entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
+
+    # MP-C7: drop trailing transition-only fragments and tiny orphan tails
+    # that survived upstream extraction (e.g. "To put it another way.",
+    # "In other words.", "i.e."). Pure structural English connective cues
+    # plus a short-orphan rule — applies regardless of document domain.
+    def _mpc7_polish_definition_tail(text: str) -> str:
+        s = str(text or "").strip()
+        if not s:
+            return s
+        # Quote-aware sentence split: split on .!? optionally followed by a
+        # closing quote, then whitespace, then a capital letter. The shared
+        # `_split_text_into_sentences` does NOT split on `."` (period inside
+        # closing quote) which is exactly the shape that lets transition
+        # tails like "...way." To put it another way." survive upstream.
+        _split_re = re.compile(r"(?<=[.!?])[\"'\u201c\u2018\u2019\u201d`]?\s+(?=[A-Z])")
+        sents = [p.strip() for p in _split_re.split(s) if p and p.strip()]
+        if len(sents) <= 1:
+            return s
+        _trans_re = re.compile(
+            r"^\s*[\"'\u201c\u2018\u2019\u201d`]?\s*"
+            r"(?:in\s+other\s+words|to\s+put\s+it\s+(?:another|differently)\s+way|"
+            r"put\s+(?:it\s+)?(?:another\s+way|simply|differently)|"
+            r"that\s+is(?:\s+to\s+say)?|"
+            r"in\s+short|in\s+essence|in\s+summary|to\s+summari[sz]e|"
+            r"simply\s+put|stated\s+(?:simply|differently)|"
+            r"in\s+plain\s+terms|namely|alternatively|"
+            r"i\.?\s*e\.?|e\.?\s*g\.?)\b[^A-Za-z0-9]*$",
+            flags=re.IGNORECASE,
+        )
+        # Iteratively drop trailing transition-only sentences AND short
+        # orphan tails (≤6 substantive words) that lack the queried entity.
+        while len(sents) > 1:
+            tail = sents[-1].strip()
+            tail_words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", tail)
+            tail_low = tail.lower()
+            short_orphan = len(tail_words) <= 6
+            entity_in_tail = bool(entity_l and re.search(rf"\b{re.escape(entity_l)}\b", tail_low))
+            if _trans_re.match(tail) or (short_orphan and not entity_in_tail):
+                sents.pop()
+                continue
+            break
+        out = " ".join(
+            (k.rstrip(" ,;:-") + ("" if re.search(r"[.!?]$", k) else "."))
+            for k in sents if k
+        )
+        return _cleanup_final_answer_text(out)
+
+    if ans and ans.lower() != not_found.lower():
+        _polished = _mpc7_polish_definition_tail(ans)
+        if _polished:
+            ans = _polished
+
     if not entity_l:
         if ans and ans.lower() != not_found.lower() and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
             logger.info("[WS FIXED ANSWER] mode=preserve_validated_no_entity answer=%s", ans[:220])
@@ -3381,9 +4977,25 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
 
     if is_definition_mode and ans and ans.lower() != not_found.lower():
         ans_l = ans.lower()
-        if _entity_grounded_in_text(ans_l) and _is_answer_grounded_in_docs(ans, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, ans):
+        # MP-C15: structure-recovery assembled answers have a fixed
+        # signature ("X is described in the document by the following
+        # defining elements: ...") and were already grounded against
+        # the wider corpus pool by the structure-aware route. Trust
+        # them here so the strict definition-sentence validator does
+        # not wipe a properly-recovered list-assembly answer.
+        if re.search(r"\bis\s+described\s+in\s+the\s+document\s+by\s+the\s+following\s+defining\s+elements\s*:", ans_l):
+            logger.info("[WS FIXED ANSWER] mode=preserve_structure_recovery answer=%s", ans[:220])
+            return ans
+        if (
+            _entity_grounded_in_text(ans_l)
+            and _is_answer_grounded_in_docs(ans, docs or [], query_text=query)
+            and _passes_strict_definition_relevance_guard(query, ans)
+            and _is_valid_definition_sentence(ans, entity_l)
+        ):
             logger.info("[WS FIXED ANSWER] mode=preserve_validated answer=%s", ans[:220])
             return ans
+        if entity_l:
+            logger.info("[DEF QUALITY REJECT] mode=preserve_validated entity=%s preview=%s", entity_l, ans[:160])
 
     def _finalize_definition_output(text: str) -> str:
         s = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(text or "").strip()))
@@ -3586,9 +5198,54 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                 if doc_rescue:
                     break
         doc_rescue = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(doc_rescue or "")).strip())
-        if doc_rescue and _is_answer_grounded_in_docs(doc_rescue, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, doc_rescue):
+
+        # MP-C12 — Reject doc_rescue extractions that look like a TOC/heading
+        # row (e.g. "Introduction Concepts ... Criticism of X Theory") with no
+        # verb predicate. Such fragments only contain the entity surface form
+        # but no definition cue; downstream grounding/strict-guard let them
+        # through, then the validator nullifies them. Falls through to the
+        # indirect-evidence rescue below. Generic — no domain words.
+        def _looks_like_structural_fragment(text: str) -> bool:
+            t = re.sub(r"\s+", " ", str(text or "").strip())
+            if not t:
+                return True
+            tl = t.lower()
+            has_def_cue = bool(re.search(
+                r"\b(?:is|are|was|were|refers\s+to|defined\s+as|means|involves|"
+                r"includes|focuses\s+on|consists\s+of|comprises|describes|"
+                r"characterized\s+by|known\s+as|deals\s+with|works|operates?)\b",
+                tl,
+            ))
+            if has_def_cue:
+                return False
+            if _is_table_or_classification_sentence(t):
+                return True
+            # Heuristic: many capitalised tokens with no verb suggests a
+            # heading/index row stitched by OCR.
+            cap_tokens = len(re.findall(r"\b[A-Z][A-Za-z]+\b", t))
+            total_tokens = len(re.findall(r"[A-Za-z]+", t))
+            if total_tokens >= 6 and cap_tokens >= max(4, int(total_tokens * 0.4)):
+                return True
+            return False
+
+        if doc_rescue and _looks_like_structural_fragment(doc_rescue):
+            logger.info("[DOC RESCUE REJECT STRUCTURAL] preview=%s", doc_rescue[:160])
+            doc_rescue = ""
+
+        if doc_rescue and _is_answer_grounded_in_docs(doc_rescue, docs or [], query_text=query) and _passes_strict_definition_relevance_guard(query, doc_rescue) and _is_valid_definition_sentence(doc_rescue, entity_l):
             logger.info("[WS FIXED ANSWER] mode=doc_rescue extracted=%s", doc_rescue[:220])
             return _finalize_definition_output(doc_rescue)
+        if doc_rescue and entity_l:
+            logger.info("[DEF QUALITY REJECT] mode=doc_rescue entity=%s preview=%s", entity_l, doc_rescue[:160])
+
+        # MP-C13 — Definition queries are deterministic-or-fail. The previous
+        # indirect-evidence rescue (MP-C12) was relaxed to surface narrative
+        # prose like "He claimed that ..." which is mention, not definition.
+        # Per task: we accept missing answers rather than wrong answers.
+        # When no sentence passes _is_valid_definition_sentence, fall through
+        # to not_found below.
+        if entity_l and is_definition_mode:
+            return not_found
 
     routed_answer = _extract_definition_route_answer(query, docs)
     if routed_answer:
@@ -8251,6 +9908,74 @@ def _extract_entity_from_definition_query(query_text: str) -> tuple[bool, str]:
     if _is_compare_query(q):
         logger.info("[LOG] _extract_entity_from_definition_query: compare query detected, skipping single-entity parse")
         return False, ""
+
+    # MP-C9 — list / enumerative queries ("What are the characteristics of X",
+    # "List the principles of X", "How many types of X are there"). The
+    # existing single-entity patterns below only handle definition shapes
+    # ("what is X", "define X", "explain X", ...). For list shapes we want
+    # the TAIL after a generic connective (of|in|for|about|...), which is
+    # the inverse of `_normalize_definition_entity` (which STRIPS such
+    # tails). So we extract directly here and short-circuit before the
+    # normaliser. Pure positional / connective logic — no domain words.
+    list_query_patterns = [
+        r"^\s*(?:what|which)\s+are\s+(?:all\s+|the\s+)?(.+?)\s*\??\s*$",
+        r"^\s*(?:list|name|mention|identify|give|enumerate)\s+(?:all\s+|the\s+|some\s+)?(.+?)\s*\??\s*$",
+        r"^\s*(?:tell\s+me|show\s+me)\s+(?:all\s+|the\s+|some\s+)?(.+?)\s*\??\s*$",
+        r"^\s*how\s+many\s+(.+?)\s+(?:are\s+there|exist)\s*\??\s*$",
+    ]
+    list_subject = ""
+    for pat in list_query_patterns:
+        m = re.match(pat, q, flags=re.IGNORECASE)
+        if m:
+            list_subject = re.sub(r"\s+", " ", (m.group(1) or "")).strip(" \t\n\r\"'`.,;:!?")
+            break
+
+    if list_subject:
+        # Drop trivial leading determiners/quantifiers from the captured
+        # subject, then split on a generic connective. The TAIL is the
+        # entity (e.g. "characteristics of management" -> "management";
+        # "steps in the planning process" -> "planning process";
+        # "types of organization" -> "organization").
+        subj = re.sub(
+            r"^(?:the|a|an|all|some|main|major|key|important|various|different|"
+            r"following|above|below)\s+",
+            "",
+            list_subject,
+            flags=re.IGNORECASE,
+        ).strip()
+        connective_match = re.search(
+            r"\b(?:of|in|for|about|regarding|concerning|on|within|across|under|"
+            r"between|behind)\b\s+(.+)$",
+            subj,
+            flags=re.IGNORECASE,
+        )
+        list_entity_raw = connective_match.group(1).strip() if connective_match else subj
+        # Strip a leading determiner from the tail too ("the planning process"
+        # -> "planning process") and trim trailing process-helper words that
+        # don't belong to the entity ("...are there", "...listed").
+        list_entity_raw = re.sub(
+            r"^(?:the|a|an|its|their|his|her|our|this|that|these|those|"
+            r"such|any)\s+",
+            "",
+            list_entity_raw,
+            flags=re.IGNORECASE,
+        ).strip()
+        list_entity_raw = re.sub(
+            r"\s+(?:are\s+there|listed|mentioned|given|described|explained|"
+            r"in\s+detail|in\s+general)\s*$",
+            "",
+            list_entity_raw,
+            flags=re.IGNORECASE,
+        ).strip()
+        list_entity_raw = _strip_query_instruction_modifiers(list_entity_raw)
+        list_entity = re.sub(r"\s+", " ", list_entity_raw).strip(" \t\n\r\"'`.,;:!?-")
+        if len(list_entity) >= 2:
+            logger.info(
+                "[LOG] _extract_entity_from_definition_query: parsed entity='%s' (list_query)",
+                list_entity,
+            )
+            return True, list_entity
+        # Fall through to legacy patterns if we somehow stripped everything.
 
     patterns = [
         r"^\s*(?:who|what)\s+(?:is|was)\s+(.+?)\s*\??\s*$",
@@ -14208,6 +15933,72 @@ def _query_section_phrases(query_text: str) -> list[str]:
     return phrases[:4]
 
 
+def _query_main_entity_tokens(query_text: str, family_v2: str = "") -> tuple[list[str], list[str]]:
+    """Generic main-entity extraction for section-anchor scoring.
+
+    Splits the query's section phrase (e.g. "characteristics of management") into
+    a STRUCTURE part ("characteristics") and an ENTITY part ("management") around
+    the connectives of/in/for/about/regarding/concerning/on. Returns
+    (entity_tokens, structure_tokens). When no connective is present the last
+    surviving token of the phrase is treated as the entity. No domain words are
+    used; this is purely positional/syntactic.
+    """
+    section_phrases = _query_section_phrases(query_text)
+    stop = {
+        "the", "a", "an", "all", "some", "any", "main", "major", "key", "important",
+        "this", "that", "these", "those", "its", "their", "his", "her", "our",
+        "such", "various", "different", "many", "few", "every", "each",
+    }
+    if not section_phrases:
+        all_toks = _query_section_tokens(query_text, family_v2)
+        if not all_toks:
+            return [], []
+        # No phrase pattern matched (short query) — last token is the entity.
+        entity = [all_toks[-1]]
+        struct = [t for t in all_toks if t not in set(entity)]
+        return entity, struct[:4]
+
+    phrase = section_phrases[0]
+    m = re.search(
+        r"^(.*?)\s+\b(?:of|in|for|about|regarding|concerning|on|with|to|from)\b\s+(.+)$",
+        phrase,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        head_part = m.group(1).strip()
+        tail_part = m.group(2).strip()
+    else:
+        words = phrase.split()
+        if len(words) >= 2:
+            head_part = " ".join(words[:-1])
+            tail_part = words[-1]
+        else:
+            head_part = ""
+            tail_part = phrase
+
+    def _toks(part: str) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for raw in re.findall(r"[a-z0-9]{3,}", part.lower()):
+            if raw in stop:
+                continue
+            norm = _light_normalize_query_token(raw)
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            out.append(norm)
+        return out
+
+    entity_tokens = _toks(tail_part)
+    structure_tokens = _toks(head_part)
+    if not entity_tokens and structure_tokens:
+        # Phrase was structure-only ("characteristics") — treat the same token
+        # as the entity to avoid an empty entity set.
+        entity_tokens = [structure_tokens[-1]]
+        structure_tokens = structure_tokens[:-1]
+    return entity_tokens[:3], structure_tokens[:4]
+
+
 def _list_marker_score(text: str) -> float:
     t = str(text or "")
     if not t:
@@ -15090,6 +16881,11 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     rebuilt_words: list[str] = []
     for word in re.split(r"(\s+)", txt):
         if not word or word.isspace():
+            rebuilt_words.append(word)
+            continue
+        # MP-C15: don't split well-formed capitalized words (e.g.
+        # "Forecasting" → "For ecasting", "Organising" → "Or ganising").
+        if re.match(r"^[A-Z][a-z]{4,}[,.;:!?\)]*$", word):
             rebuilt_words.append(word)
             continue
         lowered = word.lower()
@@ -16762,40 +18558,48 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
         dec["answer"] = shaped
 
     if is_definition_mode:
-        has_entity, entity = _extract_entity_from_definition_query(query)
-        semantically_grounded = _is_answer_grounded_in_docs(answer, retrieved_docs or [], query_text=query)
-        entity_or_reference_grounded = _definition_entity_or_reference_match(query, answer)
-        strict_pref_ok = _passes_strict_definition_relevance_guard(query, answer)
-
-        if semantically_grounded and entity_or_reference_grounded:
-            if not strict_pref_ok:
-                logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_grounded answer=%s", answer[:220])
+        # MP-C15: definition_structure_recovery answers were already
+        # built and grounded against a wider corpus pool by the
+        # structure-aware route. Skip re-validation against the narrow
+        # `retrieved_docs` here — that pool may not contain the
+        # cross-chunk evidence the answer was assembled from.
+        if str(dec.get("answer_type") or "") == "definition_structure_recovery":
+            logger.info("[DEFINITION ROUTE TRUST] reason=structure_recovery_already_validated answer=%s", answer[:220])
         else:
-            rescue_answer = _extract_best_scored_concept_sentence_from_docs(query, retrieved_docs or [], max_docs=3)
-            if not rescue_answer:
-                rescue_answer = _extract_simple_definition_sentence(query, retrieved_docs or [])
-            rescue_answer = re.sub(r"\s+", " ", str(rescue_answer or "")).strip()
-            rescue_ok = bool(
-                rescue_answer
-                and _definition_entity_or_reference_match(query, rescue_answer)
-                and _is_answer_grounded_in_docs(rescue_answer, retrieved_docs or [], query_text=query)
-            )
-            if rescue_ok:
-                if not _passes_strict_definition_relevance_guard(query, rescue_answer):
-                    logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_rescue_grounded answer=%s", rescue_answer[:220])
-                logger.info("[DEFINITION VALIDATION RESCUE] accepted=true answer=%s", rescue_answer[:220])
-                dec["answer"] = rescue_answer
-                dec["used_llm"] = False
-                dec["answer_type"] = "definition_candidate_rescued"
-                dec["source_mode"] = "definition"
+            has_entity, entity = _extract_entity_from_definition_query(query)
+            semantically_grounded = _is_answer_grounded_in_docs(answer, retrieved_docs or [], query_text=query)
+            entity_or_reference_grounded = _definition_entity_or_reference_match(query, answer)
+            strict_pref_ok = _passes_strict_definition_relevance_guard(query, answer)
+
+            if semantically_grounded and entity_or_reference_grounded:
+                if not strict_pref_ok:
+                    logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_grounded answer=%s", answer[:220])
             else:
-                logger.info("[DEFINITION CANDIDATE REJECTED] reason=entity_reference_or_grounding_failure answer=%s", answer[:220])
-                dec["answer"] = RAG_NO_MATCH_RESPONSE
-                dec["used_llm"] = False
-                dec["answer_type"] = "definition_candidate_rejected"
-                dec["source_mode"] = "not_found_guard"
-                _log_final_decision_debug(rejected=True, rejection_reason="definition_candidate_rejected")
-                return dec
+                rescue_answer = _extract_best_scored_concept_sentence_from_docs(query, retrieved_docs or [], max_docs=3)
+                if not rescue_answer:
+                    rescue_answer = _extract_simple_definition_sentence(query, retrieved_docs or [])
+                rescue_answer = re.sub(r"\s+", " ", str(rescue_answer or "")).strip()
+                rescue_ok = bool(
+                    rescue_answer
+                    and _definition_entity_or_reference_match(query, rescue_answer)
+                    and _is_answer_grounded_in_docs(rescue_answer, retrieved_docs or [], query_text=query)
+                )
+                if rescue_ok:
+                    if not _passes_strict_definition_relevance_guard(query, rescue_answer):
+                        logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_rescue_grounded answer=%s", rescue_answer[:220])
+                    logger.info("[DEFINITION VALIDATION RESCUE] accepted=true answer=%s", rescue_answer[:220])
+                    dec["answer"] = rescue_answer
+                    dec["used_llm"] = False
+                    dec["answer_type"] = "definition_candidate_rescued"
+                    dec["source_mode"] = "definition"
+                else:
+                    logger.info("[DEFINITION CANDIDATE REJECTED] reason=entity_reference_or_grounding_failure answer=%s", answer[:220])
+                    dec["answer"] = RAG_NO_MATCH_RESPONSE
+                    dec["used_llm"] = False
+                    dec["answer_type"] = "definition_candidate_rejected"
+                    dec["source_mode"] = "not_found_guard"
+                    _log_final_decision_debug(rejected=True, rejection_reason="definition_candidate_rejected")
+                    return dec
 
     logger.info("[FINAL ANSWER SOURCE] source_mode=%s answer_type=%s used_llm=%s", dec.get("source_mode"), dec.get("answer_type"), dec.get("used_llm"))
     _log_final_decision_debug(rejected=False, rejection_reason="")
@@ -16980,6 +18784,54 @@ def _shared_rag_final_answer_decision(
                     _hit_n += 1
             _token_chunk_count_idf[_idf_tok] = _hit_n
 
+        # MP-C8 — Generic main-entity / structure split for section anchor scoring.
+        # The query "What are the characteristics of management?" has main-entity
+        # "management" and structure "characteristics". Without this, a chunk whose
+        # heading is "characteristics of organisational framework" can outrank the
+        # true target ("characteristics of management") because both share the
+        # structural token. We reward chunks whose heading carries the entity and
+        # penalise chunks whose heading matches only the structure but lacks the
+        # entity. Pure positional logic — no domain words.
+        _mpc8_entity_tokens, _mpc8_struct_tokens = _query_main_entity_tokens(query, family_v2)
+        if family_v2 in {"list_entity", "list_structure"}:
+            logger.info(
+                "[MP-C8 ENTITY] entity_tokens=%s structure_tokens=%s",
+                _mpc8_entity_tokens,
+                _mpc8_struct_tokens,
+            )
+
+        # MP-C10 — Hard entity-alignment gate.
+        # Before entering the per-doc scoring loop, scan the full candidate
+        # pool to decide whether the entity is present in *any* chunk.
+        # If at least one chunk carries the entity (in heading OR body), we
+        # activate the hard filter: chunks that lack the entity receive a
+        # large penalty that overrides even a strong list-structure score.
+        # If NO chunk in the pool carries the entity at all (e.g. the query
+        # is about a topic not in this document), the gate stays OFF and the
+        # system falls back to the original soft behaviour — so no regression
+        # for queries like "What is quantum computing?" where the entity is
+        # legitimately absent everywhere.
+        _mpc10_any_entity_present = False
+        if _mpc8_entity_tokens and family_v2 in {"list_entity", "list_structure"}:
+            for _pre_d in (routed_docs or doc_dicts or [])[:10]:
+                _pre_text = str(
+                    (_pre_d or {}).get("page_content") or (_pre_d or {}).get("text") or ""
+                )
+                _pre_md = dict((_pre_d or {}).get("metadata") or {})
+                _pre_heading = " ".join(
+                    str(_pre_md.get(k) or "")
+                    for k in ("heading", "section", "title", "chapter")
+                ).lower()
+                _pre_window = f"{_pre_heading} {_pre_text[:2000].lower()}"
+                if any(_token_match_light(_pre_window, t) for t in _mpc8_entity_tokens):
+                    _mpc10_any_entity_present = True
+                    break
+            logger.info(
+                "[MP-C10 GATE] entity_tokens=%s any_entity_present=%s",
+                _mpc8_entity_tokens,
+                _mpc10_any_entity_present,
+            )
+
         for d in (routed_docs or doc_dicts or [])[:10]:
             sig = _doc_query_token_signals(query, family_v2, d)
             cand_text = str((d or {}).get("page_content") or (d or {}).get("text") or "")
@@ -17057,7 +18909,80 @@ def _shared_rag_final_answer_decision(
                     if _df > 0 and _df <= _rare_threshold:
                         _rarity_missing += _idf_w
 
-            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.5 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (2.5 * sig.get("missing_penalty", 0.0)) + (1.2 * _rarity_coverage) - (2.5 * _rarity_missing) + (8.0 * sig.get("concept_proximity", 0.0)) - (2.0 * sig.get("concept_dispersion", 0.0))
+            # MP-C8 — Per-doc entity alignment. Boost chunks whose heading
+            # carries the query's main entity, penalise chunks whose heading
+            # only carries the structural token but lacks the entity. Heading
+            # is approximated by metadata heading_blob plus the first ~300
+            # characters of the chunk (where inline section titles like
+            # "1.2 Characteristics of Management" appear).
+            _mpc8_entity_align = 0.0
+            _mpc8_entity_in_heading = False
+            _mpc8_struct_in_heading = False
+            _mpc8_entity_body_freq = 0
+            if _mpc8_entity_tokens and family_v2 in {"list_entity", "list_structure"}:
+                _mpc8_chunk_top = cand_text[:300].lower()
+                _mpc8_heading_extended = f"{_lp_heading} {_mpc8_chunk_top}"
+                _mpc8_entity_in_heading = any(
+                    _token_match_light(_mpc8_heading_extended, t)
+                    for t in _mpc8_entity_tokens
+                )
+                _mpc8_struct_in_heading = bool(_mpc8_struct_tokens) and any(
+                    _token_match_light(_mpc8_heading_extended, t)
+                    for t in _mpc8_struct_tokens
+                )
+                _mpc8_body_scan = cand_text[:2000].lower()
+                for _ent_tok in _mpc8_entity_tokens:
+                    _ent_norm = _light_normalize_query_token(_ent_tok)
+                    if not _ent_norm:
+                        continue
+                    _mpc8_entity_body_freq += len(
+                        re.findall(rf"\b{re.escape(_ent_norm)}s?\b", _mpc8_body_scan)
+                    )
+                # MP-C10 — Hard entity-alignment filter.
+                # A chunk "passes" when the entity token appears either in the
+                # extended heading (metadata + first 300 chars) OR anywhere in
+                # the first 2 000 chars of the body.  When the pre-pass gate
+                # confirmed that at least one other chunk does carry the entity,
+                # failing chunks receive a large penalty (-8.0) that overrides
+                # even the strongest list-structure score.  When the gate is
+                # OFF (entity absent from all candidates) the system degrades
+                # gracefully to the original soft penalty so out-of-document
+                # queries are not harmed.
+                _mpc10_entity_in_window = _mpc8_entity_body_freq >= 1
+                _mpc10_entity_passes = _mpc8_entity_in_heading or _mpc10_entity_in_window
+                if _mpc8_entity_in_heading:
+                    # Entity present in heading/top: strong positive signal.
+                    _mpc8_entity_align += 2.6
+                elif _mpc10_entity_in_window:
+                    # Entity in body but not heading: modest reward — do not
+                    # over-penalise answer-bearing prose chunks that lack an
+                    # explicit subsection heading for the entity.
+                    _mpc8_entity_align += min(0.6, 0.20 * _mpc8_entity_body_freq)
+                else:
+                    # Entity absent from both heading and local window.
+                    if _mpc10_any_entity_present:
+                        # Gate is ON: at least one other chunk carries the entity.
+                        # Hard penalty — makes this chunk unselectable as the
+                        # section anchor regardless of its list-structure score.
+                        _mpc8_entity_align -= 8.0
+                    elif _mpc8_struct_in_heading:
+                        # Gate is OFF (entity not found anywhere) — fall back to
+                        # the original soft penalty for the struct-without-entity
+                        # heading shape so nothing regresses.
+                        _mpc8_entity_align -= 2.4
+            sig["_mpc8_entity_align"] = float(_mpc8_entity_align)
+            sig["_mpc8_entity_in_heading"] = float(1.0 if _mpc8_entity_in_heading else 0.0)
+            sig["_mpc8_struct_in_heading"] = float(1.0 if _mpc8_struct_in_heading else 0.0)
+            sig["_mpc8_entity_body_freq"] = float(_mpc8_entity_body_freq)
+            sig["_mpc10_entity_passes"] = float(
+                1.0 if (
+                    _mpc8_entity_tokens
+                    and family_v2 in {"list_entity", "list_structure"}
+                    and (_mpc8_entity_in_heading or _mpc8_entity_body_freq >= 1)
+                ) else 0.0
+            )
+
+            local_score = (1.2 * sig.get("phrase_hits", 0.0)) + (0.5 * sig.get("heading_hits", 0.0)) + (0.7 * sig.get("token_hits", 0.0)) + (0.5 * sig.get("marker_score", 0.0)) + (28.0 * sig.get("density", 0.0)) + (0.95 * sig.get("local_confidence_score", 0.0)) + (0.55 * sig.get("local_focus_hits", 0.0)) + (0.45 * sig.get("local_heading_match", 0.0)) + (0.40 * sig.get("local_list_density", 0.0)) + local_priority_bonus + _lp_adj - sig.get("generic_penalty", 0.0) - (2.5 * sig.get("missing_penalty", 0.0)) + (1.2 * _rarity_coverage) - (2.5 * _rarity_missing) + (8.0 * sig.get("concept_proximity", 0.0)) - (2.0 * sig.get("concept_dispersion", 0.0)) + _mpc8_entity_align
             list_ranked.append((float(local_score), d, sig, int(clean_label_count)))
         list_ranked.sort(key=lambda x: x[0], reverse=True)
 
@@ -17088,7 +19013,7 @@ def _shared_rag_final_answer_decision(
             section_conf = _debug_section_confidence(cand_sig, cand_score)
             preview = re.sub(r"\s+", " ", cand_txt).strip()[:160]
             logger.info(
-                "[SECTION DEBUG] rank=%s chunk=%s source=%s semantic=%.4f final=%.4f query_hits=%s focus_hits=%s heading_hits=%.3f section_phrase_hits=%.3f list_density=%.3f generic_penalty=%.3f heading_detected=%s toc_hint=%s section_confidence=%.3f concept_proximity=%.3f concept_dispersion=%.3f preview=%s",
+                "[SECTION DEBUG] rank=%s chunk=%s source=%s semantic=%.4f final=%.4f query_hits=%s focus_hits=%s heading_hits=%.3f section_phrase_hits=%.3f list_density=%.3f generic_penalty=%.3f heading_detected=%s toc_hint=%s section_confidence=%.3f concept_proximity=%.3f concept_dispersion=%.3f mpc8_entity_align=%.3f mpc8_entity_in_heading=%s mpc8_struct_in_heading=%s mpc10_entity_passes=%s preview=%s",
                 rank_idx,
                 md_c.get("chunk_index"),
                 str(md_c.get("source") or md_c.get("filename") or md_c.get("id") or "")[:120],
@@ -17105,6 +19030,10 @@ def _shared_rag_final_answer_decision(
                 section_conf,
                 float(cand_sig.get("concept_proximity", 0.0) or 0.0),
                 float(cand_sig.get("concept_dispersion", 0.0) or 0.0),
+                float(cand_sig.get("_mpc8_entity_align", 0.0) or 0.0),
+                bool(cand_sig.get("_mpc8_entity_in_heading", 0.0) >= 0.5),
+                bool(cand_sig.get("_mpc8_struct_in_heading", 0.0) >= 0.5),
+                bool(cand_sig.get("_mpc10_entity_passes", 0.0) >= 0.5),
                 preview,
             )
             if strict_label_query:
@@ -17553,6 +19482,19 @@ def _shared_rag_final_answer_decision(
                 return False
             if not _definition_entity_or_reference_match(query, cand):
                 return False
+            # MP-C14 — For definition_entity, generic_grounded_check is NOT
+            # sufficient. The candidate must satisfy the strict shared
+            # `_is_valid_definition_sentence` validator (entity present,
+            # real definition cue, not attribution-only / pronoun-led /
+            # heading / table / OCR fragment). Otherwise the answer is
+            # rejected and the upstream pipeline returns Not found.
+            if family_v2 == "definition_entity":
+                _ent_has, _ent_v = _extract_entity_from_definition_query(query)
+                _ent_v_l = re.sub(r"\s+", " ", str(_ent_v or "").strip().lower()) if _ent_has else ""
+                if not _is_valid_definition_sentence(cand, _ent_v_l):
+                    logger.info("[DEF QUALITY REJECT] mode=post_llm_validator entity=%s preview=%s", _ent_v_l, cand[:160])
+                    return False
+                return True
             if not _passes_strict_definition_relevance_guard(query, cand):
                 logger.info("[DEFINITION SOFT ACCEPT] reason=strict_guard_miss_but_grounded answer=%s", cand[:220])
             return True
@@ -17606,7 +19548,7 @@ def _shared_rag_final_answer_decision(
                 answer_source_mode = "not_found_guard"
             elif list_shaped and list_shaped != cleaned_ans:
                 cleaned_ans = list_shaped
-        if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and family_v2 != "fact_entity":
+        if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and family_v2 != "fact_entity" and str(answer_type or "") != "definition_structure_recovery":
             if not _is_definition_answer_valid(str(cleaned_ans)):
                 rescued = False
                 if family_v2 == "definition_entity":
@@ -17676,6 +19618,200 @@ def _shared_rag_final_answer_decision(
         if route_answer:
             logger.info("[ANSWER ROUTE] mode=definition deterministic=true answer=%s", route_answer[:220])
             return _result(route_answer, used_llm=False, answer_type="definition_route_deterministic", items_count=1)
+
+        # MP-C14 — Hard stop on weak LLM fallback for definition_entity.
+        # When the deterministic route extractor returns nothing, attempt
+        # one final deterministic local-recovery pass (best-scored / simple
+        # definition sentence). The candidate is gated by the strict shared
+        # validator `_is_valid_definition_sentence`. If validation fails the
+        # query short-circuits with RAG_NO_MATCH_RESPONSE (used_llm=False)
+        # so the WS layer never streams a provisional weak LLM answer that
+        # would later be replaced. Generic — no domain words.
+        if family_v2 == "definition_entity":
+            _has_ent, _ent = _extract_entity_from_definition_query(query)
+            _ent_l = re.sub(r"\s+", " ", str(_ent or "").strip().lower()) if _has_ent else ""
+            _local = _extract_best_scored_concept_sentence_from_docs(query, route_docs, max_docs=3)
+            if not _local:
+                _local = _extract_simple_definition_sentence(query, route_docs)
+            _local = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(_local or "")).strip())
+            if (
+                _local
+                and _is_answer_grounded_in_docs(_local, route_docs, query_text=query)
+                and _is_valid_definition_sentence(_local, _ent_l)
+            ):
+                logger.info("[ANSWER ROUTE] mode=definition deterministic=local_recovery answer=%s", _local[:220])
+                return _result(_local, used_llm=False, answer_type="definition_local_recovery", items_count=1)
+
+            # MP-C15 — Structure-aware definition recovery. Real documents
+            # often define a concept through structure (heading + nearby
+            # prose, table label + adjacent paragraph, concept + defining
+            # list) rather than a single "X is Y" sentence. Try one
+            # deterministic structural pass before short-circuiting to
+            # not_found. Pronoun-led sentences are allowed only when their
+            # antecedent is the entity heading anchor we located. Generic.
+            #
+            # Build a wider candidate doc pool (route_docs + full doc_dicts,
+            # deduped). The narrowed `route_docs` may not contain the chunk
+            # that holds the concept's heading — broaden first.
+            def _doc_dedupe_key(_dd: dict) -> str:
+                _t = str((_dd or {}).get("page_content") or (_dd or {}).get("text") or "")
+                return _t[:160]
+
+            _struct_pool: list[dict] = []
+            _struct_seen: set[str] = set()
+            for _dd in list(route_docs) + list(doc_dicts or []):
+                _k = _doc_dedupe_key(_dd)
+                if not _k or _k in _struct_seen:
+                    continue
+                _struct_seen.add(_k)
+                _struct_pool.append(_dd)
+            _struct_ans, _struct_dbg = _extract_structure_aware_definition(
+                query, _struct_pool, _ent_l
+            )
+
+            # Same-source micro-retrieval rescue: trigger when the
+            # structural pass has either no anchor at all OR an anchor that
+            # yielded zero passing candidates. Generic, bounded
+            # (top_k=12, no rerank) and same-source gated so out-of-scope
+            # concepts (e.g. "BioChem") still return not_found.
+            _need_micro = (not _struct_ans) and (
+                not _struct_dbg.get("structure_recovery_mode")
+                or len(_struct_dbg.get("candidate_definition_sentences") or []) == 0
+            )
+            if _need_micro and _ent_l:
+                try:
+                    _allowed_sources: set[str] = set()
+                    for _dd in _struct_pool:
+                        _src = str(
+                            (_dd or {}).get("source")
+                            or ((_dd or {}).get("metadata") or {}).get("source")
+                            or ""
+                        )
+                        if _src:
+                            _allowed_sources.add(_src)
+                    _micro_kept: list[dict] = []
+                    # Try several query phrasings to broaden recall while
+                    # staying same-source: the bare entity, the head token,
+                    # and an explicit "what is" prefix. Generic.
+                    _ent_head = re.split(r"\s+", _ent_l)[0]
+                    _queries = [_ent_l]
+                    if _ent_head and _ent_head != _ent_l:
+                        _queries.append(_ent_head)
+                    _queries.append(f"what is {_ent_l}")
+                    _micro_total = 0
+                    for _q in _queries:
+                        try:
+                            _batch = live_rag.search(
+                                query=_q,
+                                top_k=12,
+                                return_dicts=True,
+                                enable_rerank=False,
+                            ) or []
+                        except Exception:
+                            _batch = []
+                        _micro_total += len(_batch)
+                        for _md in _batch:
+                            _src = str(
+                                (_md or {}).get("source")
+                                or ((_md or {}).get("metadata") or {}).get("source")
+                                or ""
+                            )
+                            if _allowed_sources and _src not in _allowed_sources:
+                                continue
+                            _k = _doc_dedupe_key(_md)
+                            if not _k or _k in _struct_seen:
+                                continue
+                            _struct_seen.add(_k)
+                            _micro_kept.append(_md)
+                    logger.info(
+                        "[STRUCT-AWARE DEF] micro_retrieval entity=%s fetched=%d kept_same_source=%d",
+                        _ent_l, _micro_total, len(_micro_kept),
+                    )
+                    if _micro_kept:
+                        _struct_pool = _struct_pool + _micro_kept
+                        _struct_ans, _struct_dbg = _extract_structure_aware_definition(
+                            query, _struct_pool, _ent_l
+                        )
+                except Exception as _exc:
+                    logger.info("[STRUCT-AWARE DEF] micro_retrieval error=%s", str(_exc)[:160])
+
+            # Final corpus-wide structural fallback. The retrieval pipeline
+            # caps results at ~3 chunks per query through its quality
+            # filter, so heading-anchored chunks (e.g. an "Elements of X:"
+            # block in another part of the same document) often never
+            # reach the structure-aware helper above. Scan the entire
+            # active vector-store collection for chunks containing the
+            # entity stem, gated by the same allowed-source set so
+            # out-of-document concepts (BioChem) still return not_found.
+            _need_corpus = (not _struct_ans) and (
+                not _struct_dbg.get("structure_recovery_mode")
+                or len(_struct_dbg.get("candidate_definition_sentences") or []) == 0
+                and len(_struct_dbg.get("candidate_definition_list_items") or []) < 3
+            )
+            if _need_corpus and _ent_l:
+                try:
+                    _allowed_sources_c: set[str] = set()
+                    for _dd in _struct_pool:
+                        _src = str(
+                            (_dd or {}).get("source")
+                            or ((_dd or {}).get("metadata") or {}).get("source")
+                            or ""
+                        )
+                        if _src:
+                            _allowed_sources_c.add(_src)
+                    _corpus_hits = _mpc15_corpus_filter_by_entity(
+                        _ent_l, allowed_sources=_allowed_sources_c or None, limit=10
+                    )
+                    _added = 0
+                    for _ch in _corpus_hits:
+                        _k = _doc_dedupe_key(_ch)
+                        if not _k or _k in _struct_seen:
+                            continue
+                        _struct_seen.add(_k)
+                        _struct_pool.append(_ch)
+                        _added += 1
+                    logger.info(
+                        "[STRUCT-AWARE DEF] corpus_fallback entity=%s scanned_hits=%d added=%d",
+                        _ent_l, len(_corpus_hits), _added,
+                    )
+                    if _added:
+                        _struct_ans, _struct_dbg = _extract_structure_aware_definition(
+                            query, _struct_pool, _ent_l
+                        )
+                except Exception as _exc:
+                    logger.info("[STRUCT-AWARE DEF] corpus_fallback error=%s", str(_exc)[:160])
+
+            logger.info(
+                "[STRUCT-AWARE DEF] entity=%s mode=%s anchor=%s window=%s candidates=%d list_items=%d reason=%s",
+                _ent_l,
+                _struct_dbg.get("structure_recovery_mode"),
+                str(_struct_dbg.get("anchor_preview") or "")[:120],
+                str(_struct_dbg.get("focused_window_preview") or "")[:160],
+                len(_struct_dbg.get("candidate_definition_sentences") or []),
+                len(_struct_dbg.get("candidate_definition_list_items") or []),
+                _struct_dbg.get("final_recovery_reason"),
+            )
+            for _i, _cand in enumerate((_struct_dbg.get("candidate_definition_sentences") or [])[:5]):
+                logger.info("[STRUCT-AWARE DEF] cand[%d]=%s", _i, str(_cand)[:200])
+            for _i, _li in enumerate((_struct_dbg.get("candidate_definition_list_items") or [])[:5]):
+                logger.info("[STRUCT-AWARE DEF] list_item[%d]=%s", _i, str(_li)[:140])
+            _struct_grounded = bool(_struct_ans) and _is_answer_grounded_in_docs(_struct_ans, _struct_pool, query_text=query)
+            logger.info("[STRUCT-AWARE DEF] returned_answer=%s grounded=%s pool_size=%d",
+                        str(_struct_ans or "")[:200], _struct_grounded, len(_struct_pool))
+            if _struct_ans and _struct_grounded:
+                logger.info(
+                    "[ANSWER ROUTE] mode=definition deterministic=structure_recovery answer=%s",
+                    _struct_ans[:220],
+                )
+                return _result(_struct_ans, used_llm=False, answer_type="definition_structure_recovery", items_count=1)
+
+            logger.info(
+                "[ANSWER ROUTE] mode=definition deterministic=false action=not_found_strict entity=%s preview=%s",
+                _ent_l,
+                (_local or "")[:160],
+            )
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="definition_not_found_strict", items_count=0)
+
         logger.info("[ANSWER ROUTE] mode=definition deterministic=false action=llm_required")
         return {
             "intent": intent,
@@ -17736,6 +19872,106 @@ def _shared_rag_final_answer_decision(
             _enum_letter_re = re.compile(r"(?:^|[\s\n])([A-J])\.\s+[A-Z][a-zA-Z]+")
             _merged_super_pieces: list[str] = []
             _merged_route_meta: dict | None = None
+
+            # MP-C7 helper: try to synthesize a deterministic A./B./C. answer
+            # from a single chunk's anchored subsection slice. Returns the
+            # final answer dict if it succeeds, else None. Pure structural —
+            # uses only enumeration letter adjacency.
+            def _mpc7_try_direct_enum_from_chunk(_d: dict, _origin: str):
+                _md = dict((_d or {}).get("metadata") or {})
+                _txt = str((_d or {}).get("page_content") or (_d or {}).get("text") or "")
+                if not _txt:
+                    return None
+                _sliced = _slice_chunk_to_query_subsection(_txt, query)
+                if not _sliced or _sliced == _txt:
+                    return None
+                _letters = {m.group(1).upper() for m in _enum_letter_re.finditer(_sliced)}
+                if not ("A" in _letters and "B" in _letters and "C" in _letters):
+                    return None
+                _slice_norm_loc = re.sub(
+                    r"(?<!\n)\s*(?=[A-J]\.\s+[A-Z][a-zA-Z])",
+                    "\n",
+                    _sliced,
+                )
+                _enum_line_re_local = re.compile(
+                    r"(?:^|\n)\s*([A-J])\.\s+([^\n]{4,300})"
+                )
+                _pairs_local: list[tuple[str, str]] = []
+                _seen_letters_local: set[str] = set()
+                for _m in _enum_line_re_local.finditer(_slice_norm_loc):
+                    _let = _m.group(1).upper()
+                    if _let in _seen_letters_local:
+                        continue
+                    _seen_letters_local.add(_let)
+                    _txt_item = re.sub(r"\s+", " ", _m.group(2)).strip()
+                    _txt_item = re.split(
+                        r"(?<=[.:])\s+(?=[A-Z])|\.\s|:\s",
+                        _txt_item,
+                        maxsplit=1,
+                    )[0].strip(" .:;,")
+                    if _txt_item:
+                        _pairs_local.append((_let, _txt_item))
+                if not (len(_pairs_local) >= 3 and _pairs_local[0][0] == "A"):
+                    return None
+                _expected_l = "A"
+                _items_l: list[str] = []
+                for _let, _txt_item in _pairs_local:
+                    if _let != _expected_l:
+                        break
+                    # Drop the letter label from the item text so downstream
+                    # sanitize/coherence sees the actual subject as the first
+                    # word (enabling the parallel-subject exemption for
+                    # "Subject is/are Predicate" enumerations). The letter
+                    # itself is purely a structural marker and adds no
+                    # informational content. Generic — applies regardless of
+                    # the document's labeling convention.
+                    _items_l.append(f"- {_txt_item}")
+                    _expected_l = chr(ord(_expected_l) + 1)
+                if len(_items_l) < 3:
+                    return None
+                _direct_answer_loc = "\n".join(_items_l)
+                if isinstance(list_local_support, dict):
+                    _cur_w_loc = str(list_local_support.get("single_local_window_text") or "")
+                    if _slice_norm_loc not in _cur_w_loc:
+                        list_local_support["single_local_window_text"] = (
+                            "\n\n".join([p for p in [_cur_w_loc, _slice_norm_loc] if p])[:24000]
+                        )
+                        if not list_local_support.get("validation_scope"):
+                            list_local_support["validation_scope"] = "single_local_window"
+                logger.info(
+                    "[MP-C7 DIRECT ENUM %s] chunk=%s items=%d answer=%s",
+                    _origin, _md.get("chunk_index"), len(_items_l),
+                    _direct_answer_loc.replace("\n", " | ")[:300],
+                )
+                return _result(
+                    _direct_answer_loc,
+                    used_llm=False,
+                    answer_type="list_route_deterministic",
+                    items_count=len(_items_l),
+                )
+
+            # MP-C7: first try the route docs (highest priority), then fall
+            # back to extra docs. The answer-bearing chunk with the labeled
+            # A./B./C. enumeration may not always be the route's top pick
+            # (the section ranker may select a TOC/index chunk instead).
+            for _route_d in (route_docs or []):
+                _direct_route_result = _mpc7_try_direct_enum_from_chunk(_route_d, "ROUTE-SLICE")
+                if _direct_route_result is not None:
+                    return _direct_route_result
+            for _extra_d in (doc_dicts or []):
+                # Skip docs already tried as route_docs (same source+chunk_index).
+                _emd = dict((_extra_d or {}).get("metadata") or {})
+                _key = (str(_emd.get("source") or ""), _emd.get("chunk_index"))
+                if any(
+                    (str(dict((_rd or {}).get("metadata") or {}).get("source") or ""),
+                     dict((_rd or {}).get("metadata") or {}).get("chunk_index")) == _key
+                    for _rd in (route_docs or [])
+                ):
+                    continue
+                _direct_extra_result = _mpc7_try_direct_enum_from_chunk(_extra_d, "EXTRA-SLICE")
+                if _direct_extra_result is not None:
+                    return _direct_extra_result
+
             for _route_d in (route_docs or []):
                 _route_md = dict((_route_d or {}).get("metadata") or {})
                 _route_src = str(_route_md.get("source") or "")
@@ -19810,8 +22046,53 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     if not text or len(text.strip()) < 2:
         return ("I didn't catch that. Could you repeat?", [])
 
+    # Generic conversational definition normalization (HTTP path).
+    try:
+        _norm = _normalize_conversational_definition_query(text)
+    except Exception:
+        _norm = text
+    if _norm and _norm != text:
+        logger.info("[CONV NORM] (http) '%s' -> '%s'", (text or "")[:160], _norm[:160])
+        text = _norm
+
     if _is_smalltalk(text):
         return (_smalltalk_response(text), [])
+
+    # ---- FOLLOW-UP / EXPLANATION MODE (HTTP path) -----------------------
+    # Detect generic clarification intents ("what do you mean?", "explain more",
+    # "simplify that"). When detected, answer locally from the previously
+    # grounded answer + small chunk window. NO new heavy retrieval.
+    if _is_followup_query(text, connection_id):
+        logger.info("[FOLLOWUP] HTTP follow-up detected: '%s'", (text or "")[:80])
+        logger.info("[FOLLOWUP ROUTE] triggered for query=%s", text)
+        fu_text, fu_docs = await _handle_followup_query(text, connection_id)
+        try:
+            history = conversation_history[connection_id]
+            history.append({"role": "user", "content": text.strip()})
+            history.append({"role": "assistant", "content": fu_text})
+        except Exception:
+            pass
+        response_time = int((time.time() - start_time) * 1000)
+        try:
+            log_usage(
+                username=(user or {}).get("username", "unknown"),
+                user_role=(user or {}).get("role", "unknown"),
+                query_text=text,
+                response_status="success",
+                error_message=None,
+                response_time_ms=response_time,
+                rag_docs_found=0,
+                query_length=len((text or "").strip()),
+                response_length=len(fu_text or ""),
+            )
+        except Exception:
+            pass
+        try:
+            _set_last_latency_breakdown(connection_id, 0.0, 0.0, 0.0, float(response_time), float(response_time), cache_hit=False)
+        except Exception:
+            pass
+        logger.info("[FOLLOWUP] HTTP follow-up answered in %dms", response_time)
+        return (fu_text, fu_docs)
 
     original_query_text = text
     is_generation_query_requested = _is_llm_generation_query(original_query_text)
@@ -20384,6 +22665,58 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 
             if entity_definition_docs and len(entity_definition_docs) == 1 and len(doc_dicts) > 1:
                 logger.info("[STRICT DEF PREF MISS] entity=%s reason=single_strict_doc_blended_with_explanations", query_entity)
+
+            # MP-C12 — Indirect-evidence promotion. The downstream consumer at the
+            # `definition_entity` branch checks for a chunk flagged with
+            # `_indirect_definition_mode=True` and uses its `_indirect_evidence`
+            # sentences to compose a grounded indirect-style answer (e.g. for
+            # entities like "bureaucracy" where the document only contains
+            # narrative/criticism prose, not a clean "X is ..." sentence).
+            # Without this promotion, the flag is never set and the indirect
+            # path is dead code. Generic logic — no domain words.
+            if (
+                query_entity
+                and not entity_definition_docs
+                and not definition_docs
+                and indirect_evidence_pool
+                and not _indirect_evidence_pool_is_weak(indirect_evidence_pool)
+            ):
+                ranked_indirect = sorted(
+                    indirect_evidence_pool,
+                    key=lambda it: (
+                        not bool((it or {}).get("is_table", False)),
+                        float((it or {}).get("score", 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                indirect_sentences = [
+                    str((it or {}).get("sentence") or "").strip()
+                    for it in ranked_indirect
+                    if str((it or {}).get("sentence") or "").strip()
+                    and not bool((it or {}).get("is_table", False))
+                ]
+                if indirect_sentences:
+                    seed_doc = next(
+                        (d for d in (explanation_docs or filtered_ranked_docs or doc_dicts) if d),
+                        None,
+                    )
+                    seed_md = dict((seed_doc or {}).get("metadata") or {}) if seed_doc else {}
+                    seed_md["_indirect_definition_mode"] = True
+                    seed_md["_indirect_entity"] = query_entity
+                    seed_md["_indirect_evidence"] = indirect_sentences[:3]
+                    indirect_doc = {
+                        "page_content": "\n".join(indirect_sentences[:3]),
+                        "text": "\n".join(indirect_sentences[:3]),
+                        "metadata": seed_md,
+                        "score": float((seed_doc or {}).get("score", 1.0) or 1.0) + 0.5,
+                    }
+                    doc_dicts = [indirect_doc] + list(doc_dicts or [])
+                    logger.info(
+                        "[INDIRECT PROMOTE] entity=%s sentences=%d top=%s",
+                        query_entity,
+                        len(indirect_sentences[:3]),
+                        indirect_sentences[0][:160],
+                    )
 
             doc_dicts = _dedup_docs_exact_text(doc_dicts)
             doc_dicts = sorted(doc_dicts, key=lambda x: float((x or {}).get("score", 0.0) or 0.0), reverse=True)
@@ -21555,6 +23888,10 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         )
 
     logger.info(f"RAG: Generated response ({len(ai_text)} chars) in {response_time}ms")
+    try:
+        _save_last_answer_state(connection_id, text, ai_text, doc_dicts or relevant_docs)
+    except Exception:
+        logger.exception("[FOLLOWUP] save state failed (HTTP path)")
     return (ai_text, relevant_docs)
 
 
@@ -21876,6 +24213,35 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     the first sentence is ready, while LLM continues generating more text.
     """
     import time
+    # ---- DEFENSIVE FOLLOW-UP GUARD (must be FIRST) -----------------------
+    # If a follow-up query somehow reached call_llm_streaming despite the
+    # WS entrypoint routing, intercept here BEFORE the [FLOW] entering log
+    # is emitted, so the log can never falsely indicate that a follow-up
+    # entered the heavy RAG path.
+    try:
+        if _is_followup_query(text, connection_id):
+            logger.error("🔥 FOLLOWUP ROUTE TRIGGERED (defensive in call_llm_streaming)")
+            logger.info("[FOLLOWUP] WS follow-up detected (defensive): '%s'", (text or "")[:80])
+            fu_t0 = time.perf_counter()
+            fu_text, _fu_docs = await _handle_followup_query(text, connection_id)
+            fu_text = (fu_text or "").strip() or RAG_NO_MATCH_RESPONSE
+            try:
+                history = conversation_history[connection_id]
+                history.append({"role": "user", "content": (text or "").strip()})
+                history.append({"role": "assistant", "content": fu_text})
+            except Exception:
+                pass
+            try:
+                await websocket.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True, "timing": t_meta or {}})
+                await websocket.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": False, "timing": t_meta or {}})
+            except Exception:
+                pass
+            logger.info("[FOLLOWUP] WS follow-up answered (defensive) in %.0fms", (time.perf_counter() - fu_t0) * 1000.0)
+            logger.error("🔥 FOLLOWUP ROUTE COMPLETE (defensive in call_llm_streaming)")
+            return
+    except Exception:
+        logger.exception("[FOLLOWUP] defensive guard in call_llm_streaming failed; continuing")
+
     start_time = time.time()
     logger.info("[FLOW] entering call_llm_streaming")
     logger.info("[UI PATH ENTER] connection_id=%s", connection_id)
@@ -21903,6 +24269,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         except Exception:
             pass
         return
+
+    # NOTE: Follow-up / explanation routing happens in the DEFENSIVE GUARD
+    # at the very top of this function (before [FLOW] entering log) and at
+    # the WS entrypoint. Do NOT add another follow-up branch here — it
+    # would be unreachable code.
 
     original_query_text = text
     is_generation_query_requested = _is_llm_generation_query(original_query_text)
@@ -22253,6 +24624,10 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             early_identity = None
         if early_identity:
             try:
+                _save_last_answer_state(connection_id, text, early_identity, relevant_docs)
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS early_identity)")
+            try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": early_identity, "index": 0, "done": True, "timing": t_meta})
             except Exception:
                 pass
@@ -22414,6 +24789,52 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
             if entity_definition_docs and len(entity_definition_docs) == 1 and len(doc_dicts) > 1:
                 logger.info("[STRICT DEF PREF MISS] entity=%s reason=single_strict_doc_blended_with_explanations", query_entity)
+
+            # MP-C12 — Indirect-evidence promotion (mirror of upstream branch).
+            # See the parallel definition pipeline above for full rationale.
+            if (
+                query_entity
+                and not entity_definition_docs
+                and not definition_docs
+                and indirect_evidence_pool
+                and not _indirect_evidence_pool_is_weak(indirect_evidence_pool)
+            ):
+                ranked_indirect = sorted(
+                    indirect_evidence_pool,
+                    key=lambda it: (
+                        not bool((it or {}).get("is_table", False)),
+                        float((it or {}).get("score", 0.0) or 0.0),
+                    ),
+                    reverse=True,
+                )
+                indirect_sentences = [
+                    str((it or {}).get("sentence") or "").strip()
+                    for it in ranked_indirect
+                    if str((it or {}).get("sentence") or "").strip()
+                    and not bool((it or {}).get("is_table", False))
+                ]
+                if indirect_sentences:
+                    seed_doc = next(
+                        (d for d in (explanation_docs or filtered_ranked_docs or doc_dicts) if d),
+                        None,
+                    )
+                    seed_md = dict((seed_doc or {}).get("metadata") or {}) if seed_doc else {}
+                    seed_md["_indirect_definition_mode"] = True
+                    seed_md["_indirect_entity"] = query_entity
+                    seed_md["_indirect_evidence"] = indirect_sentences[:3]
+                    indirect_doc = {
+                        "page_content": "\n".join(indirect_sentences[:3]),
+                        "text": "\n".join(indirect_sentences[:3]),
+                        "metadata": seed_md,
+                        "score": float((seed_doc or {}).get("score", 1.0) or 1.0) + 0.5,
+                    }
+                    doc_dicts = [indirect_doc] + list(doc_dicts or [])
+                    logger.info(
+                        "[INDIRECT PROMOTE] entity=%s sentences=%d top=%s",
+                        query_entity,
+                        len(indirect_sentences[:3]),
+                        indirect_sentences[0][:160],
+                    )
 
             entity_filtered_docs = _dedup_docs_exact_text(filtered_ranked_docs)
             entity_filtered_docs = sorted(
@@ -22669,6 +25090,10 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 logger.info("[POST-GUARD CHECK] docs_count=%s grounded=%s decision=%s", len(doc_dicts or []), True, "accept_grounded")
             short_answer = _format_generation_answer_by_query(text, _cleanup_final_answer_text(short_answer))
             try:
+                _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS generation accept)")
+            try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
             except Exception:
                 pass
@@ -22691,6 +25116,10 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             short_answer = _apply_not_found_ux(text, str(stream_pre_simple.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
             short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
             _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
+            try:
+                _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS pre_simple extractor)")
             try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
             except Exception:
@@ -23327,6 +25756,163 @@ STRICT BEHAVIOR:
         is_simple_factual_query,
     )
 
+    # MP-C11 — Fast no-match response (skip LLM when context is clearly weak).
+    # Three independent conditions are checked in order; any one triggers the
+    # fast path.  The gate is deliberately conservative (thresholds / scoping)
+    # so it never fires for greetings, generation queries, arabic mode, small
+    # talk, or any query type where weak-doc answers are still useful.
+    #
+    # Condition A — too few docs: fewer than 2 prepared chunks provides
+    #   insufficient evidence for ANY structured answer; skip LLM.
+    # Condition B — top similarity too low: the best retrieved chunk is below
+    #   the meaningful-relevance floor, meaning the retriever found nothing
+    #   semantically close to the query.
+    # Condition C — entity absent from every candidate (list / definition
+    #   queries only): entity tokens were extracted but not a single doc
+    #   contains any of them → the document pool doesn't cover this topic.
+    #
+    # Fallback: if NO condition fires, proceed normally.
+    _mpc11_fast_fail = False
+    _mpc11_fail_reason = ""
+    if (
+        not is_greeting
+        and not arabic_mode
+        and not _is_smalltalk(text)
+        and not is_generation_query_requested
+    ):
+        _mpc11_fam = _classify_query_family_v2(text)
+        # --- Pre-compute entity-presence in retrieved docs (definition_entity
+        # only). When TRUE, Condition B (max_sim<0.25) is skipped because the
+        # rerank scoring scale on this project can be raw/negative even when
+        # the canonical entity sits in a kept chunk (e.g. table-row matches
+        # like "Administrative Theory  Henry Fayol"). Condition C is still
+        # applied below; if the entity is genuinely absent everywhere (e.g.
+        # "BioChemistry") fast-fail still fires via that route.
+        _mpc11_def_entity_present = False
+        _mpc11_def_entity_tokens: list[str] = []
+        if _mpc11_fam == "definition_entity":
+            _mpc11_def_entity_tokens, _ = _query_main_entity_tokens(text, _mpc11_fam)
+            if _mpc11_def_entity_tokens:
+                for _mpc11_d in (doc_dicts or [])[:10]:
+                    _mpc11_text = str(
+                        (_mpc11_d or {}).get("page_content") or
+                        (_mpc11_d or {}).get("text") or ""
+                    )
+                    _mpc11_md = dict((_mpc11_d or {}).get("metadata") or {})
+                    _mpc11_heading = " ".join(
+                        str(_mpc11_md.get(k) or "")
+                        for k in ("heading", "section", "title", "chapter")
+                    ).lower()
+                    _mpc11_window = f"{_mpc11_heading} {_mpc11_text[:2000].lower()}"
+                    if any(_token_match_light(_mpc11_window, t) for t in _mpc11_def_entity_tokens):
+                        _mpc11_def_entity_present = True
+                        break
+                if _mpc11_def_entity_present:
+                    logger.info(
+                        "[FAST FAIL EXEMPT] definition_entity entity present in retrieved docs | tokens=%s",
+                        _mpc11_def_entity_tokens,
+                    )
+        # --- Condition A: too few prepared docs ---
+        if len(doc_dicts) < 2:
+            _mpc11_fast_fail = True
+            _mpc11_fail_reason = f"doc_count={len(doc_dicts)}<2"
+        # --- Condition B: top similarity below floor ---
+        # SKIPPED for definition_entity queries when the entity is clearly
+        # present in retrieved docs (the rerank score floor of 0.25 can be
+        # too aggressive on negative-scaled rerank scores).
+        if not _mpc11_fast_fail and not _mpc11_def_entity_present:
+            _mpc11_top_sim = _max_doc_similarity(relevant_docs or [])
+            # 0.25 is well below any genuinely matching chunk (empirically
+            # confirmed matches sit at ≥ 1.0 on this project's scale).
+            if _mpc11_top_sim < 0.25:
+                _mpc11_fast_fail = True
+                _mpc11_fail_reason = f"max_sim={_mpc11_top_sim:.3f}<0.25"
+        # --- Condition C: entity absent from all candidates (list/def only) ---
+        if not _mpc11_fast_fail and _mpc11_fam in {
+            "list_entity", "list_structure", "definition_entity"
+        }:
+            if _mpc11_fam == "definition_entity":
+                # Reuse the pre-computed result so we don't iterate twice.
+                _mpc11_entity_tokens = _mpc11_def_entity_tokens
+                _mpc11_entity_present = _mpc11_def_entity_present
+            else:
+                _mpc11_entity_tokens, _ = _query_main_entity_tokens(text, _mpc11_fam)
+                _mpc11_entity_present = False
+                if _mpc11_entity_tokens:
+                    for _mpc11_d in (doc_dicts or [])[:10]:
+                        _mpc11_text = str(
+                            (_mpc11_d or {}).get("page_content") or
+                            (_mpc11_d or {}).get("text") or ""
+                        )
+                        _mpc11_md = dict((_mpc11_d or {}).get("metadata") or {})
+                        _mpc11_heading = " ".join(
+                            str(_mpc11_md.get(k) or "")
+                            for k in ("heading", "section", "title", "chapter")
+                        ).lower()
+                        _mpc11_window = f"{_mpc11_heading} {_mpc11_text[:2000].lower()}"
+                        if any(_token_match_light(_mpc11_window, t) for t in _mpc11_entity_tokens):
+                            _mpc11_entity_present = True
+                            break
+            if _mpc11_entity_tokens and not _mpc11_entity_present:
+                _mpc11_fast_fail = True
+                _mpc11_fail_reason = (
+                    f"entity_absent_from_all_docs tokens={_mpc11_entity_tokens}"
+                )
+    if _mpc11_fast_fail:
+        logger.info(
+            "[FAST FAIL] skipping LLM due to weak context | reason=%s query=%s",
+            _mpc11_fail_reason,
+            (text or "")[:120],
+        )
+        _mpc11_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+        try:
+            await websocket.send_json({
+                "type": "aiResponseChunk",
+                "text": _mpc11_answer,
+                "index": 0,
+                "done": True,
+                "timing": t_meta,
+            })
+        except Exception:
+            pass
+        try:
+            if not EFFECTIVE_DISABLE_TTS:
+                await _tts_single_response(
+                    _mpc11_answer,
+                    websocket,
+                    connection_id,
+                    language=("ar" if arabic_mode else xtts_lang),
+                )
+        except Exception:
+            pass
+        try:
+            logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(_mpc11_answer or "")[:320])
+            await websocket.send_json({
+                "type": "aiResponseDone",
+                "fullText": _mpc11_answer,
+                "sources": len(doc_dicts),
+                "arabic_mode": arabic_mode,
+                "timing": t_meta,
+            })
+        except Exception:
+            pass
+        try:
+            response_time = int((time.time() - start_time) * 1000)
+            log_usage(
+                username=user.get("username", "unknown"),
+                user_role=user.get("role", "unknown"),
+                query_text=text,
+                response_status="success",
+                error_message=None,
+                response_time_ms=response_time,
+                rag_docs_found=len(doc_dicts),
+                query_length=len(text.strip()),
+                response_length=len(_mpc11_answer),
+            )
+        except Exception:
+            pass
+        return
+
     stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
     stream_pre_decision = _enforce_runtime_answer_acceptance(text, stream_pre_decision, doc_dicts)
     stream_short_circuit_non_llm = not stream_pre_decision.get("used_llm", True)
@@ -23342,6 +25928,10 @@ STRICT BEHAVIOR:
             short_answer = _apply_not_found_ux(text, short_answer, doc_dicts)
         short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
         _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
+        try:
+            _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+        except Exception:
+            logger.exception("[FOLLOWUP] save state failed (WS short_circuit_non_llm)")
         try:
             await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
         except Exception:
@@ -24257,6 +26847,10 @@ STRICT BEHAVIOR:
             history_user_text = original_arabic_text if arabic_mode else text.strip()
             history.append({"role": "user", "content": history_user_text})
             history.append({"role": "assistant", "content": full_response.strip()})
+            try:
+                _save_last_answer_state(connection_id, text, full_response.strip(), doc_dicts)
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS path)")
 
         # Send completion message with latency metrics (Phase 6)
         t_llm_done = time.perf_counter()
@@ -24370,8 +26964,30 @@ class QueryRequest(BaseModel):
 async def query_rag(data: QueryRequest, request: Request, user=Depends(require_login())):
     logger.info("[FLOW] entering query_rag")
     logger.info("[FLOW] query_before = %s", (data.text or "")[:400])
-    connection_id = "manual_" + str(uuid.uuid4())[:8]
+    # Stable per-user connection_id so follow-up state persists across HTTP
+    # requests for the same user (was generating a fresh uuid per request,
+    # which orphaned every saved answer state).
+    _uname = (user or {}).get("username") if isinstance(user, dict) else None
+    if _uname:
+        connection_id = f"http_user_{_uname}"
+    else:
+        try:
+            _tok = request.cookies.get(SESSION_COOKIE)
+        except Exception:
+            _tok = None
+        if _tok:
+            import hashlib as _hashlib
+            connection_id = "http_sess_" + _hashlib.sha1(_tok.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        else:
+            connection_id = "http_anon"
     ai_response, retrieved_docs = await call_llm_with_rag(data.text, connection_id, user)
+    # Skip definition/cleanup post-processing for follow-up clarifications:
+    # those answers are already finalized inside _handle_followup_query and
+    # would otherwise be reshaped by definition-style cleaners that expect a
+    # fresh retrieval, not a clarification.
+    if _is_followup_query(data.text, connection_id):
+        logger.info("[HTTP FINAL ANSWER BEFORE RETURN] (followup) %s", str(ai_response or "")[:320])
+        return {"answer": ai_response}
     if _classify_query_family_v2(data.text) != "fact_entity":
         normalized_query_for_output, _ = _normalize_definition_query_before_retrieval(data.text)
         ai_response = _force_clean_definition_sentence(normalized_query_for_output or data.text, ai_response, retrieved_docs)
@@ -25668,6 +28284,35 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     if cancel_evt:
                         cancel_evt.clear()
 
+                    # ---- FOLLOW-UP ROUTING (voice path) ----
+                    # Bypass full RAG retrieval/LLM pipeline for clarification
+                    # queries spoken by the user.
+                    try:
+                        _fu_check_v = _is_followup_query(full_text, conn_id)
+                    except Exception:
+                        _fu_check_v = False
+                    logger.error("🔥 WS RECEIVED TEXT (voice): %s", full_text)
+                    logger.error("🔥 FOLLOWUP CHECK (voice): %s", _fu_check_v)
+                    if _fu_check_v:
+                        logger.error("🔥 FOLLOWUP ROUTE TRIGGERED (voice)")
+                        logger.info("[FOLLOWUP ROUTE] triggered for query=%s", full_text)
+                        fu_text, _ = await _handle_followup_query(full_text, conn_id)
+                        fu_text = (fu_text or "").strip() or RAG_NO_MATCH_RESPONSE
+                        try:
+                            history = conversation_history[conn_id]
+                            history.append({"role": "user", "content": full_text.strip()})
+                            history.append({"role": "assistant", "content": fu_text})
+                        except Exception:
+                            pass
+                        try:
+                            await ws.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True, "timing": t_meta})
+                            await ws.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": (lang == "ar"), "timing": t_meta})
+                        except Exception:
+                            pass
+                        logger.info("[FOLLOWUP ROUTE] complete for query=%s", full_text)
+                        logger.error("🔥 FOLLOWUP ROUTE COMPLETE (voice)")
+                        return
+
                     await call_llm_streaming(
                         ws, full_text, conn_id,
                         user or {"username": "anon", "role": "user"},
@@ -25864,17 +28509,62 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         elif "text" in payload:
                             # Handle typed text queries with streaming
                             text = payload["text"].strip()
+                            # Generic conversational definition normalization
+                            # (e.g. "ok so what about the definition of X?" ->
+                            # "what is X?"). Done BEFORE follow-up detection
+                            # so a definition re-ask routes to full RAG, not
+                            # follow-up.
+                            try:
+                                _norm_text = _normalize_conversational_definition_query(text)
+                            except Exception:
+                                _norm_text = text
+                            if _norm_text and _norm_text != text:
+                                logger.info(
+                                    "[CONV NORM] '%s' -> '%s'",
+                                    text[:160], _norm_text[:160],
+                                )
+                                text = _norm_text
                             # Allow per-message language override; fall back to session setting
                             msg_lang = payload.get("language", session_language)
                             if msg_lang in ("en", "ar", "auto"):
                                 session_language = msg_lang  # update session preference
                             if text:
+                                # ---- HARD DEBUG: prove the WS entrypoint is reached ----
+                                try:
+                                    _fu_check = _is_followup_query(text, connection_id)
+                                except Exception:
+                                    _fu_check = False
+                                logger.error("🔥 WS RECEIVED TEXT: %s", text)
+                                logger.error("🔥 FOLLOWUP CHECK: %s", _fu_check)
                                 logger.info(f"{connection_id} text query [{msg_lang}]: {text}")
                                 logger.info("[FLOW] entering rag_ws_endpoint (typed text path)")
                                 logger.info("[FLOW] query_before = %s", (text or "")[:400])
                                 cancel_evt = interrupt_events.get(connection_id)
                                 if cancel_evt:
                                     cancel_evt.clear()
+                                # ---- FOLLOW-UP ROUTING (highest priority) ----
+                                # Intercept clarification queries BEFORE any
+                                # retrieval / LLM call so they never hit the
+                                # full RAG pipeline.
+                                if _fu_check:
+                                    logger.error("🔥 FOLLOWUP ROUTE TRIGGERED")
+                                    logger.info("[FOLLOWUP ROUTE] triggered for query=%s", text)
+                                    fu_text, _ = await _handle_followup_query(text, connection_id)
+                                    fu_text = (fu_text or "").strip() or RAG_NO_MATCH_RESPONSE
+                                    try:
+                                        history = conversation_history[connection_id]
+                                        history.append({"role": "user", "content": text.strip()})
+                                        history.append({"role": "assistant", "content": fu_text})
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await websocket.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True})
+                                        await websocket.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": False})
+                                    except Exception:
+                                        pass
+                                    logger.info("[FOLLOWUP ROUTE] complete for query=%s", text)
+                                    logger.error("🔥 FOLLOWUP ROUTE COMPLETE")
+                                    continue
                                 await call_llm_streaming(
                                     websocket, text, connection_id,
                                     user or {"username": "anon", "role": "user"},

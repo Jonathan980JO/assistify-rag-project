@@ -153,3 +153,6 @@ ws_*
 
 Backup/
 Json/
+
+scratch/
+*.txt
