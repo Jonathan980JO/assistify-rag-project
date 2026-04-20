@@ -675,8 +675,10 @@ def _classify_followup_intent(text: str) -> str:
 def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
     """Persist the most recent grounded answer for follow-up explanations.
 
-    Skips storage for empty answers and for the strict not-found response so
-    that follow-ups never explain a non-answer.
+    Skips storage for empty answers. For the strict not-found response we
+    actively CLEAR any previously saved state for this connection so that a
+    later follow-up ("explain more", "what do you mean?") cannot leak the
+    previous successful answer into a turn that ended in not-found.
     """
     try:
         if not connection_id:
@@ -686,6 +688,15 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
             return
         try:
             if ans.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                # Latest turn produced a not-found result. Drop any stale
+                # prior state so follow-ups have nothing to explain.
+                if connection_id in last_answer_state:
+                    last_answer_state.pop(connection_id, None)
+                    logger.info(
+                        "[FOLLOWUP] cleared stale state for connection_id=%s "
+                        "(latest answer was not-found)",
+                        connection_id,
+                    )
                 return
         except Exception:
             pass
@@ -1718,6 +1729,11 @@ _active_doc_registry: dict = {
     "mode": RAG_DOC_MODE,
     "active_sources": set(),
 }
+
+# Explicit ID of the single currently active document (normalized filename).
+# Set to "" at startup; updated whenever a document is successfully indexed.
+# Used as the single source of truth for the anti-leak source guard.
+_current_active_doc_id: str = ""
 
 _kb_pipeline_state: dict = {
     "state": "ready",  # uploading | processing | ready | failed
@@ -24835,6 +24851,16 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         except Exception:
             logger.exception("RAG PRE-CONTEXT logging failed (ws)")
 
+        # Anti-leak source filter: discard any retrieved chunks that do not
+        # belong to the currently active document before building doc_dicts.
+        # This prevents old-PDF content from surfacing after a hot-swap.
+        relevant_docs = _filter_results_to_active_sources(relevant_docs)
+        logger.info(
+            "[KB ANTI-LEAK] post-filter | active_sources=%s remaining_docs=%s",
+            sorted(_get_active_sources()),
+            len(relevant_docs),
+        )
+
         # Keep UI path doc preparation consistent with direct HTTP/helper path.
         doc_dicts = _prepare_rag_doc_dicts_shared(relevant_docs, text)
 
@@ -25148,6 +25174,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             )
             short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts if isinstance(doc_dicts, list) else [])
             try:
+                # Clears any stale prior state because answer is not-found.
+                _save_last_answer_state(connection_id, text, short_answer, doc_dicts if isinstance(doc_dicts, list) else [])
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS safe fallback)")
+            try:
                 await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
             except Exception:
                 pass
@@ -25193,6 +25224,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     short_answer = composed
                 else:
                     short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts if isinstance(doc_dicts, list) else [])
+                try:
+                    # On not-found, this clears any stale prior state.
+                    _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+                except Exception:
+                    logger.exception("[FOLLOWUP] save state failed (WS generation insufficient)")
                 try:
                     await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
                 except Exception:
@@ -27638,6 +27674,10 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
         return {"message": "Unsupported file type. Use PDF or TXT."}
 
     _set_kb_pipeline_state("uploading", message="Upload received; extracting and indexing document", filename=filename)
+    # Hard-reset all in-memory conversation state immediately so that no old
+    # document content can leak into follow-up queries during indexing.
+    clear_all_conversation_history()
+    logger.info("[KB HOT-SWAP] conversation + follow-up state cleared (pre-indexing) for filename=%s", filename)
 
     deleted_for_overwrite = 0
     removed_assets = []
@@ -27848,10 +27888,13 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
 
     if chunks_indexed > 0:
 
+        global _current_active_doc_id
         _register_active_source(filename)
+        _current_active_doc_id = _normalize_source_label(filename)
         logger.info(
-            "upload_rag post-index | filename=%s active_collection=%s active_sources=%s",
+            "upload_rag post-index | filename=%s active_doc_id=%s active_collection=%s active_sources=%s",
             filename,
+            _current_active_doc_id,
             active_collection,
             sorted(_get_active_sources()),
         )
@@ -27970,6 +28013,13 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
     for removed in list(asset_candidates) + [doc_prefix]:
         current_sources.discard(_normalize_source_label(removed))
     _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
+    # If the deleted doc matches the currently active one, clear the active doc ID
+    # so the anti-leak guard in the WS path has no stale target to match against.
+    global _current_active_doc_id
+    removed_labels = {_normalize_source_label(x) for x in list(asset_candidates) + [doc_prefix] if x}
+    if _current_active_doc_id and _current_active_doc_id in removed_labels:
+        _current_active_doc_id = ""
+        logger.info("[KB HOT-SWAP] _current_active_doc_id cleared after delete of %s", doc_prefix)
     return {"deleted": deleted, "files_removed": deleted_files, "collection_gc": gc_report}
 
 
@@ -28700,6 +28750,24 @@ async def rag_ws_endpoint(websocket: WebSocket):
                             if msg_lang in ("en", "ar", "auto"):
                                 session_language = msg_lang  # update session preference
                             if text:
+                                # ---- KB READY GATE (must be before follow-up or RAG) ----
+                                # Block all queries while a new document is being indexed
+                                # so no old-document content leaks and no answer is given
+                                # before the new KB is fully ready.
+                                _kb_ready, _kb_not_ready_reason = _kb_is_ready_for_queries()
+                                if not _kb_ready:
+                                    _loading_msg = "System is loading the document. Please wait..."
+                                    logger.info(
+                                        "[KB GATE] WS query blocked during indexing | state=%s query='%s'",
+                                        _kb_pipeline_state.get("state"),
+                                        text[:80],
+                                    )
+                                    try:
+                                        await websocket.send_json({"type": "aiResponseChunk", "text": _loading_msg, "index": 0, "done": True})
+                                        await websocket.send_json({"type": "aiResponseDone", "fullText": _loading_msg, "sources": 0, "arabic_mode": False})
+                                    except Exception:
+                                        pass
+                                    continue
                                 # ---- HARD DEBUG: prove the WS entrypoint is reached ----
                                 try:
                                     _fu_check = _is_followup_query(text, connection_id)
