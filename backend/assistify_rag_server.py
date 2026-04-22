@@ -1,4 +1,4 @@
-﻿import os
+import os
 import warnings
 import uuid
 import json
@@ -45,7 +45,7 @@ except Exception:
         @staticmethod
         def identify(*a, **k):
             return None
-    sys.modules['posthog'] = _PosthogStub()
+    sys.modules['posthog'] = _PosthogStub()  # type: ignore[assignment]
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Request, UploadFile, File
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -319,8 +319,7 @@ import backend.config_head as _config_head
 from backend.config_head import *
 # Names prefixed with '_' are not imported by `from ... import *`.
 _ws_write_locks = getattr(_config_head, '_ws_write_locks', {}) or {}
-if 'RAG_DOC_MODE' not in globals():
-    RAG_DOC_MODE = os.environ.get('RAG_DOC_MODE', 'multi')
+RAG_DOC_MODE: str = str(globals().get('RAG_DOC_MODE') or os.environ.get('RAG_DOC_MODE', 'multi'))
 import traceback
 
 # Define RAG hybrid semantic threshold (tune as needed)
@@ -368,16 +367,11 @@ OLLAMA_TAGS_URL = _build_ollama_url("/api/tags")
 LLM_URL = OLLAMA_CHAT_URL
 OLLAMA_API_URL = OLLAMA_CHAT_URL
 
-if 'ASSISTIFY_SAFE_MODE' not in globals():
-    ASSISTIFY_SAFE_MODE = _env_flag_enabled('ASSISTIFY_SAFE_MODE', default=False)
-if 'ASSISTIFY_DISABLE_TTS' not in globals():
-    ASSISTIFY_DISABLE_TTS = _env_flag_enabled('ASSISTIFY_DISABLE_TTS', default=False)
-if 'ASSISTIFY_DISABLE_RERANKER' not in globals():
-    ASSISTIFY_DISABLE_RERANKER = _env_flag_enabled('ASSISTIFY_DISABLE_RERANKER', default=False)
-if 'ASSISTIFY_DISABLE_WHISPER' not in globals():
-    ASSISTIFY_DISABLE_WHISPER = _env_flag_enabled('ASSISTIFY_DISABLE_WHISPER', default=False)
-if 'ASSISTIFY_DISABLE_WARMUP' not in globals():
-    ASSISTIFY_DISABLE_WARMUP = _env_flag_enabled('ASSISTIFY_DISABLE_WARMUP', default=False)
+ASSISTIFY_SAFE_MODE: bool = _env_flag_enabled('ASSISTIFY_SAFE_MODE', default=False)
+ASSISTIFY_DISABLE_TTS: bool = _env_flag_enabled('ASSISTIFY_DISABLE_TTS', default=False)
+ASSISTIFY_DISABLE_RERANKER: bool = _env_flag_enabled('ASSISTIFY_DISABLE_RERANKER', default=False)
+ASSISTIFY_DISABLE_WHISPER: bool = _env_flag_enabled('ASSISTIFY_DISABLE_WHISPER', default=False)
+ASSISTIFY_DISABLE_WARMUP: bool = _env_flag_enabled('ASSISTIFY_DISABLE_WARMUP', default=False)
 
 # Effective flags used across module
 EFFECTIVE_DISABLE_TTS = ASSISTIFY_DISABLE_TTS
@@ -1910,7 +1904,7 @@ class LiveRAGManager:
         self._init_args = {}
         db_path = str(Path(__file__).resolve().parent / "chroma_db_v3")
         self._init_args["persist_directory"] = db_path
-        self.vs = None
+        self.vs: Optional[VectorStore] = None
         # Force the runtime to prefer the populated support docs collection
         self.collection_name = "support_docs_v3_latest"
         self._preferred_collection = os.environ.get("ASSISTIFY_COLLECTION_NAME", "").strip() or self.collection_name
@@ -1922,7 +1916,7 @@ class LiveRAGManager:
         # Lazy-create VectorStore on first use (safe, idempotent)
         if self.vs is None:
             try:
-                self.vs = VectorStore(persist_directory=self._init_args.get("persist_directory"))
+                self.vs = VectorStore(persist_directory=str(self._init_args.get("persist_directory") or ""))
                 # If a preferred collection is set but empty, VectorStore logic will
                 # handle fallback; keep behavior consistent with previous design.
             except Exception as e:
@@ -2018,8 +2012,11 @@ def _sync_live_retrieval_collection(target_collection_name: str | None = None) -
         except Exception as scan_err:
             logger.warning("Collection scan failed: %s", scan_err)
 
-    old_name = str(getattr(getattr(live_rag, "vs", None), "collection", None).name) if getattr(getattr(live_rag, "vs", None), "collection", None) else "<none>"
-    live_rag.vs.collection = fresh_collection
+    _vs_collection_ref = getattr(getattr(live_rag, "vs", None), "collection", None)
+    old_name = str(_vs_collection_ref.name) if _vs_collection_ref is not None else "<none>"
+    _live_vs = live_rag.vs
+    if _live_vs is not None:
+        _live_vs.collection = fresh_collection
     logger.info(
         "Live retrieval collection synced | previous=%s current=%s count=%s",
         old_name, desired, fresh_count,
@@ -2080,9 +2077,10 @@ async def startup_event():
             db_path = str(Path(__file__).resolve().parent / 'chroma_db_v3')
             logger.info(f"Active ChromaDB Path: {db_path}")
             try:
-                if getattr(live_rag.vs, 'collection', None):
-                    logger.info(f"Active Collection Name: {live_rag.vs.collection.name}")
-                    total_chunks = live_rag.vs.collection.count()
+                _startup_vs = live_rag.vs
+                if _startup_vs is not None and getattr(_startup_vs, 'collection', None):
+                    logger.info(f"Active Collection Name: {_startup_vs.collection.name}")
+                    total_chunks = _startup_vs.collection.count()
                     logger.info(f"Number of chunks loaded: {total_chunks}")
             except Exception:
                 logger.warning("Could not introspect live_rag.vs.collection at startup")
@@ -2102,7 +2100,11 @@ async def startup_event():
             for q in test_queries:
                 logger.info(f"Probe query: {q}")
                 try:
-                    probe_results = live_rag.vs.search(query=q, top_k=5, distance_threshold=-2.0)
+                    _probe_vs = live_rag.vs
+                    if _probe_vs is None:
+                        logger.info("  Probe skipped: live_rag.vs is not initialized.")
+                        continue
+                    probe_results = _probe_vs.search(query=q, top_k=5, distance_threshold=-2.0)
                     if not probe_results:
                         logger.info("  No results returned for this query.")
                         continue
@@ -2301,7 +2303,7 @@ async def startup_event():
                 if event.is_directory:
                     return
                 try:
-                    fname = Path(event.src_path).name
+                    fname = Path(str(event.src_path)).name
                     _main_loop.call_soon_threadsafe(
                                 lambda f=fname: _queue_assets_reindex(f)
                     )
@@ -2312,7 +2314,7 @@ async def startup_event():
                 if event.is_directory:
                     return
                 try:
-                    fname = Path(event.src_path).name
+                    fname = Path(str(event.src_path)).name
                     _main_loop.call_soon_threadsafe(
                         lambda f=fname: _queue_assets_reindex(f)
                     )
@@ -2621,11 +2623,12 @@ async def _reindex_file_auto(filename: str):
         metadata = {"source": "watcher", "filename": filename, "file_ext": save_path.suffix.lower()}
 
         async with _collection_mutation_lock:
-            deleted = delete_documents_by_filename(filename)
+            deleted = int(delete_documents_by_filename(filename) or 0)
             logger.info(f"Assets watcher [{filename}]: deleted {deleted} old chunk(s)")
 
-            added = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+            _cad_result = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
                                             kb_version=_kb_global_version + 1)
+            added = int(_cad_result) if isinstance(_cad_result, int) else 0
             active_collection = _sync_live_retrieval_collection()
         if added > 0:
             _register_active_source(filename)
@@ -2645,7 +2648,7 @@ async def _reindex_file_auto(filename: str):
         if snippet:
             logger.info("[RERANK ACTIVE]")
         if verify:
-            logger.info(f"Assets watcher [{filename}]: ✓ verification OK — search returns: {verify[0][:60]}...")
+            logger.info(f"Assets watcher [{filename}]: ✓ verification OK — search returns: {str(verify[0])[:60]}...")
         else:
             logger.warning(f"Assets watcher [{filename}]: ✗ verification FAILED — search returned nothing for: {snippet[:80]}")
     except Exception as e:
@@ -4866,7 +4869,7 @@ def _extract_structure_aware_definition(
                 src_n = str(meta.get("source") or (d or {}).get("source") or "")
                 ci = meta.get("chunk_index")
                 try:
-                    ci = int(ci)
+                    ci = int(ci or 0) if ci is not None else None
                 except Exception:
                     ci = None
                 if src_n and ci is not None:
@@ -4877,7 +4880,7 @@ def _extract_structure_aware_definition(
                             if str(_cm.get("source") or "") != src_n:
                                 continue
                             try:
-                                if int(_cm.get("chunk_index")) == ci + _adj_n:
+                                if int(_cm.get("chunk_index") or -1) == ci + _adj_n:
                                     extended = extended + "\n" + str(_cc.get("page_content") or _cc.get("text") or "")
                                     break
                             except Exception:
@@ -6621,6 +6624,8 @@ def _prefilter_fact_docs_by_relation(query_text: str, docs: list[dict], fact_typ
     def _chunk_index(d: dict) -> int | None:
         md = dict((d or {}).get("metadata") or {})
         raw_idx = md.get("chunk_index")
+        if raw_idx is None:
+            return None
         try:
             return int(raw_idx)
         except Exception:
@@ -7815,7 +7820,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
                 bonus += 0.10
             page_val = (doc.get("metadata") or {}).get("page")
             try:
-                if 0 < int(page_val) <= 8:
+                if page_val is not None and 0 < int(page_val) <= 8:
                     bonus += 0.08
             except Exception:
                 pass
@@ -8571,10 +8576,11 @@ def _indirect_evidence_pool_is_weak(indirect_evidence_pool: list[tuple[float, bo
     if not indirect_evidence_pool:
         return True
     try:
-        if isinstance(indirect_evidence_pool[0], dict):
-            best_score = max(float((item or {}).get("score", 0.0) or 0.0) for item in indirect_evidence_pool)
+        first_item = indirect_evidence_pool[0]
+        if isinstance(first_item, dict):
+            best_score = max(float((d.get("score", 0.0) or 0.0) if isinstance(d, dict) else 0.0) for d in indirect_evidence_pool)
         else:
-            best_score = max(float(item[0]) for item in indirect_evidence_pool)
+            best_score = max(float(item[0]) for item in indirect_evidence_pool)  # type: ignore[index]
     except Exception:
         return True
     return best_score < 0.85
@@ -9198,7 +9204,7 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
                 drifts += 1
         return drifts / max(1, len(token_sets) - 1)
 
-    def _best_local_window(raw_text: str) -> tuple[float, str, str, dict[str, float]]:
+    def _best_local_window(raw_text: str) -> tuple[float, str, str, dict[str, Any]]:
         lines_raw = [str(ln or "") for ln in str(raw_text or "").splitlines()]
         if not lines_raw:
             return (0.0, "", "", {"focus_hits": 0.0, "heading_hits": 0.0, "marker_density": 0.0, "compactness": 0.0, "drift": 1.0})
@@ -9568,7 +9574,15 @@ def _retrieve_with_section_bias(query_text: str, retrieved_docs: list[dict], top
     return focused_docs[: max(len(retrieved_docs), top_k)]
 
 
-def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
+def _safe_int(v: Any) -> Optional[int]:
+    """Convert a value to int safely; return None on failure."""
+    try:
+        return int(v)
+    except Exception:
+        return None
+
+
+def _collect_local_window_support(docs: list[dict]) -> dict[str, Any]:
     support = {
         "promoted_count": 0.0,
         "focus_hits": 0.0,
@@ -9705,7 +9719,7 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
         md = dict((d or {}).get("metadata") or {})
         chunk_idx = -1
         try:
-            chunk_idx = int(md.get("chunk_index"))
+            chunk_idx = int(md.get("chunk_index") or -1)
             source_chunks.add(chunk_idx)
         except Exception:
             pass
@@ -9769,7 +9783,7 @@ def _collect_local_window_support(docs: list[dict]) -> dict[str, float]:
 
         best_pair: tuple[int, list[dict[str, Any]]] | None = None
         for _src, rows in grouped.items():
-            valid_rows = [r for r in rows if isinstance(r.get("chunk"), int) and int(r.get("chunk")) >= 0]
+            valid_rows = [r for r in rows if isinstance(r.get("chunk"), int) and (r.get("chunk") or 0) >= 0]
             valid_rows.sort(key=lambda r: int(r.get("chunk") or -1))
             for i in range(len(valid_rows) - 1):
                 a = valid_rows[i]
@@ -12201,6 +12215,8 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                         score += 1.6
                     else:
                         score -= 2.0
+                else:
+                    grounded = False
 
                 if is_person_attribution_query:
                     attribution_ok = bool(attribution_verbs.search(low))
@@ -15978,7 +15994,7 @@ def _split_query_context_focus_tokens(query_text: str, family_v2: str = "") -> t
     return context_tokens[:8], focus_tokens[:8]
 
 
-def _has_strong_local_window_support(local_support: dict[str, float] | None, confidence_threshold: float = 0.58) -> bool:
+def _has_strong_local_window_support(local_support: dict[str, Any] | None, confidence_threshold: float = 0.58) -> bool:
     support = dict(local_support or {})
     promoted = float(support.get("promoted_count", 0.0) or 0.0)
     conf = float(support.get("confidence", 0.0) or 0.0)
@@ -18618,7 +18634,7 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
             section = str(md.get("heading") or md.get("section") or md.get("title") or md.get("chapter") or "").strip().lower()
             section_keys.add(f"{source}::{section}")
             try:
-                chunk_idxs.append(int(md.get("chunk_index")))
+                chunk_idxs.append(int(md.get("chunk_index") or -1))
             except Exception:
                 pass
         support_chunk_count = float(list_support.get("source_chunk_count", 0.0) or 0.0) if isinstance(list_support, dict) else 0.0
@@ -18854,6 +18870,11 @@ def _shared_rag_final_answer_decision(
     list_debug_blocked_reason = ""
     list_local_support = _collect_local_window_support(routed_docs or doc_dicts or [])
     list_local_override = _has_strong_local_window_support(list_local_support, confidence_threshold=0.58)
+
+    # Default stub — overridden with a real closure inside list_entity/list_structure branch.
+    # Ensures the name is always bound even when that branch is not taken.
+    def _fetch_adjacent_doc_from_store(source_name: str, chunk_idx: int) -> None:  # type: ignore[return]
+        return None
 
     if family_v2 in {"list_entity", "list_structure"} and (routed_docs or doc_dicts):
         _list_query_norm = re.sub(r"\s+", " ", str(query or "").strip().lower())
@@ -19284,12 +19305,6 @@ def _shared_rag_final_answer_decision(
             anchor_hits_b = sum(1 for tok in query_anchor_terms if _token_match_light(blob_b, tok))
             return bool(anchor_hits_a >= 1 and anchor_hits_b >= 1)
 
-        def _safe_int(v: Any) -> int | None:
-            try:
-                return int(v)
-            except Exception:
-                return None
-
         def _page_num(md: dict) -> int | None:
             raw_page = md.get("page")
             if raw_page is None:
@@ -19543,7 +19558,7 @@ def _shared_rag_final_answer_decision(
                 if src_sel:
                     sources.append(src_sel)
                 try:
-                    chunk_idxs.append(int(md_sel.get("chunk_index")))
+                    chunk_idxs.append(int(md_sel.get("chunk_index") or -1))
                 except Exception:
                     pass
             single_source = bool(sources) and (len(set(sources)) == 1)
@@ -22347,7 +22362,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     # Skip RAG search for greetings only (optimization)
     greeting_patterns = ['hi', 'hello', 'hey', 'how are you', 'good morning', 'good afternoon', 'good evening', 'thanks', 'thank you']
     is_greeting = len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns)
-    
+    is_simple_factual_query: bool = False
+
     if is_greeting:
         logger.info(f"RAG: Skipping search for greeting: {text}")
         relevant_docs = []
@@ -22559,7 +22575,10 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     # Build context using TOON format (40-60% token savings)
     context_block = ""
     is_summary_req = 'summar' in text.lower() or 'overview' in text.lower()
-    
+
+    def _is_valid_definition_lock_sentence(sentence: str, query_text: str) -> bool:
+        return False  # default stub; real implementation set below inside if relevant_docs
+
     if relevant_docs:
         early_identity = _extract_strict_same_line_person_identity_from_retrieved_docs(text, relevant_docs)
         if early_identity:
@@ -22750,6 +22769,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 
         entity_definition_docs = []
         definition_docs = []
+        original_definition_docs: list[dict] = []
         if is_definition_query:
             original_definition_docs = list(doc_dicts or [])
             total_docs = len(doc_dicts or [])
@@ -23835,6 +23855,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 
     # If we have an async session, prefer it
     if _sess is not None:
+        _active_sess = _sess  # narrow type: guaranteed non-None in this block
         llm_t0 = time.perf_counter()
         if is_fact_llm_query:
             query_type = "fact_entity"
@@ -23848,7 +23869,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         for attempt in range(max_retries):
             try:
                 timeout = aiohttp.ClientTimeout(total=60, connect=5, sock_read=45)
-                async with _sess.post(LLM_URL, json=payload, timeout=timeout) as response:
+                async with _active_sess.post(LLM_URL, json=payload, timeout=timeout) as response:
                     logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", response.status, LLM_URL)
                     if response.status == 200:
                         data = await response.json()
@@ -23968,8 +23989,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     intent = detect_query_intent(text)
     extracted_sentence = post_decision.get("answer") if isinstance(post_decision, dict) else None
     answer_type = str(post_decision.get("answer_type") or "") if isinstance(post_decision, dict) else ""
-    if intent == "definition" and answer_type.startswith("definition_"):
-        if _is_valid_definition_lock_sentence(extracted_sentence, text):
+    if intent == "definition" and answer_type.startswith("definition_") and extracted_sentence is not None:
+        if _is_valid_definition_lock_sentence(str(extracted_sentence), text):
             ai_text = str(extracted_sentence).strip()
             definition_lock_applied = True
             logger.info("[TRACE] definition_extractor_lock=True")
@@ -23992,7 +24013,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         logger.warning(f"Response validation FAILED - Severity: {validation_result.severity}")
         for issue in validation_result.issues:
             logger.warning(f"  - {issue['severity']}: {issue['message']}")
-        ai_text = validation_result.modified_response
+        ai_text = str(validation_result.modified_response or "")
         response_time = int((time.time() - start_time) * 1000)
         log_usage(
             username,
@@ -24007,7 +24028,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         )
     elif validation_result.modified_response:
         logger.info("Response modified by validation - added disclaimer")
-        ai_text = validation_result.modified_response
+        ai_text = str(validation_result.modified_response)
 
     if _is_explicit_oos_query(text):
         grounded = _is_answer_grounded_in_docs(ai_text, doc_dicts, query_text=text)
@@ -24128,36 +24149,6 @@ from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
 STREAM_FIRST_TOKEN_TIMEOUT_S = 15.0   # Timeout for first token from LLM (seconds)
 STREAM_MID_TOKEN_TIMEOUT_S = 5.0      # Timeout for subsequent tokens (seconds)
 
-# ---------------------------------------------------------------------------
-# TTS text-quality helper: digit normalization only
-# ---------------------------------------------------------------------------
-def _normalize_digits_for_tts(text: str) -> str:
-    """Merge space-separated single-digit tokens into whole numbers,
-    reassemble spaced decimal points, and attach currency symbols.
-
-    Examples::
-
-        "4 6 7 goals"     → "467 goals"
-        "$ 3 9 . 9 9"     → "$39.99"
-        "$ 0 . 9 9"       → "$0.99"
-        "3 9 . 9 9 /month" → "39.99 /month"
-        "2 1 3"           → "213"
-
-    Applied only to text sent to XTTS — NOT to the displayed chat response.
-    """
-    import re as _re
-    # 1) Merge isolated single-digit sequences: "3 9" → "39"
-    text = _re.sub(
-        r'\b(\d)\b(?: \b(\d)\b)+',
-        lambda m: m.group(0).replace(' ', ''),
-        text,
-    )
-    # 2) Merge spaced decimal points: "39 . 99" → "39.99"
-    text = _re.sub(r'(\d) ?\. ?(\d)', r'\1.\2', text)
-    # 3) Attach currency symbol to following number: "$ 39.99" → "$39.99"
-    text = _re.sub(r'\$\s+(\d)', r'$\1', text)
-    return text
-
 # Adaptive TTS chunk sizing — adjusts words-per-chunk based on real-time perf
 from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
 
@@ -24203,7 +24194,7 @@ async def _tts_arabic_response(
         async with _lock:
             await websocket.send_bytes(data)
 
-    first_chunk_time: float = None
+    first_chunk_time: Optional[float] = None
     chunk_count: int = 0
     total_time: float = 0.0
 
@@ -24386,7 +24377,7 @@ async def _tts_single_response(
             await _local_tts_session.close()
 
 
-async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: asyncio.Event = None, t_meta=None, language: str = "en"):
+async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: Optional[asyncio.Event] = None, t_meta=None, language: str = "en"):
     """Stream LLM response with overlapping TTS via producer-consumer pipeline.
 
     Architecture:
@@ -27248,10 +27239,10 @@ def rag_debug(user=Depends(require_login("admin"))):
         collection = get_or_create_collection()
         if not collection:
             return {"count": 0, "entries": []}
-        result = collection.get(include=["metadatas", "documents"]) or {}
+        result = collection.get(include=["metadatas", "documents"]) or {}  # type: ignore[call-overload]
         ids = result.get("ids", [])
-        metadatas = result.get("metadatas", [])
-        documents = result.get("documents", [])
+        metadatas = result.get("metadatas") or []
+        documents = result.get("documents") or []
         entries = []
         for i, (doc_id, meta, doc) in enumerate(zip(ids, metadatas, documents)):
             entries.append({
@@ -27363,8 +27354,10 @@ def debug_runtime_rag(user=Depends(require_login("admin"))):
         out['runtime'] = {'error': str(e)}
 
     # 3b) show exact lines around any 'top_k_req' assignments found in module source
+    module_src = ""
     try:
-        module_src = _inspect.getsource(_sys.modules.get(__name__))
+        _mod = _sys.modules.get(__name__)
+        module_src = _inspect.getsource(_mod) if _mod is not None else ""
         lines = module_src.splitlines()
         hits = []
         for i, ln in enumerate(lines):
@@ -27667,8 +27660,8 @@ async def get_audio(filename: str):
 async def upload_rag(request: Request, file: UploadFile = File(...), user=Depends(require_login("admin"))):
     verify_csrf(request)
 
-    filename = f"{uuid.uuid4().hex[:8]}_{Path(file.filename).name}"
-    original_filename = Path(file.filename).name
+    filename = f"{uuid.uuid4().hex[:8]}_{Path(file.filename or 'upload').name}"
+    original_filename = Path(file.filename or "upload").name
     file_ext = filename.split('.')[-1].lower()
     if file_ext not in ["pdf", "txt"]:
         return {"message": "Unsupported file type. Use PDF or TXT."}
@@ -27840,21 +27833,23 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
     logger.info(f"  Starting chunking and embedding indexing (batch processing)...")
     active_collection = ""
     gc_report = {}
+    indexing_details: dict = {}
     try:
         async with _collection_mutation_lock:
-            indexing_details = chunk_and_add_document(
+            _raw_indexing = chunk_and_add_document(
                 doc_id=doc_id,
                 text=text,
                 metadata=metadata,
                 kb_version=_kb_global_version + 1,
                 return_details=True,
-                target_collection_name=_target_collection_name or None,
+                target_collection_name=_target_collection_name or None,  # type: ignore[arg-type]
             )
+            indexing_details: dict = _raw_indexing if isinstance(_raw_indexing, dict) else {}
 
-            chunks_indexed = int((indexing_details or {}).get("indexed_chunks") or 0)
+            chunks_indexed = int((indexing_details).get("indexed_chunks") or 0)
             if chunks_indexed > 0:
                 _set_kb_pipeline_state("processing", message="Indexing completed; activating live retrieval", filename=filename)
-                active_collection = _sync_live_retrieval_collection((indexing_details or {}).get("collection"))
+                active_collection = _sync_live_retrieval_collection((indexing_details).get("collection"))
 
                 if _active_doc_registry.get("mode", RAG_DOC_MODE) == "single":
                     try:
@@ -27871,20 +27866,20 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
         logger.exception("upload_rag upsert failure | filename=%s doc_id=%s error=%s", filename, doc_id, upsert_err)
         raise HTTPException(status_code=500, detail=f"Indexing failed: {upsert_err}")
 
-    chunks_indexed = int((indexing_details or {}).get("indexed_chunks") or 0)
-    chunks_generated = int((indexing_details or {}).get("generated_chunks") or 0)
-    batch_errors = (indexing_details or {}).get("batch_errors") or []
+    chunks_indexed = int(indexing_details.get("indexed_chunks") or 0)
+    chunks_generated = int(indexing_details.get("generated_chunks") or 0)
+    batch_errors = indexing_details.get("batch_errors") or []
     logger.info(
         "upload_rag indexing diagnostics | filename=%s doc_id=%s collection=%s generated=%s indexed=%s batch_errors=%s",
         filename,
         doc_id,
-        (indexing_details or {}).get("collection"),
+        indexing_details.get("collection"),
         chunks_generated,
         chunks_indexed,
         len(batch_errors),
     )
     if chunks_generated == 0:
-        logger.warning("upload_rag generated zero chunks | filename=%s reason=%s", filename, (indexing_details or {}).get("reason", ""))
+        logger.warning("upload_rag generated zero chunks | filename=%s reason=%s", filename, indexing_details.get("reason", ""))
 
     if chunks_indexed > 0:
 
@@ -27947,10 +27942,10 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
             "removed_assets": removed_assets,
             "dedup_deleted": dedup_deleted,
             "dedup_removed_assets": dedup_removed_assets,
-            "active_collection": (indexing_details or {}).get("collection"),
+            "active_collection": indexing_details.get("collection"),
             "active_sources": sorted(_get_active_sources()),
             "index_batch_errors": batch_errors,
-            "index_reason": (indexing_details or {}).get("reason", ""),
+            "index_reason": indexing_details.get("reason", ""),
             "ready_state": dict(_kb_pipeline_state),
         }
 
@@ -28031,10 +28026,12 @@ async def rag_update(req: dict, user=Depends(require_login("admin"))):
     """
     doc_id = req.get("doc_id")
     text = req.get("text")
-    metadata = req.get("metadata")
+    metadata_raw = req.get("metadata")
+    metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
     if not doc_id or text is None:
         raise HTTPException(status_code=400, detail="doc_id and text are required")
-    chunks = update_document(doc_id=doc_id, text=text, metadata=metadata)
+    _raw_update = update_document(doc_id=doc_id, text=text, metadata=metadata)
+    chunks = int(_raw_update) if isinstance(_raw_update, int) else 0
     if chunks:
         await invalidate_all_caches(action="update", filename=doc_id,
                                      chunks_added=chunks, triggered_by="admin")
@@ -28072,8 +28069,9 @@ async def rag_reindex_file(filename: str, user=Depends(require_login("admin"))):
         safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
         doc_id = f"upload_{safe}"
         metadata = {"source": "upload", "filename": filename}
-        chunks = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+        _raw_chunks_ri = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
                                         kb_version=_kb_global_version + 1)
+        chunks = int(_raw_chunks_ri) if isinstance(_raw_chunks_ri, int) else 0
         if chunks:
             active_collection = _sync_live_retrieval_collection()
             _register_active_source(filename)
@@ -28120,8 +28118,9 @@ async def rag_reindex_all(user=Depends(require_login("admin"))):
             safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
             doc_id = f"upload_{safe}"
             metadata = {"source": "upload", "filename": filename}
-            chunks = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
+            _raw_cad = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
                                             kb_version=_kb_global_version + 1)
+            chunks: int = _raw_cad if isinstance(_raw_cad, int) else 0
             if chunks > 0:
                 _register_active_source(filename)
             results.append({"filename": filename, "chunks": chunks, "deleted_old": deleted, "status": "ok"})
@@ -28144,8 +28143,10 @@ async def rag_ready(user=Depends(require_login())):
     collection_name = getattr(collection_name, "name", None)
     collection_count = None
     try:
-        if getattr(getattr(live_rag, "vs", None), "collection", None):
-            collection_count = int(live_rag.vs.collection.count() or 0)
+        _ready_vs = live_rag.vs
+        _ready_col = getattr(_ready_vs, "collection", None) if _ready_vs is not None else None
+        if _ready_col is not None:
+            collection_count = int(_ready_col.count() or 0)
     except Exception:
         collection_count = None
     return {
