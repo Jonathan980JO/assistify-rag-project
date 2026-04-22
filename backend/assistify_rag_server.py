@@ -24377,7 +24377,7 @@ async def _tts_single_response(
             await _local_tts_session.close()
 
 
-async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: Optional[asyncio.Event] = None, t_meta=None, language: str = "en"):
+async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: Optional[asyncio.Event] = None, t_meta=None, language: str = "en"): # type: ignore
     """Stream LLM response with overlapping TTS via producer-consumer pipeline.
 
     Architecture:
