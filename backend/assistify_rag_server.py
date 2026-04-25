@@ -1734,6 +1734,11 @@ _kb_pipeline_state: dict = {
     "message": "ready",
     "filename": None,
     "updated_at": time.time(),
+    "started_at": None,
+    "ready_at": None,
+    "stage_timings": {},  # name -> seconds since started_at
+    "last_total_seconds": None,
+    "last_bottleneck": None,
 }
 
 
@@ -1745,12 +1750,44 @@ def _set_kb_pipeline_state(state: str, message: str = "", filename: Optional[str
     _kb_pipeline_state["message"] = str(message or normalized)
     _kb_pipeline_state["filename"] = filename
     _kb_pipeline_state["updated_at"] = time.time()
+    if normalized == "uploading":
+        # Reset per-upload timing on a fresh upload start.
+        _kb_pipeline_state["started_at"] = time.time()
+        _kb_pipeline_state["ready_at"] = None
+        _kb_pipeline_state["stage_timings"] = {}
+        _kb_pipeline_state["last_total_seconds"] = None
+        _kb_pipeline_state["last_bottleneck"] = None
+    elif normalized == "ready":
+        now = time.time()
+        _kb_pipeline_state["ready_at"] = now
+        started = _kb_pipeline_state.get("started_at") or now
+        _kb_pipeline_state["last_total_seconds"] = round(now - started, 3)
+        timings = _kb_pipeline_state.get("stage_timings") or {}
+        if timings:
+            # Largest per-stage delta is the bottleneck.
+            ordered = sorted(timings.items(), key=lambda kv: kv[1])
+            deltas = []
+            prev = 0.0
+            for name, t in ordered:
+                deltas.append((name, round(t - prev, 3)))
+                prev = t
+            if deltas:
+                _kb_pipeline_state["last_bottleneck"] = max(deltas, key=lambda kv: kv[1])
     logger.info(
         "KB pipeline state | state=%s filename=%s message=%s",
         normalized,
         filename,
         _kb_pipeline_state["message"],
     )
+
+
+def _record_kb_stage(stage: str) -> None:
+    """Record a named pipeline stage timestamp (seconds since 'uploading' start)."""
+    started = _kb_pipeline_state.get("started_at")
+    if not started:
+        return
+    timings = _kb_pipeline_state.setdefault("stage_timings", {})
+    timings[str(stage)] = round(time.time() - float(started), 3)
 
 
 def _kb_is_ready_for_queries() -> Tuple[bool, str]:
@@ -2017,6 +2054,16 @@ def _sync_live_retrieval_collection(target_collection_name: str | None = None) -
     _live_vs = live_rag.vs
     if _live_vs is not None:
         _live_vs.collection = fresh_collection
+    # Invalidate rerank cache when the active collection changes — entries
+    # are keyed by collection name + query + candidate-ids, so stale entries
+    # would never match anyway, but clearing keeps memory bounded after
+    # uploads/deletes/hot-swaps. Safe no-op if helper is unavailable.
+    if old_name != desired:
+        try:
+            from backend.pdf_ingestion_rag import _rerank_cache_clear as _rc_clear
+            _rc_clear(reason=f"collection_swap {old_name}->{desired}")
+        except Exception as _rc_err:
+            logger.warning("[RERANK CACHE] clear-on-swap failed: %s", _rc_err)
     logger.info(
         "Live retrieval collection synced | previous=%s current=%s count=%s",
         old_name, desired, fresh_count,
@@ -2491,11 +2538,47 @@ _assets_recently_indexed_until: dict[str, float] = {}
 _assets_reindex_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _collection_mutation_lock: asyncio.Lock = asyncio.Lock()
 
+# Tombstones for files explicitly deleted via /rag/delete. The watcher and
+# the startup bootstrap MUST consult this set before re-indexing, otherwise
+# a file that was just deleted can be silently resurrected (the verified
+# "delete is not atomic" bug). Stored as filename -> expiry timestamp so
+# old entries are reaped automatically.
+_recently_deleted_filenames: dict[str, float] = {}
+_RECENTLY_DELETED_TTL_S: float = 3600.0  # 1h is plenty: covers a fresh boot
+
+
+def _normalize_filename_for_tombstone(name: str) -> str:
+    return str(name or "").strip().lower()
+
+
+def _mark_recently_deleted(name: str, seconds: float = _RECENTLY_DELETED_TTL_S) -> None:
+    key = _normalize_filename_for_tombstone(name)
+    if not key:
+        return
+    _recently_deleted_filenames[key] = time.time() + float(seconds)
+
+
+def _is_recently_deleted(name: str) -> bool:
+    key = _normalize_filename_for_tombstone(name)
+    if not key:
+        return False
+    expiry = _recently_deleted_filenames.get(key)
+    if not expiry:
+        return False
+    if time.time() >= expiry:
+        # TTL elapsed — drop stale entry so we don't grow unbounded.
+        _recently_deleted_filenames.pop(key, None)
+        return False
+    return True
+
 
 def _should_skip_assets_reindex(filename: str) -> bool:
     """Return True if we should skip reindexing because the upload endpoint
-    already indexed it (prevents double work from watchdog create/modify).
+    already indexed it (prevents double work from watchdog create/modify)
+    OR because the file was explicitly deleted (anti-resurrection guard).
     """
+    if _is_recently_deleted(filename):
+        return True
     now = time.time()
     until = _assets_recently_indexed_until.get(filename)
     if until and now < until:
@@ -2726,6 +2809,17 @@ async def _bootstrap_assets_index_if_needed() -> None:
         ]
         if not existing_assets:
             logger.info("KB bootstrap: no asset files found")
+            return
+
+        # Anti-resurrection: never reindex a file that was just deleted via
+        # /rag/delete (the on-disk unlink may have failed due to a Windows
+        # file-lock — without this guard, bootstrap would auto-reindex it on
+        # the next start and the "deleted" document would come back).
+        existing_assets = [
+            name for name in existing_assets if not _is_recently_deleted(name)
+        ]
+        if not existing_assets:
+            logger.info("KB bootstrap: all candidate files are tombstoned (recently deleted)")
             return
 
         indexed_count = count_documents()
@@ -8181,6 +8275,7 @@ def _search_with_query_expansion(query_text: str, top_k: int, distance_threshold
 
 
 def _search_fast_minimal(query_text: str, top_k: int) -> list[dict]:
+    _t_sfm0 = time.perf_counter()
     requested_top_k = int(top_k or 1)
     actual_top_k = max(1, requested_top_k)
     if _classify_query_family_v2(query_text) == "fact_entity":
@@ -8198,20 +8293,25 @@ def _search_fast_minimal(query_text: str, top_k: int) -> list[dict]:
         ) or []
         logger.info("[RERANK ACTIVE]")
         logger.info("[DOC COUNT TRACE] stage=_search_fast_minimal.return count=%s", len(out))
+        _sfm_ms = (time.perf_counter() - _t_sfm0) * 1000
+        logger.info("[RETRIEVAL TIMING] _search_fast_minimal total=%.0f ms top_k=%d docs_returned=%d", _sfm_ms, actual_top_k, len(out))
         return out
     except Exception:
+        _sfm_ms = (time.perf_counter() - _t_sfm0) * 1000
         logger.info("[DOC COUNT TRACE] stage=_search_fast_minimal.return count=0")
+        logger.info("[RETRIEVAL TIMING] _search_fast_minimal total=%.0f ms top_k=%d docs_returned=0 (exception)", _sfm_ms, actual_top_k)
         return []
 
 
 def _search_fast_definition_minimal(query_text: str) -> list[dict]:
+    _t_sfdm0 = time.perf_counter()
     has_entity, entity = _extract_entity_from_definition_query(query_text)
     q_low = (query_text or "").strip().lower()
     is_concept_query = q_low.startswith("what is") or q_low.startswith("define")
 
     probes: List[str] = []
     concept_text = (entity or "").strip()
-    definition_top_k = 12 if is_concept_query else 6
+    definition_top_k = 8 if is_concept_query else 6
     logger.info("[TOPK TRACE] requested=%s actual=%s function=_search_fast_definition_minimal", definition_top_k, definition_top_k)
     if is_concept_query and concept_text:
         probes.extend([
@@ -8398,9 +8498,20 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
 
     collected: List[dict] = []
     seen_ids: set[str] = set()
+    _second_probe_used = False
+    _probes_run = 0
 
-    for q in probes[:3]:
+    for _probe_idx, q in enumerate(probes[:3]):
+        _t_probe0 = time.perf_counter()
         docs = _search_fast_minimal(q, top_k=definition_top_k)
+        _probe_ms = (time.perf_counter() - _t_probe0) * 1000
+        _probes_run += 1
+        if _probe_idx >= 1:
+            _second_probe_used = True
+        logger.info(
+            "[RETRIEVAL TIMING] definition_probe #%d query=%r top_k=%d raw_docs=%d time=%.0f ms",
+            _probe_idx + 1, q[:80], definition_top_k, len(docs), _probe_ms,
+        )
         logger.info("[DOC COUNT TRACE] stage=_search_fast_definition_minimal.probe_raw count=%s", len(docs))
         if not docs:
             continue
@@ -8416,8 +8527,27 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
             seen_ids.add(key)
             collected.append(d)
 
+        # Early-stop: after probe #1, if we already have at least 2 strong
+        # definition candidates, skip remaining probes. Strong = score from
+        # _score_definition_doc >= 3.0 (entity match + definitional verb).
+        if _probe_idx == 0 and len(probes) > 1:
+            _strong = 0
+            for _d in collected:
+                try:
+                    if _score_definition_doc(_d) >= 3.0:
+                        _strong += 1
+                        if _strong >= 2:
+                            break
+                except Exception:
+                    continue
+            if _strong >= 2:
+                logger.info("[DEF PROBE EARLY STOP] reason=strong_definition_found docs=%d", _strong)
+                break
+
     if not collected:
         logger.info("[DOC COUNT TRACE] stage=_search_fast_definition_minimal.collected count=0")
+        _sfdm_ms = (time.perf_counter() - _t_sfdm0) * 1000
+        logger.info("[RETRIEVAL TIMING] _search_fast_definition_minimal total=%.0f ms probes=%d collected=0 returned=0", _sfdm_ms, _probes_run)
         return best
 
     def _combined_rank(d: dict) -> float:
@@ -8434,6 +8564,11 @@ def _search_fast_definition_minimal(query_text: str) -> list[dict]:
     out = final_ranked[:definition_top_k]
     logger.info("[DOC COUNT TRACE] stage=_search_fast_definition_minimal.collected count=%s", len(collected))
     logger.info("[DOC COUNT TRACE] stage=_search_fast_definition_minimal.return count=%s", len(out))
+    _sfdm_ms = (time.perf_counter() - _t_sfdm0) * 1000
+    logger.info(
+        "[RETRIEVAL TIMING] _search_fast_definition_minimal total=%.0f ms probes=%d collected=%d returned=%d second_probe_used=%s",
+        _sfdm_ms, _probes_run, len(collected), len(out), _second_probe_used,
+    )
     return out
 
 
@@ -22337,7 +22472,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     ready, not_ready_reason = _kb_is_ready_for_queries()
     if not ready:
         logger.info("RAG query blocked while KB not ready | state=%s query='%s'", _kb_pipeline_state.get("state"), text[:80])
-        return ("Knowledge base is still processing the latest upload. Please try again in a moment.", [])
+        return ("System is loading the document. Please wait...", [])
     
     # Update conversation timestamp for cleanup
     conversation_timestamps[connection_id] = time.time()
@@ -24377,6 +24512,89 @@ async def _tts_single_response(
             await _local_tts_session.close()
 
 
+def _emit_perf_report(t_meta: dict, perf_start: float, query_text: str, answer_text: str, connection_id: str = "") -> None:
+    """Print PERFORMANCE TIMING REPORT for any non-LLM answer path.
+
+    The LLM streaming path has its own inline table; this helper covers every
+    deterministic / extractor / not-found return that bypasses that inline table.
+    Safe to call: wrapped entirely in try/except.
+    """
+    try:
+        import time as _t
+        t_now = _t.perf_counter()
+
+        _req_start = t_meta.get("request_start") or perf_start
+        _rt_start  = t_meta.get("routing_start") or perf_start
+        _rt_end    = t_meta.get("routing_end")
+        _rv_start  = t_meta.get("retrieval_start")
+        _rv_end    = t_meta.get("retrieval_end")
+        _rk_start  = t_meta.get("rerank_start")
+        _rk_end    = t_meta.get("rerank_end")
+        _cf_start  = t_meta.get("context_focus_start")
+        _cf_end    = t_meta.get("context_focus_end")
+        _xs_send   = t_meta.get("xtts_send")
+        _xs_first  = t_meta.get("first_tts_chunk")
+        _xs_last   = t_meta.get("xtts_last_chunk")
+
+        def _ms(a, b):
+            if a is None or b is None:
+                return None
+            return int(round((b - a) * 1000))
+
+        _p_routing   = _ms(_rt_start, _rt_end)
+        _p_retrieval = _ms(_rv_start, _rv_end)
+        _p_rerank    = _ms(_rk_start, _rk_end)
+        _p_focus     = _ms(_cf_start, _cf_end)
+        _p_llm_ft    = None   # no LLM streaming on this path
+        _p_llm_tot   = None   # no LLM streaming on this path
+        _p_xtts_ft   = _ms(_req_start, _xs_first) if _xs_first else None
+        _p_xtts_tot  = _ms(_req_start, _xs_last) if _xs_last else None
+        _p_total_be  = _ms(_req_start, t_now)
+        _p_total_au  = _ms(_req_start, _xs_last) if _xs_last else None
+
+        def _fmt(v):
+            return f"{v} ms" if v is not None else "N/A"
+
+        _REQ_ID    = f"{connection_id} / msg_{abs(hash(query_text)) % 100000:05d}"
+        _q_preview = (query_text or "")[:60]
+        _ans_chars = len(answer_text or "")
+        _audio_on  = bool(_xs_send)
+
+        logger.info("=" * 60)
+        logger.info("PERFORMANCE TIMING REPORT")
+        logger.info(f"Request ID: {_REQ_ID}")
+        logger.info(f'Query: "{_q_preview}"')
+        logger.info(f"Answer chars: {_ans_chars}  |  Audio enabled: {_audio_on}")
+        logger.info("=" * 60)
+        logger.info(f"{'Stage':<30} {'Time':>10}")
+        logger.info("-" * 60)
+        logger.info(f"{'Routing':<30} {_fmt(_p_routing):>10}")
+        logger.info(f"{'Retrieval':<30} {_fmt(_p_retrieval):>10}")
+        logger.info(f"{'Reranking':<30} {_fmt(_p_rerank):>10}")
+        logger.info(f"{'Context focus':<30} {_fmt(_p_focus):>10}")
+        logger.info(f"{'LLM first token':<30} {_fmt(_p_llm_ft):>10}")
+        logger.info(f"{'LLM total generation':<30} {_fmt(_p_llm_tot):>10}")
+        logger.info(f"{'XTTS first audio':<30} {_fmt(_p_xtts_ft):>10}")
+        logger.info(f"{'XTTS total audio':<30} {_fmt(_p_xtts_tot):>10}")
+        logger.info(f"{'Frontend playback start':<30} {'N/A':>10}")
+        logger.info("-" * 60)
+        logger.info(f"{'Total backend response':<30} {_fmt(_p_total_be):>10}")
+        logger.info(f"{'Total with audio':<30} {_fmt(_p_total_au):>10}")
+        logger.info("=" * 60)
+
+        def _c(v):
+            return f"{v}ms" if v is not None else "N/A"
+        logger.info(
+            f"[PERF SUMMARY] query=\"{_q_preview}\" "
+            f"routing={_c(_p_routing)} retrieval={_c(_p_retrieval)} rerank={_c(_p_rerank)} "
+            f"focus={_c(_p_focus)} llm_first={_c(_p_llm_ft)} llm_total={_c(_p_llm_tot)} "
+            f"xtts_first={_c(_p_xtts_ft)} xtts_total={_c(_p_xtts_tot)} "
+            f"total_backend={_c(_p_total_be)} total_audio={_c(_p_total_au)}"
+        )
+    except Exception:
+        logger.exception("[PERF REPORT] _emit_perf_report failed")
+
+
 async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str, user, cancel_event: Optional[asyncio.Event] = None, t_meta=None, language: str = "en"): # type: ignore
     """Stream LLM response with overlapping TTS via producer-consumer pipeline.
 
@@ -24430,6 +24648,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         vram_llm_before = torch.cuda.memory_reserved(0) / 1024**2
     
     t_meta = t_meta or {}
+    t_meta["routing_start"] = perf_start  # routing starts at function entry
     t_meta["llm_send"] = perf_start
     t_meta["vram_llm_before"] = vram_llm_before
     if not text or len(text.strip()) < 2:
@@ -24628,13 +24847,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     is_greeting = arabic_small_talk or (len(text.strip().split()) <= 3 and any(pattern in text.lower() for pattern in greeting_patterns))
 
     is_simple_factual_query = _is_simple_factual_text_query(text)
+    t_meta["routing_end"] = time.perf_counter()  # routing decision complete
     if is_greeting:
         relevant_docs = []
     elif _prefetched_rag_docs is not None:
         # Arabic path: reuse result from guard check — avoids a second identical RAG search
         relevant_docs = _prefetched_rag_docs
+        t_meta["retrieval_start"] = t_meta.get("routing_end")
+        t_meta["retrieval_end"] = t_meta.get("routing_end")
     else:
         retrieval_start = time.perf_counter()
+        t_meta["retrieval_start"] = retrieval_start
         text_l = (text or "").strip().lower()
         family = _classify_query_family(text)
         family_v2 = _classify_query_family_v2(text)
@@ -24668,6 +24891,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             logger.info("%s overview fallback retrieval used | docs=%s query='%s'", connection_id, len(relevant_docs), text[:80])
         # Reranker is active in retrieval path
         retrieval_ms = (time.perf_counter() - retrieval_start) * 1000
+        t_meta["retrieval_end"] = time.perf_counter()
         logger.info(
             "%s retrieval_done | fast_path=%s top_k=%s docs=%s retrieval_ms=%.0f",
             connection_id,
@@ -24678,8 +24902,10 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         )
 
     if _classify_query_family_v2(text) not in {"definition_entity", "list_entity", "explanatory_compare"}:
+        t_meta["rerank_start"] = time.perf_counter()
         relevant_docs = _rerank_docs_for_query_intent(text, relevant_docs)
         relevant_docs = _retrieve_with_section_bias(text, relevant_docs, top_k=top_k_req if 'top_k_req' in locals() else 10)
+        t_meta["rerank_end"] = time.perf_counter()
 
     if (not is_greeting) and (_classify_query_family_v2(text) == "fact_entity") and relevant_docs:
         try:
@@ -24785,6 +25011,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             query_length=len(text.strip()),
             response_length=len(fallback_text),
         )
+        _emit_perf_report(t_meta, perf_start, text, fallback_text, connection_id)
         return
     
     context_block = ""
@@ -24825,6 +25052,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 len((text or "").strip()),
                 len(early_identity),
             )
+            _emit_perf_report(t_meta, perf_start, text, early_identity, connection_id)
             return
 
         try:
@@ -25189,6 +25417,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 len((text or "").strip()),
                 len(short_answer),
             )
+            _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
         generation_query_requested = _is_llm_generation_query(original_query_text)
@@ -25234,6 +25463,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
                 except Exception:
                     pass
+                _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
                 return
 
             generation_system_prompt = (
@@ -25305,6 +25535,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
             except Exception:
                 pass
+            _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
         # Fast/simple early selector for definition/list/overview queries.
@@ -25339,6 +25570,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 len((text or "").strip()),
                 len(short_answer),
             )
+            _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
         # Merge adjacent high-ranking chunks for list-style questions (selective)
@@ -25828,6 +26060,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 print("[GENERIC MERGE] focused preview:", doc_dicts[0].get("page_content", "")[:350])
 
         # Focus each retrieved doc to a query-centered window to improve relevance
+        t_meta["context_focus_start"] = time.perf_counter()
         for d in doc_dicts:
             try:
                 focused = _focus_doc_to_query_window(text, d.get("page_content", ""))
@@ -25839,6 +26072,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             d["page_content"] = focused
             d["text"] = focused
             d["content"] = focused
+        t_meta["context_focus_end"] = time.perf_counter()
 
         # Ensure doc_dicts[0] valid
         if not doc_dicts:
@@ -26109,6 +26343,7 @@ STRICT BEHAVIOR:
             )
         except Exception:
             pass
+        _emit_perf_report(t_meta, perf_start, text, _mpc11_answer, connection_id)
         return
 
     stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
@@ -26159,6 +26394,7 @@ STRICT BEHAVIOR:
             )
         except Exception:
             pass
+        _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
         return
     
     fact_type_current = _detect_fact_query_type(text)
@@ -26304,6 +26540,7 @@ STRICT BEHAVIOR:
         response_time = int((time.time() - start_time) * 1000)
         log_usage(username, user_role, text, "success", None, response_time, len(relevant_docs), query_length, len(deterministic_answer))
         logger.info("RAG: deterministic fast-path response (%s chars) in %sms", len(deterministic_answer), response_time)
+        _emit_perf_report(t_meta, perf_start, text, deterministic_answer, connection_id)
         return
 
     try:
@@ -26760,6 +26997,8 @@ STRICT BEHAVIOR:
                     continue
 
                 chunk_start = time.perf_counter()
+                if not t_meta.get("xtts_send"):
+                    t_meta["xtts_send"] = chunk_start  # first XTTS request time
 
                 try:
                     await _safe_ws_json({"type": "ttsAudioStart", "sampleRate": 24000})
@@ -26819,6 +27058,7 @@ STRICT BEHAVIOR:
                         chunk_elapsed = time.perf_counter() - chunk_start
                         tts_chunk_count += 1
                         tts_total_time += chunk_elapsed
+                        t_meta["xtts_last_chunk"] = time.perf_counter()  # updated each chunk; final value = end of last chunk
 
                     else:
                         detail = await resp.text()
@@ -27090,6 +27330,83 @@ STRICT BEHAVIOR:
         logger.info(f"  Adaptive Tier:      {adaptive_stats['current_tier']} | words={adaptive_stats['words_per_chunk']} buf={adaptive_stats['buffer_delay_s']:.2f}s")
         logger.info(f"  TTS Chunks:         {tts_chunk_count} (total TTS time: {tts_total_time:.2f}s)")
         logger.info(f"=== END LATENCY REPORT ===")
+
+        # ================================================================
+        # PERFORMANCE TIMING REPORT
+        # ================================================================
+        try:
+            _req_start = t_meta.get("request_start") or perf_start
+            _rt_start = t_meta.get("routing_start") or perf_start
+            _rt_end   = t_meta.get("routing_end")
+            _rv_start = t_meta.get("retrieval_start")
+            _rv_end   = t_meta.get("retrieval_end")
+            _rk_start = t_meta.get("rerank_start")
+            _rk_end   = t_meta.get("rerank_end")
+            _cf_start = t_meta.get("context_focus_start")
+            _cf_end   = t_meta.get("context_focus_end")
+            _xs_send  = t_meta.get("xtts_send")
+            _xs_first = t_meta.get("first_tts_chunk")
+            _xs_last  = t_meta.get("xtts_last_chunk")
+
+            def _ms(a, b):
+                if a is None or b is None:
+                    return None
+                return int(round((b - a) * 1000))
+
+            _p_routing  = _ms(_rt_start, _rt_end)
+            _p_retrieval = _ms(_rv_start, _rv_end)
+            _p_rerank   = _ms(_rk_start, _rk_end)
+            _p_focus    = _ms(_cf_start, _cf_end)
+            _p_llm_ft   = int(round(first_token_ms)) if first_token_ms else None
+            _p_llm_tot  = int(round(total_ms))
+            _p_xtts_ft  = int(round(first_tts_ms)) if first_tts_ms else None
+            _p_xtts_tot = int(round(tts_total_time * 1000)) if tts_total_time else None
+            _p_total_be = _ms(_req_start, t_llm_done)
+            _p_total_au = _ms(_req_start, _xs_last) if _xs_last else None
+
+            def _fmt(v):
+                return f"{v} ms" if v is not None else "N/A"
+
+            _REQ_ID = f"{connection_id} / msg_{abs(hash(text)) % 100000:05d}"
+            _q_preview = (text or "")[:60]
+            _ans_chars = len(full_response)
+            _audio_on  = tts_enabled_for_query and bool(_xs_send)
+
+            logger.info("=" * 60)
+            logger.info("PERFORMANCE TIMING REPORT")
+            logger.info(f"Request ID: {_REQ_ID}")
+            logger.info(f'Query: "{_q_preview}"')
+            logger.info(f"Answer chars: {_ans_chars}  |  Audio enabled: {_audio_on}")
+            logger.info("=" * 60)
+            logger.info(f"{'Stage':<30} {'Time':>10}")
+            logger.info("-" * 60)
+            logger.info(f"{'Routing':<30} {_fmt(_p_routing):>10}")
+            logger.info(f"{'Retrieval':<30} {_fmt(_p_retrieval):>10}")
+            logger.info(f"{'Reranking':<30} {_fmt(_p_rerank):>10}")
+            logger.info(f"{'Context focus':<30} {_fmt(_p_focus):>10}")
+            logger.info(f"{'LLM first token':<30} {_fmt(_p_llm_ft):>10}")
+            logger.info(f"{'LLM total generation':<30} {_fmt(_p_llm_tot):>10}")
+            logger.info(f"{'XTTS first audio':<30} {_fmt(_p_xtts_ft):>10}")
+            logger.info(f"{'XTTS total audio':<30} {_fmt(_p_xtts_tot):>10}")
+            logger.info(f"{'Frontend playback start':<30} {'N/A':>10}")
+            logger.info("-" * 60)
+            logger.info(f"{'Total backend response':<30} {_fmt(_p_total_be):>10}")
+            logger.info(f"{'Total with audio':<30} {_fmt(_p_total_au):>10}")
+            logger.info("=" * 60)
+
+            # Compact one-liner
+            def _c(v):
+                return f"{v}ms" if v is not None else "N/A"
+            logger.info(
+                f"[PERF SUMMARY] query=\"{_q_preview}\" "
+                f"routing={_c(_p_routing)} retrieval={_c(_p_retrieval)} rerank={_c(_p_rerank)} "
+                f"focus={_c(_p_focus)} llm_first={_c(_p_llm_ft)} llm_total={_c(_p_llm_tot)} "
+                f"xtts_first={_c(_p_xtts_ft)} xtts_total={_c(_p_xtts_tot)} "
+                f"total_backend={_c(_p_total_be)} total_audio={_c(_p_total_au)}"
+            )
+        except Exception:
+            logger.exception("[PERF REPORT] failed to print timing table")
+        # ================================================================
 
 
         # (Deterministic overrides removed for Pure RAG)
@@ -27569,6 +27886,22 @@ async def statistics():
     }
 
 
+@app.get("/kb_status")
+async def kb_status():
+    """Public KB pipeline state for admin upload polling.
+
+    Returns the lifecycle state (uploading | processing | ready | failed),
+    the current filename being processed (if any), per-stage timings, and
+    the cumulative upload-to-ready duration. This is the single source of
+    truth the admin UI must consult before showing an upload as 'success'.
+    """
+    snapshot = dict(_kb_pipeline_state)
+    snapshot["stage_timings"] = dict(_kb_pipeline_state.get("stage_timings") or {})
+    snapshot["active_sources"] = sorted(_get_active_sources())
+    snapshot["doc_mode"] = _active_doc_registry.get("mode", RAG_DOC_MODE)
+    return snapshot
+
+
 # ========== ARABIC LANGUAGE SUPPORT ENDPOINTS ==========
 
 # Track ongoing Arabic model download
@@ -27656,6 +27989,274 @@ async def get_audio(filename: str):
     return {"error": "File not found"}
 
 # ========== FILE UPLOAD ENDPOINT ==========
+# Background tasks currently in flight, keyed by filename. Used to avoid
+# duplicate concurrent indexing of the same upload and to keep strong
+# references so asyncio doesn't garbage-collect a running task.
+_pdf_indexing_tasks: dict = {}
+
+
+async def _finalize_pdf_upload_background(
+    *,
+    filename: str,
+    original_filename: str,
+    file_ext: str,
+    save_path: Path,
+    file_size_mb: float,
+    target_collection_name: str,
+    old_single_mode_collection: str,
+) -> None:
+    """Run the heavy half of /upload_rag (text extract + chunk + embed +
+    Chroma write + state activation) outside the request lifecycle so the
+    HTTP response can return in <500 ms.
+
+    Only changes the EXECUTION MODEL — the actual indexing logic, blue/green
+    swap, GC and active-source registration are byte-for-byte identical to
+    the previous synchronous implementation.
+    """
+    global _current_active_doc_id
+    swap_t0 = time.time()
+    logger.info("[SWAP START] filename=%s size=%.2fMB ext=%s", filename, file_size_mb, file_ext)
+
+    try:
+        # ---- Collection diagnostics (was previously logged inside upload_rag) ----
+        try:
+            kb_col = get_or_create_collection()
+            kb_col_name = kb_col.name if kb_col else "<none>"
+        except Exception as kb_col_err:
+            kb_col_name = f"<error:{kb_col_err}>"
+
+        retrieval_col_name = getattr(getattr(live_rag, "vs", None), "collection", None)
+        retrieval_col_name = getattr(retrieval_col_name, "name", "<none>")
+        logger.info(
+            "upload_rag(bg) start | filename=%s mode=%s kb_collection=%s retrieval_collection=%s",
+            filename,
+            _active_doc_registry.get("mode", RAG_DOC_MODE),
+            kb_col_name,
+            retrieval_col_name,
+        )
+        if kb_col_name != retrieval_col_name:
+            logger.warning("upload_rag(bg) collection mismatch | kb=%s retrieval=%s", kb_col_name, retrieval_col_name)
+
+        # ---- 1) Read text from the saved asset ----
+        read_t0 = time.time()
+        text = ""
+        extracted_page_count = 0
+        non_empty_pages = 0
+        extraction_errors = 0
+        if file_ext == "txt":
+            try:
+                content_bytes = save_path.read_bytes()
+                try:
+                    text = content_bytes.decode("utf-8")
+                except Exception:
+                    text = content_bytes.decode(errors="ignore")
+            except Exception as txt_err:
+                logger.error("[SWAP FAIL] TXT read failed | filename=%s err=%s", filename, txt_err)
+                _set_kb_pipeline_state("failed", message=f"TXT read failed: {txt_err}", filename=filename)
+                return
+            extracted_page_count = 1
+            non_empty_pages = 1 if text.strip() else 0
+            logger.info(f"  Extracted TXT: {len(text)} chars, ~{len(text.split())} words")
+        else:
+            try:
+                from PyPDF2 import PdfReader
+                logger.info(f"  Extracting PDF text (background)...")
+                reader = PdfReader(save_path)
+                pages = []
+                num_pages = len(reader.pages)
+                extracted_page_count = num_pages
+                logger.info(f"  PDF has {num_pages} pages")
+
+                for page_num, p in enumerate(reader.pages):
+                    try:
+                        page_text = p.extract_text() or ""
+                        one_based = page_num + 1
+                        pages.append(f"[PAGE_START: {one_based}]\n{page_text}\n[PAGE_END: {one_based}]")
+                        if page_text.strip():
+                            non_empty_pages += 1
+                        if (page_num + 1) % 10 == 0 or page_num == num_pages - 1:
+                            logger.info(f"    Extracted {page_num + 1}/{num_pages} pages...")
+                    except Exception as e:
+                        extraction_errors += 1
+                        logger.warning(f"  Could not extract page {page_num}: {e}")
+                        one_based = page_num + 1
+                        pages.append(f"[PAGE_START: {one_based}]\n\n[PAGE_END: {one_based}]")
+
+                text = "\n\n".join(pages)
+                logger.info(f"  Extracted PDF: {len(text)} chars, ~{len(text.split())} words from {num_pages} pages")
+                logger.info(
+                    "  PDF extraction diagnostics | filename=%s pages=%s non_empty_pages=%s extraction_errors=%s chars=%s",
+                    filename,
+                    num_pages,
+                    non_empty_pages,
+                    extraction_errors,
+                    len(text),
+                )
+                if len(text.strip()) == 0:
+                    logger.warning(
+                        "  PDF extraction produced empty text | filename=%s pages=%s non_empty_pages=%s errors=%s",
+                        filename,
+                        num_pages,
+                        non_empty_pages,
+                        extraction_errors,
+                    )
+            except ImportError:
+                logger.error("[SWAP FAIL] PyPDF2 not installed")
+                _set_kb_pipeline_state("failed", message="PyPDF2 not installed", filename=filename)
+                return
+            except Exception as e:
+                logger.error(f"PDF extraction error: {e}")
+                _set_kb_pipeline_state("failed", message=f"Could not parse PDF: {e}", filename=filename)
+                return
+
+        logger.info("[PDF READ DONE] filename=%s elapsed=%.2fs chars=%d", filename, time.time() - read_t0, len(text))
+        _record_kb_stage("pdf_read_done")
+
+        # ---- 2) Chunk + embed + write to Chroma ----
+        doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
+        metadata = {"source": "upload", "filename": filename, "file_size_mb": file_size_mb}
+
+        logger.info(f"  Starting chunking and embedding indexing (batch processing)...")
+        chunk_t0 = time.time()
+        active_collection = ""
+        gc_report: dict = {}
+        indexing_details: dict = {}
+        try:
+            async with _collection_mutation_lock:
+                # Run the CPU/IO-heavy embedder off the event loop so /ws and
+                # other coroutines (including the KB-ready gate) stay responsive.
+                _raw_indexing = await asyncio.to_thread(
+                    chunk_and_add_document,
+                    doc_id,
+                    text,
+                    metadata,
+                    _kb_global_version + 1,
+                    True,
+                    target_collection_name,
+                )
+                indexing_details = _raw_indexing if isinstance(_raw_indexing, dict) else {}
+                logger.info("[CHUNKING DONE] filename=%s generated=%s",
+                            filename, indexing_details.get("generated_chunks"))
+                _record_kb_stage("chunking_done")
+                logger.info("[EMBEDDING DONE] filename=%s elapsed=%.2fs",
+                            filename, time.time() - chunk_t0)
+                _record_kb_stage("embedding_done")
+
+                chunks_indexed = int((indexing_details).get("indexed_chunks") or 0)
+                if chunks_indexed > 0:
+                    _set_kb_pipeline_state(
+                        "processing",
+                        message="Indexing completed; activating live retrieval",
+                        filename=filename,
+                    )
+                    active_collection = _sync_live_retrieval_collection((indexing_details).get("collection"))
+                    logger.info("[DB WRITE DONE] filename=%s collection=%s indexed=%s",
+                                filename, active_collection, chunks_indexed)
+                    _record_kb_stage("db_write_done")
+                    _record_kb_stage("active_switch_done")
+
+                    if _active_doc_registry.get("mode", RAG_DOC_MODE) == "single":
+                        try:
+                            from backend.knowledge_base import garbage_collect_support_collections
+                            gc_report = garbage_collect_support_collections(
+                                active_collection_name=active_collection,
+                                delete_non_empty=True,
+                                prefix="support_docs_v3_",
+                            )
+                        except Exception as gc_err:
+                            logger.warning(f"Blue/Green GC skipped due to error: {gc_err}")
+        except Exception as upsert_err:
+            _set_kb_pipeline_state("failed", message=f"Indexing failed: {upsert_err}", filename=filename)
+            logger.exception("upload_rag(bg) upsert failure | filename=%s doc_id=%s error=%s",
+                             filename, doc_id, upsert_err)
+            return
+
+        chunks_indexed = int(indexing_details.get("indexed_chunks") or 0)
+        chunks_generated = int(indexing_details.get("generated_chunks") or 0)
+        batch_errors = indexing_details.get("batch_errors") or []
+        logger.info(
+            "upload_rag(bg) indexing diagnostics | filename=%s doc_id=%s collection=%s generated=%s indexed=%s batch_errors=%s",
+            filename,
+            doc_id,
+            indexing_details.get("collection"),
+            chunks_generated,
+            chunks_indexed,
+            len(batch_errors),
+        )
+        if chunks_generated == 0:
+            logger.warning("upload_rag(bg) generated zero chunks | filename=%s reason=%s",
+                           filename, indexing_details.get("reason", ""))
+
+        if chunks_indexed > 0:
+            # Atomically activate the new doc as the single source of truth.
+            _register_active_source(filename)
+            _current_active_doc_id = _normalize_source_label(filename)
+            logger.info(
+                "upload_rag(bg) post-index | filename=%s active_doc_id=%s active_collection=%s active_sources=%s",
+                filename,
+                _current_active_doc_id,
+                active_collection,
+                sorted(_get_active_sources()),
+            )
+            if gc_report:
+                logger.info(
+                    "upload_rag(bg) GC summary | deleted=%s skipped=%s errors=%s",
+                    (gc_report or {}).get("deleted_count", 0),
+                    (gc_report or {}).get("skipped_count", 0),
+                    len((gc_report or {}).get("errors") or []),
+                )
+            _mark_assets_recently_indexed(filename, seconds=120.0)
+            try:
+                await invalidate_all_caches(action="upload", filename=filename,
+                                             chunks_added=chunks_indexed, triggered_by="admin")
+            except Exception as cache_err:
+                logger.warning("upload_rag(bg) cache invalidation failed: %s", cache_err)
+
+            # ---- Verification probe: confirm the new source is actually retrievable ----
+            # Direct metadata check on the active retrieval collection. Semantic
+            # search is unreliable for very small documents (1-2 chunks), so we
+            # query Chroma's metadata index directly for any chunk whose
+            # filename / source matches the upload we just indexed.
+            probe_ok = False
+            probe_reason = ""
+            target_source = _normalize_source_label(filename)
+            try:
+                vs = getattr(live_rag, "vs", None)
+                col = getattr(vs, "collection", None) if vs is not None else None
+                if col is None:
+                    probe_reason = "no live retrieval collection"
+                else:
+                    raw = await asyncio.to_thread(lambda: col.get(include=["metadatas"]))
+                    metas = (raw or {}).get("metadatas") or []
+                    matched = 0
+                    for md in metas:
+                        if isinstance(md, dict) and target_source and target_source in _metadata_source_keys(md):
+                            matched += 1
+                    if matched > 0:
+                        probe_ok = True
+                    else:
+                        probe_reason = f"verification: 0 chunks with source={target_source} in collection"
+            except Exception as probe_err:
+                probe_reason = f"verification probe error: {probe_err}"
+            _record_kb_stage("verification_done")
+            if not probe_ok:
+                _set_kb_pipeline_state("failed", message=f"Indexed but not retrievable: {probe_reason}", filename=filename)
+                logger.warning("[KB READY DENIED] filename=%s reason=%s", filename, probe_reason)
+                return
+
+            _set_kb_pipeline_state("ready", message="Document indexed and active for retrieval", filename=filename)
+            logger.info("[KB READY] filename=%s total=%.2fs chunks=%d", filename, time.time() - swap_t0, chunks_indexed)
+        else:
+            _set_kb_pipeline_state("failed", message="No chunks indexed from uploaded file", filename=filename)
+            logger.warning("[SWAP FAIL] filename=%s reason=no_chunks total=%.2fs", filename, time.time() - swap_t0)
+    except Exception as bg_err:
+        logger.exception("[SWAP FAIL] background task crashed for %s: %s", filename, bg_err)
+        _set_kb_pipeline_state("failed", message=f"Background indexing crashed: {bg_err}", filename=filename)
+    finally:
+        # Drop our task handle so re-uploads of the same filename are allowed.
+        _pdf_indexing_tasks.pop(filename, None)
+
+
 @app.post("/upload_rag")
 async def upload_rag(request: Request, file: UploadFile = File(...), user=Depends(require_login("admin"))):
     verify_csrf(request)
@@ -27730,230 +28331,64 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
 
     save_path = ASSETS_DIR / filename
     content = await file.read()
-
-    try:
-        kb_col = get_or_create_collection()
-        kb_col_name = kb_col.name if kb_col else "<none>"
-    except Exception as kb_col_err:
-        kb_col_name = f"<error:{kb_col_err}>"
-
-    retrieval_col_name = getattr(getattr(live_rag, "vs", None), "collection", None)
-    retrieval_col_name = getattr(retrieval_col_name, "name", "<none>")
-    logger.info(
-        "upload_rag start | filename=%s bytes=%s mode=%s kb_collection=%s retrieval_collection=%s",
-        filename,
-        len(content),
-        _active_doc_registry.get("mode", RAG_DOC_MODE),
-        kb_col_name,
-        retrieval_col_name,
-    )
-    if kb_col_name != retrieval_col_name:
-        logger.warning("upload_rag collection mismatch | kb=%s retrieval=%s", kb_col_name, retrieval_col_name)
-    
-    # Check file size - warn if very large
     file_size_mb = len(content) / (1024 * 1024)
     if file_size_mb > 10:
         logger.warning(f"Large file upload: {filename} ({file_size_mb:.1f}MB) - processing may take time")
-    
+
     save_path.write_bytes(content)
     logger.info(f"✓ Received file: {filename} ({file_size_mb:.1f}MB)")
+    _record_kb_stage("file_saved")
     # Watchdog fires created+modified for this write; suppress immediate watcher reindex.
     _mark_assets_recently_indexed(filename, seconds=15.0)
 
-    text = ""
-    extracted_page_count = 0
-    non_empty_pages = 0
-    extraction_errors = 0
-    if file_ext == "txt":
-        try:
-            text = content.decode("utf-8")
-        except Exception:
-            text = content.decode(errors="ignore")
-        extracted_page_count = 1
-        non_empty_pages = 1 if text.strip() else 0
-        logger.info(f"  Extracted TXT: {len(text)} chars, ~{len(text.split())} words")
+    # ---- ASYNC HOT-SWAP DISPATCH -------------------------------------------
+    # Refuse to schedule a duplicate background task for the same filename.
+    if filename in _pdf_indexing_tasks and not _pdf_indexing_tasks[filename].done():
+        logger.info("upload_rag duplicate background task suppressed | filename=%s", filename)
     else:
-        # PDF EXTRACTION with better error handling
-        try:
-            from PyPDF2 import PdfReader
-            logger.info(f"  Extracting PDF text (may take time for large files)...")
-            reader = PdfReader(save_path)
-            pages = []
-            num_pages = len(reader.pages)
-            extracted_page_count = num_pages
-            logger.info(f"  PDF has {num_pages} pages")
-            
-            for page_num, p in enumerate(reader.pages):
-                try:
-                    page_text = p.extract_text() or ""
-                    one_based = page_num + 1
-                    pages.append(f"[PAGE_START: {one_based}]\n{page_text}\n[PAGE_END: {one_based}]")
-                    if page_text.strip():
-                        non_empty_pages += 1
-                    if (page_num + 1) % 10 == 0 or page_num == num_pages - 1:
-                        logger.info(f"    Extracted {page_num + 1}/{num_pages} pages...")
-                except Exception as e:
-                    extraction_errors += 1
-                    logger.warning(f"  Could not extract page {page_num}: {e}")
-                    one_based = page_num + 1
-                    pages.append(f"[PAGE_START: {one_based}]\n\n[PAGE_END: {one_based}]")
-            
-            text = "\n\n".join(pages)
-            logger.info(f"  Extracted PDF: {len(text)} chars, ~{len(text.split())} words from {num_pages} pages")
-            logger.info(
-                "  PDF extraction diagnostics | filename=%s pages=%s non_empty_pages=%s extraction_errors=%s chars=%s",
-                filename,
-                num_pages,
-                non_empty_pages,
-                extraction_errors,
-                len(text),
+        _bg_task = asyncio.create_task(
+            _finalize_pdf_upload_background(
+                filename=filename,
+                original_filename=original_filename,
+                file_ext=file_ext,
+                save_path=save_path,
+                file_size_mb=file_size_mb,
+                target_collection_name=_target_collection_name,
+                old_single_mode_collection=_old_single_mode_collection,
             )
-            if len(text.strip()) == 0:
-                logger.warning(
-                    "  PDF extraction produced empty text | filename=%s pages=%s non_empty_pages=%s errors=%s",
-                    filename,
-                    num_pages,
-                    non_empty_pages,
-                    extraction_errors,
-                )
-            
-        except ImportError:
-            return {"message": "PyPDF2 not installed. Install with: pip install PyPDF2"}
-        except Exception as e:
-            logger.error(f"PDF extraction error: {e}")
-            return {"message": f"Could not parse PDF: {str(e)}. File may be corrupted or encrypted."}
-
-    doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
-    metadata = {"source": "upload", "filename": filename, "file_size_mb": file_size_mb}
-
-    # Use chunk-based indexing so each line/paragraph gets its own embedding.
-    # Storing the whole file as one doc would average all facts into one vector
-    # and make individual fact lookups unreliable.
-    # Note: For large files, chunk_and_add_document now uses batch processing
-    logger.info(f"  Starting chunking and embedding indexing (batch processing)...")
-    active_collection = ""
-    gc_report = {}
-    indexing_details: dict = {}
-    try:
-        async with _collection_mutation_lock:
-            _raw_indexing = chunk_and_add_document(
-                doc_id=doc_id,
-                text=text,
-                metadata=metadata,
-                kb_version=_kb_global_version + 1,
-                return_details=True,
-                target_collection_name=_target_collection_name or None,  # type: ignore[arg-type]
-            )
-            indexing_details: dict = _raw_indexing if isinstance(_raw_indexing, dict) else {}
-
-            chunks_indexed = int((indexing_details).get("indexed_chunks") or 0)
-            if chunks_indexed > 0:
-                _set_kb_pipeline_state("processing", message="Indexing completed; activating live retrieval", filename=filename)
-                active_collection = _sync_live_retrieval_collection((indexing_details).get("collection"))
-
-                if _active_doc_registry.get("mode", RAG_DOC_MODE) == "single":
-                    try:
-                        from backend.knowledge_base import garbage_collect_support_collections
-                        gc_report = garbage_collect_support_collections(
-                            active_collection_name=active_collection,
-                            delete_non_empty=True,
-                            prefix="support_docs_v3_",
-                        )
-                    except Exception as gc_err:
-                        logger.warning(f"Blue/Green GC skipped due to error: {gc_err}")
-    except Exception as upsert_err:
-        _set_kb_pipeline_state("failed", message=f"Indexing failed: {upsert_err}", filename=filename)
-        logger.exception("upload_rag upsert failure | filename=%s doc_id=%s error=%s", filename, doc_id, upsert_err)
-        raise HTTPException(status_code=500, detail=f"Indexing failed: {upsert_err}")
-
-    chunks_indexed = int(indexing_details.get("indexed_chunks") or 0)
-    chunks_generated = int(indexing_details.get("generated_chunks") or 0)
-    batch_errors = indexing_details.get("batch_errors") or []
-    logger.info(
-        "upload_rag indexing diagnostics | filename=%s doc_id=%s collection=%s generated=%s indexed=%s batch_errors=%s",
-        filename,
-        doc_id,
-        indexing_details.get("collection"),
-        chunks_generated,
-        chunks_indexed,
-        len(batch_errors),
-    )
-    if chunks_generated == 0:
-        logger.warning("upload_rag generated zero chunks | filename=%s reason=%s", filename, indexing_details.get("reason", ""))
-
-    if chunks_indexed > 0:
-
-        global _current_active_doc_id
-        _register_active_source(filename)
-        _current_active_doc_id = _normalize_source_label(filename)
-        logger.info(
-            "upload_rag post-index | filename=%s active_doc_id=%s active_collection=%s active_sources=%s",
-            filename,
-            _current_active_doc_id,
-            active_collection,
-            sorted(_get_active_sources()),
         )
-        if gc_report:
-            logger.info(
-                "upload_rag GC summary | deleted=%s skipped=%s errors=%s",
-                (gc_report or {}).get("deleted_count", 0),
-                (gc_report or {}).get("skipped_count", 0),
-                len((gc_report or {}).get("errors") or []),
-            )
-        # Upload endpoint already indexed this file; suppress watcher churn.
-        _mark_assets_recently_indexed(filename, seconds=120.0)
-        await invalidate_all_caches(action="upload", filename=filename,
-                                     chunks_added=chunks_indexed, triggered_by="admin")
-        _set_kb_pipeline_state("ready", message="Document indexed and active for retrieval", filename=filename)
-        return {
-            "message": f"✓ File '{filename}' uploaded and indexed as {chunks_indexed} chunk(s). Size: {file_size_mb:.1f}MB",
-            "filename": filename,
-            "chunks_indexed": chunks_indexed,
-            "chunks_generated": chunks_generated,
-            "extracted_char_count": len(text),
-            "extracted_page_count": extracted_page_count,
-            "non_empty_pages": non_empty_pages,
-            "extraction_errors": extraction_errors,
-            "file_size_mb": file_size_mb,
-            "doc_mode": _active_doc_registry.get("mode", RAG_DOC_MODE),
-            "deleted_for_overwrite": deleted_for_overwrite,
-            "removed_assets": removed_assets,
-            "dedup_deleted": dedup_deleted,
-            "dedup_removed_assets": dedup_removed_assets,
-            "active_collection": active_collection,
-            "collection_gc": gc_report,
-            "active_sources": sorted(_get_active_sources()),
-            "ready_state": dict(_kb_pipeline_state),
-        }
-    else:
-        _set_kb_pipeline_state("failed", message="No chunks indexed from uploaded file", filename=filename)
-        return {
-            "message": f"⚠ File '{filename}' uploaded but no useful content found (may be blank or only images).",
-            "filename": filename,
-            "chunks_indexed": 0,
-            "chunks_generated": chunks_generated,
-            "extracted_char_count": len(text),
-            "extracted_page_count": extracted_page_count,
-            "non_empty_pages": non_empty_pages,
-            "extraction_errors": extraction_errors,
-            "file_size_mb": file_size_mb,
-            "doc_mode": _active_doc_registry.get("mode", RAG_DOC_MODE),
-            "deleted_for_overwrite": deleted_for_overwrite,
-            "removed_assets": removed_assets,
-            "dedup_deleted": dedup_deleted,
-            "dedup_removed_assets": dedup_removed_assets,
-            "active_collection": indexing_details.get("collection"),
-            "active_sources": sorted(_get_active_sources()),
-            "index_batch_errors": batch_errors,
-            "index_reason": indexing_details.get("reason", ""),
-            "ready_state": dict(_kb_pipeline_state),
-        }
+        _pdf_indexing_tasks[filename] = _bg_task
+
+    # Return immediately so the client UI is unblocked. The actual indexing
+    # progress is observable via /kb_status (which reads _kb_pipeline_state)
+    # and via the /ws "System is loading the document. Please wait..." gate.
+    return {
+        "status": "processing",
+        "message": "File received. Indexing in background.",
+        "filename": filename,
+        "original_filename": original_filename,
+        "file_size_mb": file_size_mb,
+        "doc_mode": _active_doc_registry.get("mode", RAG_DOC_MODE),
+        "deleted_for_overwrite": deleted_for_overwrite,
+        "removed_assets": removed_assets,
+        "dedup_deleted": dedup_deleted,
+        "dedup_removed_assets": dedup_removed_assets,
+        "ready_state": dict(_kb_pipeline_state),
+    }
+
+
+# ========== LEGACY (DEAD) SYNCHRONOUS UPLOAD BODY — REMOVED ===============
+# The previous in-line synchronous indexing body of /upload_rag has been
+# fully replaced by `_finalize_pdf_upload_background` defined above.
+# Removed in the async hot-swap upgrade.
 
 
 @app.post("/rag/delete")
 async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
-    """Delete documents by prefix and also by filename match, then remove the
-    physical file from ASSETS_DIR so it can never be re-indexed on restart.
+    """Atomically delete a document: chunks, asset file, active state, and
+    any pending watcher work. Returns a truthful report — if the on-disk
+    file still exists or the active state still references the deletion
+    target, the response surfaces that as failure rather than fake success.
 
     Example: pass `upload_Best_player.txt` or just `Best_player.txt`
     to remove all chunks associated with that file.
@@ -27961,11 +28396,69 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
     if not doc_prefix:
         raise HTTPException(status_code=400, detail="doc_prefix is required")
 
-    # ---- 1. Remove all ChromaDB chunks across collections ----
-    gc_report = {}
+    # ---- 0. Compute every plausible filename / asset candidate ---------------
+    import re as _re
+    _bare = _re.sub(r'^upload_(?:[0-9a-fA-F]{8}_)?', '', doc_prefix)
+    asset_candidates: Set[str] = {doc_prefix, _bare}
+    if doc_prefix.startswith("upload_"):
+        asset_candidates.add(doc_prefix[len("upload_"):])
+    asset_candidates = {c.strip() for c in asset_candidates if c and c.strip()}
+
+    # Also include the actual filenames currently sitting in ASSETS_DIR whose
+    # bare (UUID-stripped) name matches the requested target. This is how the
+    # admin UI's "delete by base name" call still finds the UUID-prefixed file.
+    try:
+        target_bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', _bare).lower()
+        if target_bare:
+            for p in ASSETS_DIR.iterdir():
+                if not p.is_file():
+                    continue
+                if p.suffix.lower() not in {".pdf", ".txt", ".md"}:
+                    continue
+                p_bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', p.name).lower()
+                if p_bare == target_bare or p.name.lower() == _bare.lower():
+                    asset_candidates.add(p.name)
+    except Exception as scan_err:
+        logger.warning("rag_delete: candidate scan failed: %s", scan_err)
+
+    logger.info("[KB DELETE] start | doc_prefix=%s candidates=%s",
+                doc_prefix, sorted(asset_candidates))
+
+    # ---- 0a. Cancel ANY pending watcher reindex tasks for these candidates ---
+    # (otherwise a debounced reindex queued just before this call could
+    #  resurrect the chunks moments after we delete them).
+    cancelled_tasks: list[str] = []
+    for cand in list(asset_candidates) + [doc_prefix]:
+        task = _assets_reindex_tasks.pop(cand, None)
+        if task and not task.done():
+            task.cancel()
+            cancelled_tasks.append(cand)
+
+    # ---- 0b. Tombstone every candidate filename so the watchdog/bootstrap ---
+    # cannot reindex this file even if the on-disk unlink fails for any reason.
+    for cand in list(asset_candidates) + [doc_prefix]:
+        _mark_recently_deleted(cand)
+
+    # ---- 1. Remove all ChromaDB chunks across every collection --------------
+    gc_report: dict = {}
+    deleted = 0
     async with _collection_mutation_lock:
-        deleted = delete_documents_with_prefix(doc_prefix)
-        deleted += delete_documents_by_filename(doc_prefix)
+        try:
+            deleted = int(delete_documents_with_prefix(doc_prefix) or 0)
+        except Exception as e:
+            logger.warning("rag_delete: delete_documents_with_prefix failed: %s", e)
+        # Match every candidate filename — covers UUID-prefixed and bare forms
+        # plus whatever real on-disk name we discovered above.
+        for cand in sorted(asset_candidates):
+            try:
+                deleted += int(delete_documents_by_filename(cand) or 0)
+            except Exception as e:
+                logger.warning("rag_delete: delete_documents_by_filename(%s) failed: %s", cand, e)
+
+        # Garbage-collect now-empty stale support_docs_v3_* collections so
+        # _sync_live_retrieval_collection's "scan for non-empty alternatives"
+        # fallback can't accidentally surface a stale populated collection
+        # that still holds the deleted chunks.
         try:
             active_collection = getattr(getattr(live_rag, "vs", None), "collection", None)
             active_collection_name = getattr(active_collection, "name", "") if active_collection else ""
@@ -27976,46 +28469,111 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
                 prefix="support_docs_v3_",
             )
         except Exception as gc_err:
-            logger.warning(f"rag_delete GC skipped due to error: {gc_err}")
+            logger.warning("rag_delete GC skipped due to error: %s", gc_err)
 
-    # ---- 2. Delete the physical asset file so it cannot be re-indexed ----
-    import re as _re
-    # Candidate filenames: the prefix itself, and the bare name after stripping
-    # the "upload_XXXXXXXX_" UUID prefix that the server prepends to doc_ids.
-    _bare = _re.sub(r'^upload_(?:[0-9a-fA-F]{8}_)?', '', doc_prefix)
-    asset_candidates = {doc_prefix, _bare}
-    # Also strip a leading "upload_" with no UUID (legacy naming)
-    if doc_prefix.startswith("upload_"):
-        asset_candidates.add(doc_prefix[len("upload_"):])
+    # ---- 2. Remove the physical asset file(s) — with retries on Windows ----
+    # On Windows, the file may briefly be locked by the watchdog Observer
+    # thread or a finished PdfReader handle that hasn't been GC'd yet.
+    # Silently swallowing PermissionError is what made the previous version
+    # report success while the file stayed on disk and got resurrected by
+    # bootstrap on next restart.
+    deleted_files: list[str] = []
+    failed_unlinks: list[dict] = []
 
-    deleted_files = []
-    for candidate in asset_candidates:
-        candidate = candidate.strip()
+    def _try_unlink(path: Path) -> tuple[bool, str]:
+        last_err = ""
+        for attempt in range(3):
+            try:
+                if not path.exists():
+                    return True, ""
+                path.unlink()
+                return True, ""
+            except Exception as e:  # PermissionError, OSError, etc.
+                last_err = str(e)
+                time.sleep(0.2)
+        return (not path.exists()), last_err
+
+    for candidate in sorted(asset_candidates):
         if not candidate:
             continue
         asset_path = ASSETS_DIR / candidate
-        if asset_path.exists() and asset_path.is_file():
-            try:
-                asset_path.unlink()
-                deleted_files.append(candidate)
-                logger.info(f"rag_delete: removed asset file '{candidate}'")
-            except Exception as e:
-                logger.warning(f"rag_delete: could not remove asset file '{candidate}': {e}")
+        if not (asset_path.exists() and asset_path.is_file()):
+            continue
+        ok, err = _try_unlink(asset_path)
+        if ok:
+            deleted_files.append(candidate)
+            logger.info("rag_delete: removed asset file '%s'", candidate)
+        else:
+            logger.error("rag_delete: could NOT remove asset file '%s' (still on disk): %s", candidate, err)
+            failed_unlinks.append({"file": candidate, "error": err})
 
-    await invalidate_all_caches(action="delete", filename=doc_prefix,
-                                 chunks_deleted=deleted, triggered_by="admin")
+    # ---- 3. Reset active state if the deleted doc was the live target ------
     current_sources = _get_active_sources()
-    for removed in list(asset_candidates) + [doc_prefix]:
-        current_sources.discard(_normalize_source_label(removed))
-    _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
-    # If the deleted doc matches the currently active one, clear the active doc ID
-    # so the anti-leak guard in the WS path has no stale target to match against.
-    global _current_active_doc_id
     removed_labels = {_normalize_source_label(x) for x in list(asset_candidates) + [doc_prefix] if x}
+    for label in removed_labels:
+        current_sources.discard(label)
+    _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
+
+    global _current_active_doc_id
     if _current_active_doc_id and _current_active_doc_id in removed_labels:
         _current_active_doc_id = ""
         logger.info("[KB HOT-SWAP] _current_active_doc_id cleared after delete of %s", doc_prefix)
-    return {"deleted": deleted, "files_removed": deleted_files, "collection_gc": gc_report}
+
+    # Wipe in-memory conversation/follow-up state so the next query cannot
+    # produce an answer derived from the deleted document's prior turns.
+    try:
+        clear_all_conversation_history()
+    except Exception as e:
+        logger.warning("rag_delete: clear_all_conversation_history failed: %s", e)
+
+    # ---- 4. If KB is now globally empty, mark pipeline ready+empty so the ---
+    # gate doesn't get stuck and so live_rag's fallback collection scan
+    # cannot pick a stale populated collection (we just GC'd them above).
+    try:
+        remaining = int(count_documents() or 0)
+    except Exception as e:
+        logger.warning("rag_delete: count_documents failed: %s", e)
+        remaining = -1
+
+    kb_now_empty = (remaining == 0)
+    if kb_now_empty:
+        # If nothing remains anywhere, also clear any active source that may
+        # still be lingering from another code path, and re-point the live
+        # retrieval handle to a fresh empty collection so subsequent queries
+        # can't accidentally see the previously-active populated handle.
+        _set_active_sources([], mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
+        _current_active_doc_id = ""
+        try:
+            new_active = _sync_live_retrieval_collection()
+            logger.info("rag_delete: KB now empty; live retrieval re-synced to '%s'", new_active)
+        except Exception as sync_err:
+            logger.warning("rag_delete: live retrieval re-sync failed: %s", sync_err)
+        _set_kb_pipeline_state("ready", message="Knowledge base is empty after delete", filename=None)
+
+    await invalidate_all_caches(action="delete", filename=doc_prefix,
+                                 chunks_deleted=deleted, triggered_by="admin")
+
+    # ---- 5. Truthful response ----------------------------------------------
+    success = (not failed_unlinks)
+    payload = {
+        "success": success,
+        "deleted": deleted,
+        "files_removed": deleted_files,
+        "files_failed": failed_unlinks,
+        "cancelled_tasks": cancelled_tasks,
+        "tombstoned": sorted({_normalize_filename_for_tombstone(c) for c in (list(asset_candidates) + [doc_prefix]) if c}),
+        "remaining_chunks": remaining,
+        "kb_empty": kb_now_empty,
+        "collection_gc": gc_report,
+        "active_sources": sorted(_get_active_sources()),
+        "current_active_doc_id": _current_active_doc_id,
+        "ready_state": dict(_kb_pipeline_state),
+    }
+    if not success:
+        # Return 207-ish surface as 500 so the admin UI cannot interpret a
+        # half-deletion as full success.
+        raise HTTPException(status_code=500, detail=payload)
+    return payload
 
 
 @app.post("/rag/update")
@@ -28805,10 +29363,12 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     logger.info("[FOLLOWUP ROUTE] complete for query=%s", text)
                                     logger.error("🔥 FOLLOWUP ROUTE COMPLETE")
                                     continue
+                                _ws_perf_t_meta = {"request_start": time.perf_counter()}
                                 await call_llm_streaming(
                                     websocket, text, connection_id,
                                     user or {"username": "anon", "role": "user"},
                                     cancel_evt,
+                                    t_meta=_ws_perf_t_meta,
                                     language=msg_lang,
                                 )
             

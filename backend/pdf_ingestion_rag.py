@@ -6,7 +6,7 @@ import logging
 import asyncio
 import torch
 import numpy as np
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, cast
 
 import PyPDF2
 import pdfplumber
@@ -50,6 +50,45 @@ except Exception as e:
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-base")
 RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
+# ================= RERANK CACHE =================
+# Small in-memory LRU cache for cross-encoder rerank outputs. Keyed by
+# (collection_name, normalized_query, sorted_candidate_ids_hash). Value is
+# a dict mapping candidate_id -> rerank_score. Cache is invalidated when the
+# active collection changes (see _rerank_cache_clear) and on KB hot-swap.
+import hashlib as _rc_hashlib
+from collections import OrderedDict as _RC_OrderedDict
+_RERANK_CACHE_MAX = 128
+_RERANK_CACHE: "_RC_OrderedDict[str, Dict[str, float]]" = _RC_OrderedDict()
+
+
+def _rerank_cache_make_key(collection_name: str, normalized_query: str, candidate_ids: List[str]) -> str:
+    ids_sorted = sorted(str(cid or "") for cid in candidate_ids)
+    payload = "|".join(ids_sorted).encode("utf-8")
+    ids_hash = _rc_hashlib.md5(payload).hexdigest()[:16]
+    return f"{collection_name}::{normalized_query}::{ids_hash}"
+
+
+def _rerank_cache_get(key: str) -> Optional[Dict[str, float]]:
+    val = _RERANK_CACHE.get(key)
+    if val is not None:
+        # Touch (LRU)
+        _RERANK_CACHE.move_to_end(key)
+    return val
+
+
+def _rerank_cache_put(key: str, scores: Dict[str, float]) -> None:
+    _RERANK_CACHE[key] = scores
+    _RERANK_CACHE.move_to_end(key)
+    while len(_RERANK_CACHE) > _RERANK_CACHE_MAX:
+        _RERANK_CACHE.popitem(last=False)
+
+
+def _rerank_cache_clear(reason: str = "") -> None:
+    n = len(_RERANK_CACHE)
+    _RERANK_CACHE.clear()
+    logger.info("[RERANK CACHE] cleared entries=%d reason=%s", n, reason or "unspecified")
+
+
 # ================= MODELS =================
 class DocumentChunk(BaseModel):
     chunk_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -75,7 +114,7 @@ class VectorStore:
         logger.info(f"Loading embedding model: {EMBEDDING_MODEL} on {DEVICE}")
         self.embedding_model_name = EMBEDDING_MODEL
         self.embedding_model = SentenceTransformer(self.embedding_model_name, device=DEVICE)
-        self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension())
+        self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension() or 0)
         # After loading the embedding model, verify compatibility with the
         # selected Chroma collection. If the collection already contains
         # embeddings with a different dimensionality, attempt to switch the
@@ -83,7 +122,7 @@ class VectorStore:
         # InvalidDimensionException during queries. This keeps retrieval
         # behavior consistent without reindexing unless explicitly required.
         try:
-            probe = self.collection.get(include=["embeddings"], limit=1) or {}
+            probe = self.collection.get(include=cast(Any, ["embeddings"]), limit=1) or {}
             embs = probe.get("embeddings") or []
             collection_dim = None
             # Try to robustly find the first numeric embedding vector regardless
@@ -134,7 +173,7 @@ class VectorStore:
                     switched = self._switch_embedding_model(target_model)
                     if switched:
                         logger.info(f"Switched embedding model to match collection dim={collection_dim}")
-                        self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension())
+                        self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension() or 0)
                 else:
                     logger.warning(
                         f"No known embedding model mapped to collection_dim={collection_dim}; queries may fail."
@@ -175,8 +214,8 @@ class VectorStore:
                 return orig_query(*args, **kwargs)
 
             # Attach the original for introspection if needed
-            _patched_query._orig = orig_query
-            self.collection.query = _patched_query
+            setattr(_patched_query, "_orig", orig_query)
+            self.collection.query = _patched_query  # type: ignore[assignment]
         except Exception:
             # If monkey-patch fails, it's safe to continue — callers can still
             # call the collection directly but may face dimension errors.
@@ -191,6 +230,18 @@ class VectorStore:
                 logger.info(f"Loading reranker model: {RERANKER_MODEL} on {DEVICE}")
                 self.reranker = CrossEncoder(RERANKER_MODEL, device=DEVICE)
                 logger.info("Reranker model loaded.")
+                # Warmup: run one tiny prediction so the first real query does
+                # not pay the model warmup/JIT cost. Generic, non-domain pair.
+                try:
+                    logger.info("[RERANK WARMUP] started")
+                    _wu_t0 = time.perf_counter()
+                    _ = self.reranker.predict([
+                        ["definition", "This passage defines a concept and explains its meaning."]
+                    ])
+                    _wu_ms = (time.perf_counter() - _wu_t0) * 1000
+                    logger.info("[RERANK WARMUP] done time=%.0f ms", _wu_ms)
+                except Exception as warmup_err:
+                    logger.warning("[RERANK WARMUP] failed: %s", warmup_err)
             except Exception as rerank_err:
                 logger.warning(f"Reranker disabled (failed to load): {rerank_err}")
         elif DISABLE_RERANKER_FLAG:
@@ -202,11 +253,11 @@ class VectorStore:
         if preferred:
             try:
                 col = self.client.get_or_create_collection(name=preferred, metadata={"hnsw:space": "cosine"})
-                expected_dim = int(self.embedding_model.get_sentence_embedding_dimension()) if hasattr(self, "embedding_model") else None
+                expected_dim = int(self.embedding_model.get_sentence_embedding_dimension() or 0) if hasattr(self, "embedding_model") else None
                 if expected_dim:
                     probe_embedding = [0.0] * expected_dim
                     try:
-                        col.query(query_embeddings=[probe_embedding], n_results=1, include=["distances"])
+                        col.query(query_embeddings=[probe_embedding], n_results=1, include=cast(Any, ["distances"]))
                     except Exception as probe_err:
                         msg = str(probe_err).lower()
                         if "dimensionality" in msg or "attribute 'dimensionality'" in msg:
@@ -258,14 +309,14 @@ class VectorStore:
             logger.warning(f"Switching embedding model to {model_name} for collection compatibility")
             self.embedding_model = SentenceTransformer(model_name, device=DEVICE)
             self.embedding_model_name = model_name
-            self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension())
+            self.embedding_dim = int(self.embedding_model.get_sentence_embedding_dimension() or 0)
             logger.info(f"Embedding model switched successfully (dim={self.embedding_dim})")
             return True
         except Exception as e:
             logger.error(f"Failed to switch embedding model to {model_name}: {e}")
             return False
 
-    def _manual_query_fallback(self, query_embedding: np.ndarray, n_results: int, filter_meta: Dict[str, Any] = None):
+    def _manual_query_fallback(self, query_embedding: np.ndarray, n_results: int, filter_meta: Optional[Dict[str, Any]] = None):
         """Fallback retrieval using stored embeddings when Chroma HNSW query fails.
 
         This implementation is defensive and version-compatible with ChromaDB
@@ -277,7 +328,7 @@ class VectorStore:
         tried_variants = []
         try:
             tried_variants.append("include=documents,metadatas,embeddings")
-            data = self.collection.get(include=["documents", "metadatas", "embeddings"])
+            data = self.collection.get(include=cast(Any, ["documents", "metadatas", "embeddings"]))
         except Exception as e1:
             logger.debug(f"collection.get(include=[docs,metadatas,embs]) failed: {e1}")
             try:
@@ -419,7 +470,7 @@ class VectorStore:
         return False
 
     @staticmethod
-    def _query_profile(query: str) -> Dict[str, bool]:
+    def _query_profile(query: str) -> Dict[str, Any]:
         q = (query or "").lower()
         chapter_match = re.search(r"\b(?:chapter|unit)\s+(\d+)\b", q)
         return {
@@ -661,12 +712,14 @@ class VectorStore:
         self.collection.upsert(
             documents=texts,
             embeddings=embeddings.tolist(),
-            metadatas=metadatas,
+            metadatas=cast(Any, metadatas),
             ids=ids
         )
         logger.info(f"Inserted {len(chunks)} chunks into Vector DB.")
-    def search(self, query: str, top_k: int = 5, distance_threshold: float = 1.0, filter_meta: Dict[str, Any] = None, return_dicts: bool = False, enable_rerank: bool = True):
+    def search(self, query: str, top_k: int = 5, distance_threshold: float = 1.0, filter_meta: Optional[Dict[str, Any]] = None, return_dicts: bool = False, enable_rerank: bool = True):
         """Perform semantic search with structural boosting and optional reranking."""
+        import time as _time_vs
+        _vs_t0 = _time_vs.perf_counter()
         requested_top_k = int(top_k or 1)
         top_k = max(1, min(requested_top_k, 120))
         logger.info("[TOPK TRACE] requested=%s actual=%s function=VectorStore.search", requested_top_k, top_k)
@@ -678,15 +731,23 @@ class VectorStore:
         
         logger.info(f"[RAG] Search: '{normalized_query}' | top_k={top_k}")
 
+        # ── Timing: embedding ─────────────────────────────────────────────
+        _t_emb0 = _time_vs.perf_counter()
         query_embedding = self.embedding_model.encode([query_for_embedding], show_progress_bar=False)[0]
+        _t_emb_ms = (_time_vs.perf_counter() - _t_emb0) * 1000
+        logger.info("[RETRIEVAL TIMING] query_embedding=%.0f ms", _t_emb_ms)
         
         # Lower candidate pool for faster retrieval latency while keeping
-        # enough recall for downstream ranking.
-        candidate_pool = max(40, min(240, top_k * 4))
+        # enough recall for downstream ranking. Floor reduced from 40 to 24
+        # so small top_k queries (e.g. definition probes with top_k=8) rerank
+        # ~24-32 candidates instead of 40+.
+        candidate_pool = max(24, min(240, top_k * 4))
 
         results = None
         last_query_exception = None
 
+        # ── Timing: Chroma query ──────────────────────────────────────────
+        _t_chroma0 = _time_vs.perf_counter()
         for attempt_pool in (candidate_pool, 15, 10, 5):
             try:
                 logger.info(f"[RAG] attempting chroma.query n_results={attempt_pool}")
@@ -714,16 +775,20 @@ class VectorStore:
                 logger.error(f"Manual fallback also failed: {fb_err}")
                 # Final safe return: no candidates
                 results = {"documents": [[]], "metadatas": [[]], "distances": [[]]}
+        _t_chroma_ms = (_time_vs.perf_counter() - _t_chroma0) * 1000
+        logger.info("[RETRIEVAL TIMING] chroma_query=%.0f ms", _t_chroma_ms)
         
         candidates = []
         # Robustly read Chroma-style nested results by aligning indices across
         # documents, metadatas, distances and ids. This guarantees each candidate
         # keeps its chunk text, metadata and score together.
-        if results and "documents" in results and len(results["documents"]) > 0:
-            documents = results.get("documents", [[]])[0] if results.get("documents") else []
-            metadatas = results.get("metadatas", [[]])[0] if results.get("metadatas") else []
-            distances = results.get("distances", [[]])[0] if results.get("distances") else []
-            ids = results.get("ids", [[]])[0] if results.get("ids") else []
+        _docs_field = (results or {}).get("documents") if results else None
+        if _docs_field and len(_docs_field) > 0:
+            _r = cast(Dict[str, Any], results)
+            documents = _r.get("documents", [[]])[0] if _r.get("documents") else []
+            metadatas = _r.get("metadatas", [[]])[0] if _r.get("metadatas") else []
+            distances = _r.get("distances", [[]])[0] if _r.get("distances") else []
+            ids = _r.get("ids", [[]])[0] if _r.get("ids") else []
 
             # Use the minimum length to avoid index mismatches
             max_i = min(len(documents), len(metadatas) if metadatas is not None else len(documents), len(distances) if distances is not None else len(documents))
@@ -801,16 +866,94 @@ class VectorStore:
         logger.info("[DOC COUNT TRACE] stage=VectorStore.search.candidates_raw count=%s", len(candidates))
 
         # --- STEP: RERANKING (optional) ---
+        _t_rerank0 = _time_vs.perf_counter()
         if enable_rerank and self.reranker and candidates:
-            logger.info(f"[RAG] Reranking {len(candidates)} candidates for query: '{normalized_query}'")
-            # Create pairs for cross-encoder
-            pairs = [[normalized_query, c["text"]] for c in candidates]
-            rerank_scores = self.reranker.predict(pairs)
+            # ── Conservative pre-filter ──────────────────────────────────
+            # Drop only OBVIOUSLY bad candidates before paying the
+            # cross-encoder cost. This is intentionally permissive: no
+            # keyword overlap requirement, no proximity drop, no
+            # domain-specific filters. If filtering would shrink the pool
+            # too aggressively, fall back to the full original list.
+            _pre_n = len(candidates)
+            _MIN_TEXT_CHARS = 40
+            _OCR_GARBAGE_HARD = 0.75  # only drop extreme OCR junk
+            _filtered: List[Dict[str, Any]] = []
+            for _c in candidates:
+                _txt = str(_c.get("text") or _c.get("page_content") or "")
+                if not _txt or not _txt.strip():
+                    continue
+                if len(_txt.strip()) < _MIN_TEXT_CHARS:
+                    continue
+                try:
+                    if VectorStore._ocr_garbage_ratio(_txt) >= _OCR_GARBAGE_HARD:
+                        continue
+                except Exception:
+                    pass
+                _filtered.append(_c)
+            # Safety fallback: never let prefilter starve the reranker. Keep
+            # at least max(8, top_k*2) candidates; otherwise revert.
+            _min_keep = max(8, top_k * 2)
+            _fallback_used = False
+            if len(_filtered) < _min_keep:
+                _fallback_used = True
+                _candidates_for_rerank = candidates
+            else:
+                _candidates_for_rerank = _filtered
+            _dropped = _pre_n - len(_candidates_for_rerank)
+            logger.info(
+                "[RERANK PREFILTER] before=%d after=%d dropped=%d fallback_used=%s",
+                _pre_n, len(_candidates_for_rerank), _dropped, _fallback_used,
+            )
+            candidates = _candidates_for_rerank
 
-            for i, score in enumerate(rerank_scores):
-                candidates[i]["rerank_score"] = float(score)
-                # keep similarity separately; use rerank_score as semantic refinement
-                candidates[i]["score"] = float(score)
+            # ── Rerank cache lookup ──────────────────────────────────────
+            _coll_name = ""
+            try:
+                _coll_name = str(getattr(self.collection, "name", "") or "")
+            except Exception:
+                _coll_name = ""
+            _cand_ids = [str(c.get("id") or "") for c in candidates]
+            _cache_key = _rerank_cache_make_key(_coll_name, normalized_query, _cand_ids)
+            _cache_key_short = _cache_key[-24:]
+            _cached_scores = _rerank_cache_get(_cache_key)
+            if _cached_scores is not None:
+                logger.info("[RERANK CACHE] hit key=...%s candidates=%d", _cache_key_short, len(candidates))
+                _hit_n = 0
+                for c in candidates:
+                    cid = str(c.get("id") or "")
+                    if cid in _cached_scores:
+                        s = float(_cached_scores[cid])
+                        c["rerank_score"] = s
+                        c["score"] = s
+                        _hit_n += 1
+                # If cache somehow doesn't cover all candidates, recompute the
+                # missing ones rather than returning stale data.
+                _missing = [c for c in candidates if c.get("rerank_score") is None]
+                if _missing:
+                    logger.info("[RERANK CACHE] partial hit; computing %d missing", len(_missing))
+                    _pairs = [[normalized_query, c["text"]] for c in _missing]
+                    _new_scores = self.reranker.predict(_pairs)
+                    for i, sc in enumerate(_new_scores):
+                        _missing[i]["rerank_score"] = float(sc)
+                        _missing[i]["score"] = float(sc)
+                        _cached_scores[str(_missing[i].get("id") or "")] = float(sc)
+                    _rerank_cache_put(_cache_key, _cached_scores)
+            else:
+                logger.info("[RERANK CACHE] miss key=...%s candidates=%d", _cache_key_short, len(candidates))
+                logger.info(f"[RAG] Reranking {len(candidates)} candidates for query: '{normalized_query}'")
+                pairs = [[normalized_query, c["text"]] for c in candidates]
+                rerank_scores = self.reranker.predict(pairs)
+                _new_cache: Dict[str, float] = {}
+                for i, score in enumerate(rerank_scores):
+                    candidates[i]["rerank_score"] = float(score)
+                    # keep similarity separately; use rerank_score as semantic refinement
+                    candidates[i]["score"] = float(score)
+                    _new_cache[str(candidates[i].get("id") or "")] = float(score)
+                _rerank_cache_put(_cache_key, _new_cache)
+                logger.info("[RERANK CACHE] stored key=...%s entries=%d", _cache_key_short, len(_new_cache))
+        _t_rerank_ms = (_time_vs.perf_counter() - _t_rerank0) * 1000
+        _rerank_ran = bool(enable_rerank and self.reranker and candidates)
+        logger.info("[RETRIEVAL TIMING] reranker=%.0f ms (ran=%s candidates=%d)", _t_rerank_ms, _rerank_ran, len(candidates))
 
         # --- MP-C0: STRICT SEMANTIC FILTER ---
         # Drop chunks whose semantic relevance is non-positive. After reranking
@@ -819,9 +962,10 @@ class VectorStore:
         # query-specific or domain-specific logic. Safety net: if the filter
         # would empty the pool, keep the original candidates so downstream
         # stages still get something to work with.
+        _t_semfilter0 = _time_vs.perf_counter()
         _semantic_threshold = 0.0
+        _pre_semantic_count = len(candidates)
         if candidates:
-            _pre_semantic_count = len(candidates)
             def _semantic_signal(c: Dict[str, Any]) -> float:
                 if c.get("rerank_score") is not None:
                     return float(c.get("rerank_score") or 0.0)
@@ -843,8 +987,12 @@ class VectorStore:
                 )
 
         before_filter_candidates = list(candidates)
+        _t_semfilter_ms = (_time_vs.perf_counter() - _t_semfilter0) * 1000
+        logger.info("[RETRIEVAL TIMING] semantic_filter=%.0f ms (before=%d after=%d)", _t_semfilter_ms, _pre_semantic_count if candidates else 0, len(candidates))
         dropped_chunks: List[Dict[str, Any]] = []
 
+        # ── Timing: quality filter ────────────────────────────────────────
+        _t_qfilter0 = _time_vs.perf_counter()
         quality_filtered: List[Dict[str, Any]] = []
         for cand in candidates:
             text = str(cand.get("text") or cand.get("page_content") or "")
@@ -873,12 +1021,14 @@ class VectorStore:
         else:
             logger.info("[RAG QUALITY FILTER] all candidates filtered; falling back to original list")
             candidates = before_filter_candidates
+        _t_qfilter_ms = (_time_vs.perf_counter() - _t_qfilter0) * 1000
+        logger.info("[RETRIEVAL TIMING] quality_filter=%.0f ms (before=%d after=%d dropped=%d)", _t_qfilter_ms, len(before_filter_candidates), len(candidates), len(dropped_chunks))
 
         for cand in candidates:
             if cand.get("reranker_score") is not None:
-                semantic_score = float(cand.get("reranker_score"))
+                semantic_score = float(cand.get("reranker_score") or 0.0)
             elif cand.get("rerank_score") is not None:
-                semantic_score = float(cand.get("rerank_score"))
+                semantic_score = float(cand.get("rerank_score") or 0.0)
             else:
                 semantic_score = float(cand.get("similarity", 0.0) or 0.0)
 
@@ -904,6 +1054,13 @@ class VectorStore:
             final_results = selected_high_quality
         else:
             final_results = candidates[:max_selected]
+
+        _vs_total_ms = (_time_vs.perf_counter() - _vs_t0) * 1000
+        logger.info(
+            "[RETRIEVAL TIMING BREAKDOWN] total=%.0f ms | embed=%.0f | chroma=%.0f | rerank=%.0f | sem_filter=%.0f | quality_filter=%.0f | candidates_raw=%d | final=%d",
+            _vs_total_ms, _t_emb_ms, _t_chroma_ms, _t_rerank_ms, _t_semfilter_ms, _t_qfilter_ms,
+            len(before_filter_candidates), len(final_results),
+        )
 
         self.last_search_debug = {
             "query": normalized_query,
@@ -1515,7 +1672,7 @@ class AdaptiveRAGPipeline:
             # filter_meta = {"section": {"$ilike": f"%{query_analysis['section_filter']}%"}} 
             pass  # Simplified for robust execution
 
-        results = self.vector_store.search(query, top_k=top_k, threshold=0.1, filter_meta=filter_meta)
+        results = self.vector_store.search(query, top_k=top_k, distance_threshold=0.1, filter_meta=filter_meta)
         
         # Step 12: Context assembly
         assembled_context = []
@@ -1550,13 +1707,14 @@ def analyze_rag_pipeline(vector_store: VectorStore):
         
         if count > 0:
             sample = col.peek(limit=count)
-            sources = set(m["source"] for m in sample["metadatas"] if m and "source" in m)
-            doc_types = set(m["document_type"] for m in sample["metadatas"] if m and "document_type" in m)
-            
+            _metas = sample.get("metadatas") or []
+            sources = set(m["source"] for m in _metas if m and "source" in m)
+            doc_types = set(str(m["document_type"]) for m in _metas if m and "document_type" in m)
+
             print(f"Total documents         : {len(sources)}")
             print(f"Document types detected : {', '.join(doc_types)}")
-            if sample["metadatas"] and len(sample["metadatas"]) > 0:
-                print(f"Metadata fields used    : {list(sample['metadatas'][0].keys())}")
+            if _metas and len(_metas) > 0 and _metas[0]:
+                print(f"Metadata fields used    : {list(_metas[0].keys())}")
         
         print("Retrieval Config        : top_k=5, threshold=0.5, metrics=cosine")
         print("System Health Status    : ONLINE")
