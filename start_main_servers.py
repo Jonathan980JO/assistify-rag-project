@@ -1,10 +1,50 @@
+import json
 import os
 import re
 import sys
 import time
 import subprocess
+import urllib.request
 from pathlib import Path
 from typing import Iterable
+
+
+_PIPER_HEALTH_URL = "http://127.0.0.1:5002/health"
+
+
+def _piper_health_ok() -> bool:
+    """Return True if Piper is reachable, engine=piper, and ready=True."""
+    try:
+        req = urllib.request.urlopen(_PIPER_HEALTH_URL, timeout=3)
+        data = json.loads(req.read().decode())
+        return (
+            data.get("status") == "ok"
+            and data.get("engine") == "piper"
+            and data.get("ready") is True
+        )
+    except Exception:
+        return False
+
+
+def _piper_port_in_use() -> bool:
+    """Return True if *something* is listening on port 5002 (even if not Piper)."""
+    try:
+        urllib.request.urlopen(_PIPER_HEALTH_URL, timeout=2)
+        return True
+    except Exception as e:
+        # Connection refused → port free; any other error → port might be busy
+        err = str(e)
+        return "refused" not in err.lower() and "timed out" not in err.lower()
+
+
+def _wait_for_piper(timeout_s: int = 30) -> bool:
+    """Poll Piper /health until ready or timeout. Returns True if ready."""
+    deadline = time.time() + timeout_s
+    while time.time() < deadline:
+        if _piper_health_ok():
+            return True
+        time.sleep(1)
+    return False
 
 
 def print_banner() -> None:
@@ -123,7 +163,7 @@ def kill_pid(pid: int) -> None:
 
 
 def kill_existing_servers(ports: Iterable[int]) -> None:
-    print("[0/4] Stopping any old server instances...")
+    print("[0/5] Stopping any old server instances...")
 
     killed: set[int] = set()
     for port in ports:
@@ -254,21 +294,35 @@ def main() -> int:
     # Log file paths
     rag_log = desktop / "assistify_rag_live.log"
     login_log = desktop / "assistify_login_live.log"
+    piper_log = desktop / "assistify_piper_live.log"
 
     # Helper script paths (temp folder)
     temp_dir = root / "temp_launchers"
     temp_dir.mkdir(exist_ok=True)
     rag_helper = temp_dir / "run_rag_helper.py"
     login_helper = temp_dir / "run_login_helper.py"
+    piper_helper = temp_dir / "run_piper_helper.py"
 
     env = build_env(root)
 
     print_banner()
-    kill_existing_servers([7000, 7001])
+
+    # ── Piper pre-check: reuse an already-running healthy Piper service ──
+    piper_already_running = _piper_health_ok()
+    if piper_already_running:
+        print("[PIPER STARTUP] existing_service_detected — reusing port 5002")
+        # Kill only RAG + Login; leave Piper untouched
+        kill_existing_servers([7000, 7001])
+    else:
+        # Check if *something else* is occupying 5002
+        if _piper_port_in_use():
+            print("[PIPER STARTUP] port_conflict_not_piper — killing occupant on 5002")
+        kill_existing_servers([7000, 7001, 5002])
+
     reset_log_files(rag_log, login_log)
 
     # Generate helper scripts
-    print("[2/4] Generating helper scripts...")
+    print("[1/5] Generating helper scripts...")
     generate_helper_script(
         rag_log,
         py_exe,
@@ -289,8 +343,36 @@ def main() -> int:
     )
     print("      Done.")
 
+    # Launch Piper TTS BEFORE the RAG server so the startup health-check can see it
+    if not piper_already_running:
+        print("[2/5] Starting Piper TTS service (port 5002)...")
+        print("[PIPER STARTUP] starting_new_service")
+        try:
+            subprocess.Popen(
+                [
+                    str(py_exe), "-u", "-m", "uvicorn",
+                    "tts_service.piper_server:app",
+                    "--host", "127.0.0.1",
+                    "--port", "5002",
+                    "--log-level", "info",
+                    "--timeout-keep-alive", "300",
+                ],
+                cwd=str(root),
+                env=env,
+                creationflags=subprocess.CREATE_NEW_CONSOLE,  # type: ignore[attr-defined]
+            )
+            print("      Waiting for Piper to become ready (up to 30 s)...")
+            if _wait_for_piper(30):
+                print("[PIPER STARTUP] ready")
+            else:
+                print("WARNING: Piper did not respond in 30 s — RAG TTS may be disabled.")
+        except Exception as e:
+            print(f"WARNING: Failed to start Piper TTS service: {e}", file=sys.stderr)
+    else:
+        print("[2/5] Piper already running on port 5002 — reused.")
+
     # Launch RAG Server in new window
-    print("[3/4] Starting RAG Server (port 7000)...")
+    print("[3/5] Starting RAG Server (port 7000)...")
     try:
         subprocess.Popen(
             [str(py_exe), str(rag_helper)],
@@ -305,7 +387,7 @@ def main() -> int:
     time.sleep(2)
 
     # Launch Login Server in new window
-    print("[4/4] Starting Login Server (port 7001)...")
+    print("[4/5] Starting Login Server (port 7001)...")
     try:
         subprocess.Popen(
             [str(py_exe), str(login_helper)],
@@ -322,16 +404,15 @@ def main() -> int:
     print("Servers launched in separate windows.")
     print("  RAG   : http://localhost:7000")
     print("  Login : http://localhost:7001")
+    print("  Piper : http://localhost:5002  (TTS engine: piper, reused=" + str(piper_already_running) + ")")
     print()
     print("Log files (Desktop):")
     print(f"  {rag_log}")
     print(f"  {login_log}")
+    print(f"  {piper_log}")
     print()
     print("Optional: Start Ollama manually")
     print("  ollama serve")
-    print()
-    print("Optional: Start XTTS manually")
-    print("  start_xtts_service.bat")
     print("============================================================")
 
     return 0

@@ -373,6 +373,15 @@ ASSISTIFY_DISABLE_RERANKER: bool = _env_flag_enabled('ASSISTIFY_DISABLE_RERANKER
 ASSISTIFY_DISABLE_WHISPER: bool = _env_flag_enabled('ASSISTIFY_DISABLE_WHISPER', default=False)
 ASSISTIFY_DISABLE_WARMUP: bool = _env_flag_enabled('ASSISTIFY_DISABLE_WARMUP', default=False)
 
+# ---- TTS warmup sub-flags ----
+# Arabic ack/off-topic/opener pre-renders and the batch opener warmup are
+# expensive and routinely block real user TTS at startup (one tiny chunk
+# observed at 61s while warmups were still running). Default ALL OFF so
+# startup never synthesises anything before real user requests arrive.
+ASSISTIFY_ENABLE_ENGLISH_TTS_WARMUP: bool = _env_flag_enabled('ASSISTIFY_ENABLE_ENGLISH_TTS_WARMUP', default=False)
+ASSISTIFY_ENABLE_ARABIC_TTS_WARMUP: bool = _env_flag_enabled('ASSISTIFY_ENABLE_ARABIC_TTS_WARMUP', default=False)
+ASSISTIFY_ENABLE_TTS_OPENER_WARMUP: bool = _env_flag_enabled('ASSISTIFY_ENABLE_TTS_OPENER_WARMUP', default=False)
+
 # Effective flags used across module
 EFFECTIVE_DISABLE_TTS = ASSISTIFY_DISABLE_TTS
 EFFECTIVE_DISABLE_RERANKER = ASSISTIFY_DISABLE_RERANKER
@@ -2072,7 +2081,7 @@ def _sync_live_retrieval_collection(target_collection_name: str | None = None) -
 
 @app.on_event("startup")
 async def startup_event():
-    global llm_session, tts_session, whisper_model, whisper_model_multilingual, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE
+    global llm_session, tts_session, whisper_model, whisper_model_multilingual, xtts_model, WHISPER_DEVICE, WHISPER_COMPUTE_TYPE, EFFECTIVE_DISABLE_TTS
     
     init_database()
     init_analytics_db()
@@ -2276,17 +2285,51 @@ async def startup_event():
         logger.error(error_msg)
         raise RuntimeError(error_msg)
 
-    # XTTS v2 runs as a separate microservice — check it is reachable
-    import urllib.request
-    try:
-        req = urllib.request.urlopen(f"{XTTS_SERVICE_URL}/health", timeout=5)
-        health = req.read().decode()
-        logger.info(f"XTTS microservice reachable: {health[:80]}")
-        xtts_model = True  # acts as a flag — True means service is up
-    except Exception as e:
-        logger.warning(f"XTTS microservice not reachable at {XTTS_SERVICE_URL} — TTS unavailable. "
-                       f"Start it with: start_xtts_service.bat  ({e})")
+    # Piper TTS runs as a separate microservice on port 5002 — check it is reachable
+    import urllib.request as _urllib_req
+    import json as _json
+    logger.info("[TTS ENGINE] piper")
+    if ASSISTIFY_DISABLE_TTS:
+        # Explicitly disabled by env var — respect it without hitting the network
         xtts_model = None
+        logger.info("[TTS STATUS] enabled=False reason=env_disabled")
+    else:
+        try:
+            _req = _urllib_req.urlopen(f"{XTTS_SERVICE_URL}/health", timeout=5)
+            _health_raw = _req.read().decode()
+            _health = _json.loads(_health_raw)
+            _engine_ok = _health.get("engine") == "piper"
+            _ready_ok  = _health.get("ready") is True
+            _status_ok = _health.get("status") == "ok"
+            if _status_ok and _engine_ok and _ready_ok:
+                logger.info("[PIPER STARTUP] existing_service_detected")
+                logger.info(f"[PIPER] ready service_url={XTTS_SERVICE_URL} health={_health_raw[:120]}")
+                xtts_model = True  # acts as a flag — True means service is up
+                EFFECTIVE_DISABLE_TTS = False
+                logger.info("[TTS STATUS] enabled=True")
+            elif not _engine_ok:
+                logger.warning(
+                    "[PIPER STARTUP] port_conflict_not_piper — "
+                    f"Port 5002 is occupied by a non-Piper service (engine={_health.get('engine')!r})"
+                )
+                xtts_model = None
+                EFFECTIVE_DISABLE_TTS = True
+                logger.warning("[TTS STATUS] enabled=False reason=port_conflict_not_piper")
+            else:
+                logger.warning(
+                    f"[PIPER] not_reachable url={XTTS_SERVICE_URL} — service responded but not ready: {_health_raw[:120]}"
+                )
+                xtts_model = None
+                EFFECTIVE_DISABLE_TTS = True
+                logger.warning("[TTS STATUS] enabled=False reason=piper_not_ready")
+        except Exception as _e:
+            logger.warning(
+                f"[PIPER] not_reachable url={XTTS_SERVICE_URL} — TTS unavailable. "
+                f"Start it with: start_piper_service.bat  ({_e})"
+            )
+            xtts_model = None
+            EFFECTIVE_DISABLE_TTS = True
+            logger.warning("[TTS STATUS] enabled=False reason=piper_unreachable")
 
     # ---- Try to load multilingual faster-whisper model for Arabic STT ----
     # Resolution order:
@@ -2425,96 +2468,151 @@ async def _warmup_llm():
 
 
 async def _warmup_xtts():
-    """Background task: warm up the XTTS model and pre-render the Arabic
-    acknowledgment phrase so it can be streamed instantly on the first Arabic query.
+    """Background task: warm up the XTTS model.
+
+    By default ONLY a short English warmup runs; Arabic ack/off-topic and
+    the 10-phrase opener batch are gated behind env flags because they were
+    blocking real user TTS for >60s at startup. To re-enable them set:
+
+        ASSISTIFY_ENABLE_ENGLISH_TTS_WARMUP=1
+        ASSISTIFY_ENABLE_ARABIC_TTS_WARMUP=1
+        ASSISTIFY_ENABLE_TTS_OPENER_WARMUP=1
     """
-    global _arabic_ack_pcm, _arabic_offtopic_pcm
-    await asyncio.sleep(10)  # let the XTTS service finish initializing
-    logger.info(f"[Warmup] Sending TTS warmup request to {XTTS_SERVICE_URL}...")
+    global _arabic_ack_pcm, _arabic_offtopic_pcm, _arabic_opener_pcm, _arabic_opener_pool
+
+    en_enabled = ASSISTIFY_ENABLE_ENGLISH_TTS_WARMUP
+    ar_enabled = ASSISTIFY_ENABLE_ARABIC_TTS_WARMUP
+    op_enabled = ASSISTIFY_ENABLE_TTS_OPENER_WARMUP
+
+    logger.info(f"[TTS WARMUP] english={'enabled' if en_enabled else 'disabled'}")
+    logger.info(f"[TTS WARMUP] arabic={'enabled' if ar_enabled else 'disabled'}")
+    logger.info(f"[TTS WARMUP] openers={'enabled' if op_enabled else 'disabled'}")
+
+    if not (en_enabled or ar_enabled or op_enabled):
+        logger.info("[TTS WARMUP] all_tts_warmups_disabled")
+        logger.info("[TTS WARMUP] complete time=0ms (all warmups disabled)")
+        return
+
+    _t_overall = time.perf_counter()
+    await asyncio.sleep(10)  # let the Piper service finish initializing
+    logger.info(f"[TTS ENGINE] piper")
+    logger.info(f"[PIPER] warmup_starting url={XTTS_SERVICE_URL}")
+
+    # Hold the global synth semaphore while warmups run so a real user /tts
+    # request that arrives during warmup waits cleanly behind it instead of
+    # competing with XTTS for GPU.
     try:
-        async with aiohttp.ClientSession() as session:
-            # -- English warmup (keeps existing behaviour) --
-            async with session.post(
-                f"{XTTS_SERVICE_URL}/synthesize",
-                json={"text": "test", "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
-                timeout=aiohttp.ClientTimeout(total=60),
-            ) as resp:
-                if resp.status == 200:
-                    await resp.read()
-                    logger.info("[Warmup] ✓ XTTS model warmed up")
-                else:
-                    text = await resp.text()
-                    logger.warning(f"[Warmup] XTTS warmup returned {resp.status}: {text[:120]}")
-
-            # -- Arabic acknowledgment + opener pre-render --
-            # Synthesize ack phrase first (short, fast), then pre-render all 10
-            # opener phrases in parallel so startup cost stays low.
-            global _arabic_ack_pcm, _arabic_offtopic_pcm, _arabic_opener_pcm, _arabic_opener_pool
-            _ACK_PHRASE = "تفضل"
+        async with _XTTS_SYNTH_SEM:
             try:
-                async with session.post(
-                    f"{XTTS_SERVICE_URL}/synthesize",
-                    json={"text": _ACK_PHRASE, "speaker": XTTS_SPEAKER, "language": "ar"},
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as _ack_resp:
-                    if _ack_resp.status == 200:
-                        _wav = await _ack_resp.read()
-                        _arabic_ack_pcm = _wav[44:] if len(_wav) > 44 else _wav
-                        logger.info(f"[Warmup] ✓ Arabic ack audio cached ({len(_arabic_ack_pcm):,} bytes PCM)")
-                    else:
-                        logger.warning("[Warmup] Arabic ack pre-render failed")
-            except Exception as _e_ack:
-                logger.warning(f"[Warmup] Arabic ack pre-render error: {_e_ack}")
-
-            # Pre-render Arabic off-topic refusal phrase for instant playback
-            try:
-                async with session.post(
-                    f"{XTTS_SERVICE_URL}/synthesize",
-                    json={"text": ARABIC_OFF_TOPIC_RESPONSE, "speaker": XTTS_SPEAKER, "language": "ar"},
-                    timeout=aiohttp.ClientTimeout(total=60),
-                ) as _off_resp:
-                    if _off_resp.status == 200:
-                        _wav = await _off_resp.read()
-                        _arabic_offtopic_pcm = _wav[44:] if len(_wav) > 44 else _wav
-                        logger.info(
-                            f"[Warmup] ✓ Off-topic '{ARABIC_OFF_TOPIC_RESPONSE[:25]}' cached "
-                            f"({len(_arabic_offtopic_pcm):,} bytes PCM)"
+                async with aiohttp.ClientSession() as session:
+                    if en_enabled:
+                        # ---- Single minimal English warmup ----
+                        # Short realistic sentence in the same speaker/lang the
+                        # user response uses, so the first real synth is hot.
+                        _EN_WARMUP_TEXT = (
+                            "This is a short warmup sentence used to prepare the speech "
+                            "model for real responses, so the first answer can start quickly."
                         )
-                    else:
-                        logger.warning("[Warmup] Arabic off-topic pre-render failed")
-            except Exception as _e_off:
-                logger.warning(f"[Warmup] Arabic off-topic pre-render error: {_e_off}")
+                        try:
+                            _t0 = time.perf_counter()
+                            async with session.post(
+                                f"{XTTS_SERVICE_URL}/synthesize",
+                                json={"text": _EN_WARMUP_TEXT, "speaker": XTTS_SPEAKER, "language": XTTS_LANGUAGE},
+                                timeout=aiohttp.ClientTimeout(total=120),
+                            ) as _en_resp:
+                                if _en_resp.status == 200:
+                                    await _en_resp.read()
+                                    logger.info(
+                                        f"[TTS WARMUP] english_done time={int((time.perf_counter() - _t0) * 1000)}ms "
+                                        f"speaker={XTTS_SPEAKER} lang={XTTS_LANGUAGE}"
+                                    )
+                                else:
+                                    _t = await _en_resp.text()
+                                    logger.warning(
+                                        f"[TTS WARMUP] english_failed status={_en_resp.status} body={_t[:120]}"
+                                    )
+                        except Exception as _e_en:
+                            logger.warning(f"[TTS WARMUP] english_error: {_e_en}")
 
-            # Pre-render all 10 opener phrases in parallel
-            async def _render_opener_phrase(_sess, phrase: str) -> tuple:
-                try:
-                    async with _sess.post(
-                        f"{XTTS_SERVICE_URL}/synthesize",
-                        json={"text": phrase, "speaker": XTTS_SPEAKER, "language": "ar"},
-                        timeout=aiohttp.ClientTimeout(total=60),
-                    ) as _r:
-                        if _r.status == 200:
-                            _wav = await _r.read()
-                            _pcm = _wav[44:] if len(_wav) > 44 else _wav
-                            logger.info(f"[Warmup] ✓ Opener '{phrase[:25]}' cached ({len(_pcm):,} bytes PCM)")
-                            return phrase, _pcm
-                        else:
-                            logger.warning(f"[Warmup] Opener '{phrase[:25]}' pre-render failed")
-                except Exception as _e_op:
-                    logger.warning(f"[Warmup] Opener '{phrase[:25]}' error: {_e_op}")
-                return phrase, b""
+                    if ar_enabled:
+                        # ---- Arabic ack + off-topic refusal pre-render ----
+                        _ACK_PHRASE = "تفضل"
+                        try:
+                            async with session.post(
+                                f"{XTTS_SERVICE_URL}/synthesize",
+                                json={"text": _ACK_PHRASE, "speaker": XTTS_SPEAKER, "language": "ar"},
+                                timeout=aiohttp.ClientTimeout(total=60),
+                            ) as _ack_resp:
+                                if _ack_resp.status == 200:
+                                    _wav = await _ack_resp.read()
+                                    _arabic_ack_pcm = _wav[44:] if len(_wav) > 44 else _wav
+                                    logger.info(f"[TTS WARMUP] arabic_ack_cached bytes={len(_arabic_ack_pcm)}")
+                                else:
+                                    logger.warning(
+                                        f"[TTS WARMUP] arabic_ack_failed status={_ack_resp.status}"
+                                    )
+                        except Exception as _e_ack:
+                            logger.warning(f"[TTS WARMUP] arabic_ack_error: {_e_ack}")
 
-            _opener_results = await asyncio.gather(
-                *[_render_opener_phrase(session, p) for p in _ARABIC_OPENER_PHRASES]
-            )
-            for _ph, _pcm in _opener_results:
-                if _pcm:
-                    _arabic_opener_pool[_ph] = _pcm
-            # Set default fallback to first phrase
-            if _ARABIC_OPENER_PHRASES[0] in _arabic_opener_pool:
-                _arabic_opener_pcm = _arabic_opener_pool[_ARABIC_OPENER_PHRASES[0]]
-    except Exception as e:
-        logger.warning(f"[Warmup] XTTS warmup failed (service may not be running): {e}")
+                        try:
+                            async with session.post(
+                                f"{XTTS_SERVICE_URL}/synthesize",
+                                json={"text": ARABIC_OFF_TOPIC_RESPONSE, "speaker": XTTS_SPEAKER, "language": "ar"},
+                                timeout=aiohttp.ClientTimeout(total=60),
+                            ) as _off_resp:
+                                if _off_resp.status == 200:
+                                    _wav = await _off_resp.read()
+                                    _arabic_offtopic_pcm = _wav[44:] if len(_wav) > 44 else _wav
+                                    logger.info(
+                                        f"[TTS WARMUP] arabic_offtopic_cached bytes={len(_arabic_offtopic_pcm)}"
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[TTS WARMUP] arabic_offtopic_failed status={_off_resp.status}"
+                                    )
+                        except Exception as _e_off:
+                            logger.warning(f"[TTS WARMUP] arabic_offtopic_error: {_e_off}")
+
+                    if op_enabled:
+                        # ---- Batch opener pre-render (10 phrases in parallel) ----
+                        async def _render_opener_phrase(_sess, phrase: str) -> tuple:
+                            try:
+                                async with _sess.post(
+                                    f"{XTTS_SERVICE_URL}/synthesize",
+                                    json={"text": phrase, "speaker": XTTS_SPEAKER, "language": "ar"},
+                                    timeout=aiohttp.ClientTimeout(total=60),
+                                ) as _r:
+                                    if _r.status == 200:
+                                        _wav = await _r.read()
+                                        _pcm = _wav[44:] if len(_wav) > 44 else _wav
+                                        logger.info(
+                                            f"[TTS WARMUP] opener_cached phrase=\"{phrase[:25]}\" bytes={len(_pcm)}"
+                                        )
+                                        return phrase, _pcm
+                                    else:
+                                        logger.warning(
+                                            f"[TTS WARMUP] opener_failed phrase=\"{phrase[:25]}\" status={_r.status}"
+                                        )
+                            except Exception as _e_op:
+                                logger.warning(
+                                    f"[TTS WARMUP] opener_error phrase=\"{phrase[:25]}\": {_e_op}"
+                                )
+                            return phrase, b""
+
+                        _opener_results = await asyncio.gather(
+                            *[_render_opener_phrase(session, p) for p in _ARABIC_OPENER_PHRASES]
+                        )
+                        for _ph, _pcm in _opener_results:
+                            if _pcm:
+                                _arabic_opener_pool[_ph] = _pcm
+                        if _ARABIC_OPENER_PHRASES[0] in _arabic_opener_pool:
+                            _arabic_opener_pcm = _arabic_opener_pool[_ARABIC_OPENER_PHRASES[0]]
+            except Exception as e:
+                # Outer catch: do NOT let warmup spawn hidden background work
+                # on partial failure. Just log and exit cleanly.
+                logger.warning(f"[TTS WARMUP] aborted_on_error: {e}")
+    finally:
+        logger.info(f"[TTS WARMUP] complete time={int((time.perf_counter() - _t_overall) * 1000)}ms")
 
 
 @app.on_event("shutdown")
@@ -27003,68 +27101,88 @@ STRICT BEHAVIOR:
                 try:
                     await _safe_ws_json({"type": "ttsAudioStart", "sampleRate": 24000})
 
-                    resp = await _tts_sess.post(
-                        f"{XTTS_SERVICE_URL}/synthesize",
-                        json={"text": clean, "speaker": XTTS_SPEAKER, "language": xtts_lang},
+                    # Serialize all XTTS calls system-wide. /tts and the WS
+                    # voice-mode consumer share the same single-flight lock
+                    # so XTTS is never asked to synthesize two at once.
+                    _t_q_wait = time.perf_counter()
+                    logger.info(
+                        f"[TTS QUEUE] ws_consumer waiting_for_synth_lock "
+                        f"text_len={len(clean)} lang={xtts_lang}"
                     )
+                    async with _XTTS_SYNTH_SEM:
+                        _t_q_acq = time.perf_counter()
+                        logger.info(
+                            f"[TTS QUEUE] ws_consumer acquired_synth_lock "
+                            f"wait_ms={int((_t_q_acq - _t_q_wait) * 1000)} text_len={len(clean)}"
+                        )
+                        resp = await _tts_sess.post(
+                            f"{XTTS_SERVICE_URL}/synthesize",
+                            json={"text": clean, "speaker": XTTS_SPEAKER, "language": xtts_lang},
+                        )
 
-                    if resp.status == 200:
-                        header_skipped = False
-                        header_buf = b''
-                        pcm_remainder = b''
+                        if resp.status == 200:
+                            header_skipped = False
+                            header_buf = b''
+                            pcm_remainder = b''
 
-                        async for chunk in resp.content.iter_chunked(4096):
-                            if cancel_event and cancel_event.is_set():
-                                break
+                            async for chunk in resp.content.iter_chunked(4096):
+                                if cancel_event and cancel_event.is_set():
+                                    break
 
-                            if not header_skipped:
-                                header_buf += chunk
-                                if len(header_buf) >= 44:
-                                    data = header_buf[44:]
-                                    header_skipped = True
-                                    header_buf = b''
-                                    if not data:
+                                if not header_skipped:
+                                    header_buf += chunk
+                                    if len(header_buf) >= 44:
+                                        data = header_buf[44:]
+                                        header_skipped = True
+                                        header_buf = b''
+                                        if not data:
+                                            continue
+                                    else:
                                         continue
                                 else:
-                                    continue
-                            else:
-                                data = chunk
+                                    data = chunk
 
-                            # Handle PCM16 alignment (2 bytes per sample)
-                            if pcm_remainder:
-                                data = pcm_remainder + data
-                                pcm_remainder = b''
-                            if len(data) % 2 != 0:
-                                pcm_remainder = data[-1:]
-                                data = data[:-1]
+                                # Handle PCM16 alignment (2 bytes per sample)
+                                if pcm_remainder:
+                                    data = pcm_remainder + data
+                                    pcm_remainder = b''
+                                if len(data) % 2 != 0:
+                                    pcm_remainder = data[-1:]
+                                    data = data[:-1]
 
-                            if data:
-                                await _safe_ws_bytes(data)
-                                if first_tts_chunk_time is None:
-                                    first_tts_chunk_time = time.perf_counter()
-                                    t_meta["first_tts_chunk"] = first_tts_chunk_time
-                                    first_chunk_latency_s = first_tts_chunk_time - perf_start
-                                    _lang_tag = " (Arabic)" if arabic_mode else ""
-                                    logger.info(f"LATENCY [First XTTS Synthesis{_lang_tag}]: {first_chunk_latency_s*1000:.0f}ms")
+                                if data:
+                                    await _safe_ws_bytes(data)
+                                    if first_tts_chunk_time is None:
+                                        first_tts_chunk_time = time.perf_counter()
+                                        t_meta["first_tts_chunk"] = first_tts_chunk_time
+                                        first_chunk_latency_s = first_tts_chunk_time - perf_start
+                                        _lang_tag = " (Arabic)" if arabic_mode else ""
+                                        logger.info(f"LATENCY [First XTTS Synthesis{_lang_tag}]: {first_chunk_latency_s*1000:.0f}ms")
 
-                                    # Feed latency into adaptive manager — may adjust mid-query
-                                    adaptive_words, adaptive_buffer = (
-                                        adaptive_manager.record_first_chunk_latency(first_chunk_latency_s)
-                                    )
+                                        # Feed latency into adaptive manager — may adjust mid-query
+                                        adaptive_words, adaptive_buffer = (
+                                            adaptive_manager.record_first_chunk_latency(first_chunk_latency_s)
+                                        )
 
-                        resp.close()
+                            resp.close()
 
-                        # Track per-chunk timing
-                        chunk_elapsed = time.perf_counter() - chunk_start
-                        tts_chunk_count += 1
-                        tts_total_time += chunk_elapsed
-                        t_meta["xtts_last_chunk"] = time.perf_counter()  # updated each chunk; final value = end of last chunk
+                            # Track per-chunk timing
+                            chunk_elapsed = time.perf_counter() - chunk_start
+                            tts_chunk_count += 1
+                            tts_total_time += chunk_elapsed
+                            t_meta["xtts_last_chunk"] = time.perf_counter()  # updated each chunk; final value = end of last chunk
 
-                    else:
-                        detail = await resp.text()
-                        resp.close()
-                        logger.warning(f"XTTS returned {resp.status}: {detail[:100]}")
-                        await _safe_ws_json({"type": "ttsFallback", "text": clean})
+                        else:
+                            detail = await resp.text()
+                            resp.close()
+                            logger.warning(f"XTTS returned {resp.status}: {detail[:100]}")
+                            await _safe_ws_json({"type": "ttsFallback", "text": clean})
+
+                    _t_q_rel = time.perf_counter()
+                    logger.info(
+                        f"[TTS QUEUE] ws_consumer released_synth_lock "
+                        f"held_ms={int((_t_q_rel - _t_q_acq) * 1000)} text_len={len(clean)}"
+                    )
 
                     await _safe_ws_json({"type": "ttsAudioEnd"})
 
@@ -28760,6 +28878,121 @@ async def rag_set_doc_mode(payload: dict, user=Depends(require_login("admin"))):
 
 
 # ========== TEXT-TO-SPEECH ENDPOINT (proxies to XTTS v2 microservice) ==========
+#
+# Perceived-latency hardening (TTS layer only — retrieval/grounding untouched):
+#   * Single-flight semaphore: only ONE active XTTS synthesis at a time.
+#     Both /tts and the WS voice-mode tts_consumer acquire _XTTS_SYNTH_SEM
+#     so XTTS is never asked to synthesize two requests in parallel
+#     (which on CPU/low-VRAM machines makes everything slower).
+#   * In-flight dedup: identical (text|lang|speaker) requests share one
+#     synthesis future instead of issuing duplicate XTTS calls.
+#   * Bounded LRU audio cache: full WAV bytes keyed by sha256(text|lang|speaker).
+#     Repeated phrases (warmups, common openers, "What is X?" etc.) replay
+#     instantly without hitting XTTS.
+import hashlib as _tts_hashlib
+import collections as _tts_collections
+
+_XTTS_SYNTH_SEM = asyncio.Semaphore(1)              # one active XTTS synthesis at a time
+_XTTS_INFLIGHT: dict = {}                            # key -> asyncio.Future[bytes]
+_XTTS_CACHE: "_tts_collections.OrderedDict[str, bytes]" = _tts_collections.OrderedDict()
+_XTTS_CACHE_MAX_ENTRIES = 64
+_XTTS_CACHE_MAX_BYTES_PER_ENTRY = 2 * 1024 * 1024    # 2 MB safety cap per entry
+_XTTS_CACHE_LOCK = asyncio.Lock()
+
+
+def _tts_cache_key(text: str, language: str, speaker: str) -> str:
+    h = _tts_hashlib.sha256()
+    h.update((text or "").strip().encode("utf-8", errors="ignore"))
+    h.update(b"|")
+    h.update((language or "").encode("utf-8", errors="ignore"))
+    h.update(b"|")
+    h.update((speaker or "").encode("utf-8", errors="ignore"))
+    return h.hexdigest()[:16]
+
+
+async def _tts_cache_get(key: str):
+    async with _XTTS_CACHE_LOCK:
+        data = _XTTS_CACHE.get(key)
+        if data is not None:
+            _XTTS_CACHE.move_to_end(key)
+        return data
+
+
+async def _tts_cache_put(key: str, data: bytes):
+    if not data or len(data) > _XTTS_CACHE_MAX_BYTES_PER_ENTRY:
+        return
+    async with _XTTS_CACHE_LOCK:
+        _XTTS_CACHE[key] = data
+        _XTTS_CACHE.move_to_end(key)
+        while len(_XTTS_CACHE) > _XTTS_CACHE_MAX_ENTRIES:
+            _XTTS_CACHE.popitem(last=False)
+
+
+async def _xtts_synthesize_full(text: str, speaker: str, language: str, req_id: str) -> bytes:
+    """Call XTTS microservice once and return the full WAV bytes.
+
+    Serialized via _XTTS_SYNTH_SEM. Deduplicates concurrent identical calls
+    via _XTTS_INFLIGHT. Caches result via _XTTS_CACHE.
+    """
+    key = _tts_cache_key(text, language, speaker)
+
+    cached = await _tts_cache_get(key)
+    if cached is not None:
+        logger.info(f"[TTS CACHE HIT] {req_id} key={key} bytes={len(cached)} text_len={len(text)}")
+        return cached
+
+    # In-flight dedup: if another request is already synthesizing this exact
+    # (text|lang|speaker), wait for its result instead of duplicating work.
+    pending = _XTTS_INFLIGHT.get(key)
+    if pending is not None and not pending.done():
+        logger.info(f"[TTS QUEUE] {req_id} dedup_wait key={key} text_len={len(text)}")
+        return await pending
+
+    loop = asyncio.get_event_loop()
+    fut: asyncio.Future = loop.create_future()
+    _XTTS_INFLIGHT[key] = fut
+
+    try:
+        _t_wait = time.perf_counter()
+        logger.info(f"[TTS QUEUE] {req_id} waiting_for_synth_lock key={key} text_len={len(text)}")
+        async with _XTTS_SYNTH_SEM:
+            _t_acq = time.perf_counter()
+            logger.info(
+                f"[TTS QUEUE] {req_id} acquired_synth_lock key={key} "
+                f"wait_ms={int((_t_acq - _t_wait) * 1000)}"
+            )
+            timeout = aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    f"{XTTS_SERVICE_URL}/synthesize",
+                    json={"text": text, "speaker": speaker, "language": language},
+                ) as resp:
+                    if resp.status != 200:
+                        body = await resp.text()
+                        raise HTTPException(
+                            status_code=502 if resp.status not in (400, 503) else resp.status,
+                            detail=f"XTTS service error ({resp.status}): {body[:200]}",
+                        )
+                    data = await resp.read()
+            _t_done = time.perf_counter()
+            logger.info(
+                f"[TTS QUEUE] {req_id} released_synth_lock key={key} "
+                f"synth_ms={int((_t_done - _t_acq) * 1000)} bytes={len(data)}"
+            )
+            await _tts_cache_put(key, data)
+            logger.info(f"[TTS CACHE STORE] {req_id} key={key} bytes={len(data)} text_len={len(text)}")
+            fut.set_result(data)
+            return data
+    except BaseException as e:
+        if not fut.done():
+            fut.set_exception(e if isinstance(e, Exception) else RuntimeError(str(e)))
+        raise
+    finally:
+        # Remove only if still ours (avoid clobbering a newer in-flight)
+        if _XTTS_INFLIGHT.get(key) is fut:
+            _XTTS_INFLIGHT.pop(key, None)
+
+
 class TTSRequest(BaseModel):
     text: str
     speaker: str = XTTS_SPEAKER
@@ -28768,79 +29001,88 @@ class TTSRequest(BaseModel):
 @app.post("/tts")
 async def tts_endpoint(req: TTSRequest, request: Request):
     """
-    Streaming proxy for TTS — forwards chunks from XTTS v2 microservice
-    without buffering the full WAV in memory.
+    TTS proxy for XTTS v2 microservice.
+
+    Buffers the full WAV (cache-friendly) and serializes XTTS calls via
+    `_XTTS_SYNTH_SEM` so XTTS is never asked to synthesize two requests in
+    parallel. Identical (text|lang|speaker) requests are deduplicated and
+    answered from the LRU cache when possible.
     """
+    # ---- TTS PERF instrumentation (timing only, no behavior change) ----
+    _tts_req_id = f"tts_{uuid.uuid4().hex[:6]}"
+    _t_received = time.perf_counter()
+    _client_ip = (request.client.host if request and request.client else "?")
+    _is_prefetch = (request.headers.get("X-TTS-Prefetch", "").lower() in ("1", "true", "yes")
+                    or request.headers.get("Purpose", "").lower() == "prefetch") if request else False
+
     text = req.text.strip()
     if not text:
+        logger.info(f"[TTS PERF] {_tts_req_id} request received but empty text — rejecting")
         raise HTTPException(status_code=400, detail="Empty text")
 
     # Remove emojis to avoid synthesis artefacts
     import re
     text = re.sub(r'[\U00010000-\U0010ffff]', '', text, flags=re.UNICODE).strip()
     if not text:
+        logger.info(f"[TTS PERF] {_tts_req_id} text empty after emoji strip — rejecting")
         raise HTTPException(status_code=400, detail="Text empty after cleaning")
 
-    # Open session and initial response OUTSIDE the generator so we can
-    # check the status code before committing to a StreamingResponse.
-    # The generator's finally-block owns cleanup.
-    session = aiohttp.ClientSession()
-    try:
-        resp = await session.post(
-            f"{XTTS_SERVICE_URL}/synthesize",
-            json={"text": text, "speaker": req.speaker, "language": req.language},
-            # STABILIZATION Part 3: Hard 30s XTTS timeout
-            # No sock_read timeout — XTTS may pause between PCM chunks during generation
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None),
+    _text_len = len(text)
+    _text_preview = text[:60].replace("\n", " ")
+    logger.info(
+        f"[TTS PERF] {_tts_req_id} request received | client={_client_ip} "
+        f"text_len={_text_len} lang={req.language} speaker={req.speaker} "
+        f"prefetch_hint={_is_prefetch} preview=\"{_text_preview}\""
+    )
+
+    # ---- TTS chunk-size policy guard ----
+    # Frontend chunks text into <=80-char pieces before calling /tts. If a
+    # longer text slips through (older client / regression), warn loudly.
+    _TTS_POLICY_MAX_CHARS = 100
+    if _text_len > _TTS_POLICY_MAX_CHARS:
+        logger.warning(
+            f"[TTS POLICY] long_text_received_for_tts req_id={_tts_req_id} "
+            f"chars={_text_len} max={_TTS_POLICY_MAX_CHARS} "
+            f"prefetch_hint={_is_prefetch} client={_client_ip} "
+            f"preview=\"{_text_preview}\""
         )
+
+    try:
+        data = await _xtts_synthesize_full(
+            text=text, speaker=req.speaker, language=req.language, req_id=_tts_req_id,
+        )
+    except HTTPException:
+        raise
     except aiohttp.ClientConnectorError:
-        await session.close()
+        logger.warning(f"[PIPER PERF] {_tts_req_id} piper service unreachable at {XTTS_SERVICE_URL}")
         raise HTTPException(
             status_code=503,
-            detail=f"XTTS microservice unavailable at {XTTS_SERVICE_URL}. Run: start_xtts_service.bat"
+            detail=f"Piper TTS service unavailable at {XTTS_SERVICE_URL}. Run: start_piper_service.bat",
         )
     except (asyncio.TimeoutError, TimeoutError):
-        await session.close()
-        logger.warning("TTS synthesis timed out (XTTS may still be warming up)")
+        logger.warning(f"[PIPER PERF] {_tts_req_id} piper synthesis connect/timeout")
         raise HTTPException(
             status_code=504,
-            detail="TTS synthesis timed out. The XTTS model may still be loading — please try again in a few seconds."
+            detail="TTS synthesis timed out. The Piper service may still be loading — please try again in a few seconds.",
         )
     except Exception as e:
-        await session.close()
-        logger.error(f"TTS proxy error: {e}")
+        logger.error(f"[TTS PERF] {_tts_req_id} synthesis error: {e}")
         raise HTTPException(status_code=500, detail=f"TTS proxy failed: {e}")
 
-    # Check upstream status before starting the stream
-    if resp.status != 200:
-        detail = await resp.text()
-        resp.close()
-        await session.close()
-        if resp.status == 503:
-            raise HTTPException(status_code=503, detail="XTTS microservice not ready")
-        elif resp.status == 400:
-            raise HTTPException(status_code=400, detail=detail)
-        else:
-            raise HTTPException(status_code=502, detail=f"XTTS service error: {detail}")
+    _t_done = time.perf_counter()
+    logger.info(
+        f"[TTS PERF] {_tts_req_id} response ready "
+        f"| total_proxy_time={int((_t_done - _t_received) * 1000)}ms "
+        f"| bytes={len(data)} text_len={_text_len} lang={req.language} "
+        f"prefetch_hint={_is_prefetch}"
+    )
 
-    logger.info("TTS streaming proxy started | chunks=%s", resp.headers.get("X-Chunks", "?"))
-
-    # Stream XTTS audio through without buffering.
-    # Generator owns resp + session cleanup via finally.
-    async def stream_xtts():
-        try:
-            async for chunk in resp.content.iter_chunked(4096):
-                yield chunk
-        finally:
-            resp.close()
-            await session.close()
-
-    return StreamingResponse(
-        stream_xtts(),
+    return Response(
+        content=data,
         media_type="audio/wav",
         headers={
             "Cache-Control": "no-cache",
-            "X-Chunks": resp.headers.get("X-Chunks", "0"),
+            "X-TTS-Req-Id": _tts_req_id,
         },
     )
 
