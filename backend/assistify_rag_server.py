@@ -466,6 +466,7 @@ _FOLLOWUP_STATE_TTL = 1800  # seconds (30 min)
 _FOLLOWUP_MAX_QUERY_LEN = 140
 _FOLLOWUP_CHUNK_CHAR_BUDGET = 1800
 _FOLLOWUP_KEEP_TOP_K = 3
+_FOLLOWUP_SAVED_CHUNK_CHAR_LIMIT = 1800
 # Loose grounding ratio: paraphrased explanations legitimately use connector
 # words and synonyms, so we only require a modest overlap with the saved
 # prior-answer + saved chunks. Open-domain hallucinations still fall well
@@ -675,6 +676,77 @@ def _classify_followup_intent(text: str) -> str:
     return "explain"
 
 
+def _extract_followup_items_from_answer(answer: str) -> tuple[bool, list[str]]:
+    """Extract list items from a prior answer using only generic structure."""
+    answer_text = str(answer or "")
+    if not answer_text.strip():
+        return False, []
+
+    list_lines = [
+        line.strip() for line in answer_text.splitlines()
+        if _re_followup.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", line)
+    ]
+    extracted_items: list[str] = []
+    if len(list_lines) >= 2:
+        for list_line in list_lines:
+            item = _re_followup.sub(
+                r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", list_line
+            ).strip()
+            if item:
+                extracted_items.append(item)
+        if extracted_items:
+            return True, extracted_items
+
+    bullet_parts_raw = _re_followup.split(
+        r"(?:^|\s)(?:[-*\u2022]|\d+[.)])\s+", answer_text
+    )
+    bullet_parts = [
+        part.strip().rstrip(".")
+        for part in bullet_parts_raw
+        if part and part.strip()
+    ]
+    if len(bullet_parts) >= 3 and all(len(part) <= 60 for part in bullet_parts):
+        return True, bullet_parts
+
+    comma_parts = [
+        part.strip().rstrip(".")
+        for part in _re_followup.split(r"[,;]", answer_text)
+        if part.strip()
+    ]
+    if len(comma_parts) >= 3 and all(len(part) <= 60 for part in comma_parts):
+        first_item = comma_parts[0]
+        intro_match = _re_followup.search(
+            r"\b(?:are|include|includes|consist of|consists of|namely)\s+",
+            first_item,
+            _re_followup.IGNORECASE,
+        )
+        if intro_match:
+            first_item = first_item[intro_match.end():].strip()
+        if comma_parts:
+            comma_parts[-1] = _re_followup.sub(
+                r"^\s*and\s+", "", comma_parts[-1], flags=_re_followup.IGNORECASE
+            ).strip()
+        comma_parts[0] = first_item
+        extracted_items = [part for part in comma_parts if part]
+        if len(extracted_items) >= 3:
+            return True, extracted_items
+
+    return False, []
+
+
+def _infer_followup_answer_type(query: str, answer: str) -> str:
+    """Classify saved answer shape for later follow-up routing."""
+    is_list_answer, _items = _extract_followup_items_from_answer(answer)
+    if is_list_answer:
+        return "list"
+    query_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if _re_followup.match(
+        r"^(?:what\s+(?:is|are|was|were)|define|definition\b)", query_low
+    ):
+        return "definition"
+    return "text"
+
+
 def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
     """Persist the most recent grounded answer for follow-up explanations.
 
@@ -703,29 +775,72 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
                 return
         except Exception:
             pass
+        answer_is_list, answer_items = _extract_followup_items_from_answer(ans)
+        answer_type = _infer_followup_answer_type(query, ans)
+        doc_candidates = list(doc_dicts or [])
+        if answer_is_list and answer_items:
+            scored_candidates: list[tuple[float, int, dict]] = []
+            for order, doc_dict in enumerate(doc_candidates):
+                if not isinstance(doc_dict, dict):
+                    continue
+                doc_text = str(
+                    doc_dict.get("text")
+                    or doc_dict.get("page_content")
+                    or doc_dict.get("content")
+                    or ""
+                ).strip()
+                support_score = _followup_list_chunk_support_score(answer_items, doc_text)
+                if support_score > 0:
+                    scored_candidates.append((support_score, order, doc_dict))
+            if scored_candidates:
+                scored_candidates.sort(key=lambda row: (-row[0], row[1]))
+                max_support = scored_candidates[0][0]
+                min_support = 1.0
+                if max_support >= 3.0:
+                    min_support = max(3.0, max_support * 0.75)
+                doc_candidates = [
+                    doc_dict
+                    for support_score, _order, doc_dict in scored_candidates
+                    if support_score >= min_support
+                ]
         kept = []
-        for d in (doc_dicts or [])[:_FOLLOWUP_KEEP_TOP_K]:
-            if not isinstance(d, dict):
+        for doc_dict in doc_candidates[:_FOLLOWUP_KEEP_TOP_K]:
+            if not isinstance(doc_dict, dict):
                 continue
             txt = str(
-                d.get("text")
-                or d.get("page_content")
-                or d.get("content")
+                doc_dict.get("text")
+                or doc_dict.get("page_content")
+                or doc_dict.get("content")
                 or ""
             ).strip()
             if not txt:
                 continue
-            src = d.get("source")
-            md = d.get("metadata")
+            src = doc_dict.get("source")
+            md = doc_dict.get("metadata")
             if (not src) and isinstance(md, dict):
                 src = md.get("source") or md.get("doc_id") or md.get("file")
-            kept.append({"text": txt[:600], "source": src})
-        last_answer_state[connection_id] = {
+            kept_doc = {"text": txt[:_FOLLOWUP_SAVED_CHUNK_CHAR_LIMIT], "source": src}
+            if isinstance(md, dict):
+                kept_doc["metadata"] = {
+                    "source": md.get("source"),
+                    "doc_id": md.get("doc_id"),
+                    "file": md.get("file"),
+                    "page": md.get("page"),
+                    "chunk_index": md.get("chunk_index"),
+                }
+            kept.append(kept_doc)
+        next_state = {
             "query": (query or "").strip(),
             "answer": ans,
             "chunks": kept,
             "ts": time.time(),
+            "answer_type": answer_type,
         }
+        if answer_is_list and answer_items:
+            next_state["items"] = answer_items
+            next_state["list_query"] = (query or "").strip()
+            next_state["list_answer"] = ans
+        last_answer_state[connection_id] = next_state
     except Exception:
         logger.exception("[FOLLOWUP] failed to save last answer state")
 
@@ -757,6 +872,10 @@ _EXPLAIN_VERB_RE = _re_followup.compile(
     r"entail(?:s|ed|ing)?|cover(?:s|ed|ing)?|"
     r"requir(?:e[ds]?|ing)|necessitat(?:e[ds]?|ing)"
     r")\b"
+)
+_FOLLOWUP_EXPLANATORY_CUE_RE = _re_followup.compile(
+    r"\b(?:is|are|was|were|means?|refers?\s+to|defined\s+as)\b",
+    _re_followup.IGNORECASE,
 )
 _EVIDENCE_STOPWORDS = frozenset({
     "this", "that", "these", "those", "with", "from", "into", "than",
@@ -842,6 +961,1080 @@ _FOLLOWUP_INFERRED_SUFFIX = (
     "(The document mentions this concept but does not provide a detailed explanation.)"
 )
 
+# Minimum fraction of content words in an LLM-generated explanation that
+# must appear (whole-word) in the retrieved chunks or previous answer.
+# Below this threshold the explanation is considered ungrounded and is
+# replaced by a cautious placeholder.  Generic — no domain vocabulary.
+_FOLLOWUP_EXPL_GROUND_THRESHOLD = 0.60
+
+
+def _compute_explanation_grounding_score(
+    explanation: str, excerpts_block: str, last_a: str
+) -> float:
+    """Return the fraction of content words in *explanation* that appear
+    (whole-word) in *excerpts_block* or *last_a*.
+
+    Used as an anti-hallucination guard for the controlled-explanation
+    mode.  Generic: only stopword filtering + whole-word matching.
+    """
+    _stop = {
+        "the", "a", "an", "of", "and", "or", "to", "in", "on", "for",
+        "with", "by", "from", "at", "is", "are", "was", "were", "be",
+        "been", "being", "this", "that", "these", "those", "it", "its",
+        "as", "but", "not", "also", "then", "when", "where", "which",
+        "who", "what", "how", "if", "so", "do", "does", "did", "has",
+        "have", "had", "will", "would", "can", "could", "should", "may",
+        "might", "must", "shall", "such", "each", "more", "most", "some",
+        "any", "all", "one", "two", "three", "their", "they", "them",
+        "we", "you", "i", "my", "your", "our",
+    }
+    haystack = ((excerpts_block or "") + " " + (last_a or "")).lower()
+    content_words = [
+        w for w in re.findall(r"[a-z]{3,}", (explanation or "").lower())
+        if w not in _stop
+    ]
+    if not content_words:
+        return 1.0  # empty explanation: no content to check
+    matched = sum(
+        1 for w in content_words
+        if re.search(rf"\b{re.escape(w)}\b", haystack)
+    )
+    return matched / len(content_words)
+
+
+def _infer_previous_list_relation_phrase(previous_query: str) -> str:
+    """Return a short generic phrase describing what the previous list was about.
+
+    The phrase is derived only from the user's previous question, so follow-up
+    explanations can say "one of the goals of X" without introducing any new
+    domain knowledge.
+    """
+    q = re.sub(r"\s+", " ", str(previous_query or "").strip().strip("?!."))
+    if not q:
+        return "the listed items"
+    patterns = (
+        r"^\s*(?:what|which)\s+(?:are|were)\s+(?:the\s+)?(.+?)\s*$",
+        r"^\s*(?:list|name|mention|identify|give)\s+(?:the\s+)?(.+?)\s*$",
+    )
+    phrase = ""
+    for patt in patterns:
+        m = re.search(patt, q, flags=re.IGNORECASE)
+        if m:
+            phrase = re.sub(r"\s+", " ", (m.group(1) or "")).strip(" ,;:-")
+            break
+    if not phrase:
+        return "the listed items"
+    phrase = re.sub(r"^(?:main|major|primary|basic|different|various)\s+", "", phrase, flags=re.IGNORECASE).strip()
+    words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", phrase)
+    if len(words) > 10:
+        return "the listed items"
+    if not re.match(r"^(?:the|a|an)\b", phrase, flags=re.IGNORECASE):
+        phrase = "the " + phrase
+    return phrase
+
+
+def _join_short_item_names(items: list[str], max_items: int = 5) -> str:
+    cleaned: list[str] = []
+    for item in items:
+        s = re.sub(r"\s+", " ", str(item or "").strip().strip(" .;:-"))
+        if not s:
+            continue
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", s)
+        if not words or len(words) > 9:
+            continue
+        cleaned.append(s)
+        if len(cleaned) >= max_items:
+            break
+    if not cleaned:
+        return ""
+    if len(cleaned) == 1:
+        return cleaned[0]
+    if len(cleaned) == 2:
+        return f"{cleaned[0]} and {cleaned[1]}"
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
+
+
+def _build_followup_list_context_mini_explanation(
+    target_item: str,
+    previous_items: list[str],
+    previous_query: str,
+) -> str | None:
+    """Build a grounded follow-up explanation from the prior list only.
+
+    This deliberately does not invent examples or domain details. It states the
+    only relationship that is grounded when the document merely listed the item.
+    """
+    target = re.sub(r"\s+", " ", str(target_item or "").strip().strip(" .;:-"))
+    if not target:
+        return None
+    items = [re.sub(r"\s+", " ", str(it or "").strip().strip(" .;:-")) for it in (previous_items or [])]
+    items = [it for it in items if it]
+    if target not in items:
+        return None
+    if len(items) < 2:
+        return None
+
+    relation_phrase = _infer_previous_list_relation_phrase(previous_query)
+    others = [it for it in items if it != target]
+    others_text = _join_short_item_names(others, max_items=5)
+
+    sentences = [f"The document refers to this as {target}, one of {relation_phrase}."]
+    if others_text:
+        sentences.append(
+            f"It appears in the same list with {others_text}, so the grounded context is the list relationship."
+        )
+    sentences.append("The document does not provide a detailed explanation for it.")
+    return " ".join(sentences)
+
+
+_FOLLOWUP_TARGET_STOPWORDS = _EVIDENCE_STOPWORDS | frozenset({
+    "explain", "explains", "explained", "clarify", "clarifies", "clarified",
+    "elaborate", "elaborates", "elaborated", "rephrase", "rephrases",
+    "rephrased", "simplify", "simplifies", "simplified", "tell", "about",
+    "please", "mean", "means", "meaning", "what", "does", "more", "detail",
+    "details", "further",
+})
+
+
+def _followup_item_head(item: str) -> str:
+    return re.sub(r"\s+", " ", str(item or "").split(":", 1)[0]).strip(" .;:-")
+
+
+def _followup_content_tokens(value: str) -> list[str]:
+    return [
+        token for token in _re_followup.findall(r"[a-z0-9]{3,}", str(value or "").lower())
+        if token not in _FOLLOWUP_TARGET_STOPWORDS
+    ]
+
+
+def _followup_query_focus_phrase(item: str, user_text: str) -> str:
+    item_head = _followup_item_head(item)
+    item_tokens = _followup_content_tokens(item_head)
+    query_tokens = set(_followup_content_tokens(user_text))
+    overlap = [token for token in item_tokens if token in query_tokens]
+    if overlap:
+        return " ".join(overlap[:3]).strip()
+    if len(item_tokens) > 6:
+        return " ".join(item_tokens[:4]).strip() or item_head
+    return item_head
+
+
+def _followup_text_mentions_item(text: str, item: str) -> bool:
+    text_low = str(text or "").lower()
+    item_head = _followup_item_head(item)
+    item_low = item_head.lower()
+    if not text_low.strip() or not item_low:
+        return False
+    if _re_followup.search(r"\b" + _re_followup.escape(item_low) + r"\b", text_low):
+        return True
+    item_tokens = _followup_content_tokens(item_head)
+    if not item_tokens:
+        return False
+    text_tokens = set(_re_followup.findall(r"[a-z0-9]{3,}", text_low))
+    if len(item_tokens) == 1:
+        return item_tokens[0] in text_tokens
+    overlap = sum(1 for token in item_tokens if token in text_tokens)
+    needed = max(2, int(math.ceil(len(item_tokens) * 0.55)))
+    if overlap >= needed:
+        return True
+    first_token = item_tokens[0]
+    return len(first_token) >= 5 and first_token in text_tokens
+
+
+def _followup_list_chunk_support_score(items: list[str], text: str) -> float:
+    """Score how strongly a chunk supports a previously returned list."""
+    text_value = str(text or "")
+    if not text_value.strip():
+        return 0.0
+    text_low = text_value.lower()
+    score = 0.0
+    matched_items = 0
+    for item in items or []:
+        item_head = _followup_item_head(item)
+        item_low = item_head.lower()
+        if not item_low:
+            continue
+        if _re_followup.search(r"\b" + _re_followup.escape(item_low) + r"\b", text_low):
+            score += 2.0
+            matched_items += 1
+        elif _followup_text_mentions_item(text_value, item_head):
+            score += 1.0
+            matched_items += 1
+    if matched_items >= 3:
+        score += 3.0
+    return score
+
+
+def _followup_text_has_item_head_anchor(text: str, item: str) -> bool:
+    """True when text contains the full item head or its first content token."""
+    text_low = str(text or "").lower()
+    item_head = _followup_item_head(item)
+    item_low = item_head.lower()
+    if not text_low.strip() or not item_low:
+        return False
+    if _re_followup.search(r"\b" + _re_followup.escape(item_low) + r"\b", text_low):
+        return True
+    item_tokens = _followup_content_tokens(item_head)
+    if not item_tokens:
+        return False
+    first_token = item_tokens[0]
+    if len(first_token) < 3:
+        return False
+    return bool(_re_followup.search(r"\b" + _re_followup.escape(first_token) + r"\b", text_low))
+
+
+def _select_followup_target_item(items: list[str], text: str) -> tuple[str | None, str]:
+    """Return the single prior-list item referenced by a follow-up query."""
+    cleaned_items = [
+        re.sub(r"\s+", " ", str(item or "").strip().strip(" .;:-"))
+        for item in (items or [])
+    ]
+    cleaned_items = [item for item in cleaned_items if item]
+    if not cleaned_items:
+        return None, "no_items"
+
+    query_low = str(text or "").lower()
+    query_tokens = {
+        token for token in _re_followup.findall(r"[a-z0-9]{3,}", query_low)
+        if token not in _FOLLOWUP_TARGET_STOPWORDS
+    }
+    if not query_tokens:
+        return None, "no_query_tokens"
+
+    token_owner_count: dict[str, int] = {}
+    item_tokens_by_item: dict[str, list[str]] = {}
+    for item in cleaned_items:
+        tokens = _followup_content_tokens(_followup_item_head(item))
+        item_tokens_by_item[item] = tokens
+        for token in set(tokens):
+            token_owner_count[token] = token_owner_count.get(token, 0) + 1
+
+    candidates: list[tuple[float, str, str]] = []
+    for item in cleaned_items:
+        item_head = _followup_item_head(item)
+        item_low = item_head.lower()
+        item_tokens = item_tokens_by_item.get(item) or []
+        if not item_low or not item_tokens:
+            continue
+        if _re_followup.search(r"\b" + _re_followup.escape(item_low) + r"\b", query_low):
+            candidates.append((3.0, item, "phrase"))
+            continue
+        overlap_tokens = [token for token in item_tokens if token in query_tokens]
+        if not overlap_tokens:
+            continue
+        if len(item_tokens) == 1:
+            candidates.append((2.5, item, "single_token"))
+            continue
+        first_token = item_tokens[0]
+        unique_first = (
+            first_token in query_tokens
+            and token_owner_count.get(first_token, 0) == 1
+            and len(first_token) >= 5
+        )
+        if len(overlap_tokens) >= 2:
+            score = 2.0 + (len(overlap_tokens) / max(1, len(item_tokens)))
+            candidates.append((score, item, "token_overlap"))
+        elif unique_first:
+            candidates.append((1.8, item, "unique_head_token"))
+
+    if not candidates:
+        return None, "no_match"
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    best_score, best_item, best_reason = candidates[0]
+    tied = [candidate for candidate in candidates if abs(candidate[0] - best_score) < 0.01]
+    if len(tied) > 1:
+        return None, "ambiguous"
+    return best_item, best_reason
+
+
+def _sentence_mentions_many_followup_items(sentence: str, items: list[str]) -> bool:
+    hits = 0
+    for item in items or []:
+        if _followup_text_mentions_item(sentence, item):
+            hits += 1
+        if hits >= 3:
+            return True
+    return False
+
+
+def _split_followup_sentences(text: str) -> list[str]:
+    pieces = _re_followup.split(r"(?<=[.!?:;])\s+|\n+|---+", str(text or ""))
+    return [re.sub(r"\s+", " ", piece).strip() for piece in pieces if piece and piece.strip()]
+
+
+def _split_followup_explanation_sentences(text: str) -> list[str]:
+    pieces = _re_followup.split(r"(?<=[.!?])\s+|\n+|---+", str(text or ""))
+    return [re.sub(r"\s+", " ", piece).strip() for piece in pieces if piece and piece.strip()]
+
+
+_FOLLOWUP_COURSE_HEADER_RE = _re_followup.compile(
+    r"^\s*"
+    r"(?:(?i:Introduction\s+to)\s+[^.!?;:\n]{1,90}?\s+[\-\u2013\u2014]?\s*)?"
+    r"[A-Z]{2,}\s*[\- ]?\d{2,}[A-Z0-9-]*\b"
+    r"[\s,;:\-\u2013\u2014]*(?:[A-Z]{2,6}\b[\s,;:\-\u2013\u2014]*)?"
+)
+_FOLLOWUP_COPYRIGHT_PREFIX_RE = _re_followup.compile(
+    r"^\s*(?:\u00a9\s*)?copyright\b[^.!?]{0,180}(?:[.!?]\s*|\s+|$)",
+    _re_followup.IGNORECASE,
+)
+_FOLLOWUP_PAGE_PREFIX_RE = _re_followup.compile(
+    r"^\s*(?:page\s*)?\d+\s*(?:of|/)\s*\d+\b[\s:;,\.\-]*",
+    _re_followup.IGNORECASE,
+)
+_FOLLOWUP_ORPHAN_HEADER_TOKEN_RE = _re_followup.compile(
+    r"^\s*[A-Z]{2,6}\b[\s,;:\-\u2013\u2014]+"
+)
+_FOLLOWUP_FRAGMENT_START_RE = _re_followup.compile(
+    r"^\s*(?:and|or|but|which|who|whose|where|when|while|because|although|though|"
+    r"of|from|to|into|by|with|than)\b",
+    _re_followup.IGNORECASE,
+)
+_FOLLOWUP_FRAGMENT_CLAUSE_RE = _re_followup.compile(
+    r"^[^.!?]{5,180}[;:]\s+(?:and\s+)?(?=(?:this|that|these|those|it|they|there|the|a|an)\b)",
+    _re_followup.IGNORECASE,
+)
+_FOLLOWUP_LEADING_CONJUNCTION_RE = _re_followup.compile(
+    r"^\s*(?:and|but|or)\s+(?=(?:this|that|these|those|it|they|there|the|a|an)\b)",
+    _re_followup.IGNORECASE,
+)
+_FOLLOWUP_OCR_SPLIT_WORD_RE = _re_followup.compile(
+    r"\b([a-z]{4,})\s+"
+    r"(eved|ieved|tion|sion|ment|ments|ness|able|ible|ally|ance|ence|ive|ous|ful|less|ing|ed)\b"
+)
+
+
+def _followup_capitalize_sentence_start(value: str) -> str:
+    if value and value[0].islower():
+        return value[0].upper() + value[1:]
+    return value
+
+
+def _followup_strip_header_prefix(value: str) -> tuple[str, bool]:
+    cleaned = str(value or "")
+    changed = False
+    for _ in range(3):
+        before = cleaned
+        cleaned = _FOLLOWUP_COPYRIGHT_PREFIX_RE.sub("", cleaned)
+        cleaned = _FOLLOWUP_PAGE_PREFIX_RE.sub("", cleaned)
+        cleaned = _FOLLOWUP_COURSE_HEADER_RE.sub("", cleaned)
+        if cleaned != before:
+            changed = True
+            cleaned = cleaned.lstrip(" \t\r\n,;:-\u2013\u2014")
+            cleaned = _FOLLOWUP_ORPHAN_HEADER_TOKEN_RE.sub("", cleaned).lstrip(" \t\r\n,;:-\u2013\u2014")
+            continue
+        break
+    return cleaned, changed
+
+
+def _followup_merge_safe_ocr_split_words(value: str) -> tuple[str, bool]:
+    changed = False
+
+    def _merge(match: re.Match) -> str:
+        nonlocal changed
+        left = match.group(1)
+        right = match.group(2)
+        if left in _EVIDENCE_STOPWORDS or right in _EVIDENCE_STOPWORDS:
+            return match.group(0)
+        combined = left + right
+        if not (6 <= len(combined) <= 20):
+            return match.group(0)
+        if not re.search(r"[aeiou]", combined):
+            return match.group(0)
+        if re.search(r"([a-z])\1\1", combined):
+            return match.group(0)
+        changed = True
+        return combined
+
+    cleaned = _FOLLOWUP_OCR_SPLIT_WORD_RE.sub(_merge, str(value or ""))
+    return cleaned, changed
+
+
+def _followup_salvage_fragment_clause(value: str) -> tuple[str, bool]:
+    match = _FOLLOWUP_FRAGMENT_CLAUSE_RE.search(value or "")
+    if not match:
+        return value, False
+    candidate = (value or "")[match.end():].strip(" \t\r\n,;:-\u2013\u2014")
+    candidate = _FOLLOWUP_LEADING_CONJUNCTION_RE.sub("", candidate).strip()
+    if not candidate:
+        return value, False
+    return _followup_capitalize_sentence_start(candidate), True
+
+
+def _cleanup_followup_extracted_answer(
+    sentence: str,
+    target_item: str,
+) -> tuple[str, bool, str]:
+    """Clean an already-grounded follow-up sentence without adding content."""
+    original = re.sub(r"\s+", " ", str(sentence or "")).strip(" \t\r\n-*\u2022")
+    if not original:
+        return "", False, "empty"
+
+    cleaned, header_removed = _followup_strip_header_prefix(original)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-*\u2022")
+    cleaned, ocr_changed = _followup_merge_safe_ocr_split_words(cleaned)
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n,;:-\u2013\u2014")
+
+    fragment_changed = False
+    if header_removed and cleaned and cleaned[0].islower():
+        salvaged, fragment_changed = _followup_salvage_fragment_clause(cleaned)
+        if fragment_changed:
+            cleaned = salvaged
+        elif not _followup_text_has_item_head_anchor(cleaned, target_item):
+            return "", (cleaned != original or ocr_changed), "fragment_after_header"
+
+    if _FOLLOWUP_FRAGMENT_START_RE.match(cleaned):
+        before = cleaned
+        cleaned = _FOLLOWUP_LEADING_CONJUNCTION_RE.sub("", cleaned).strip()
+        if cleaned == before:
+            return "", (cleaned != original or ocr_changed), "fragment_start"
+        fragment_changed = True
+
+    cleaned = _followup_capitalize_sentence_start(cleaned.strip())
+    if target_item and not _followup_text_has_item_head_anchor(cleaned, target_item):
+        return "", (cleaned != original or ocr_changed or fragment_changed), "target_removed"
+    if not cleaned:
+        return "", (cleaned != original or ocr_changed or fragment_changed), "empty_after_cleanup"
+    if not re.search(r"[.!?]$", cleaned):
+        cleaned += "."
+    return cleaned[:700].strip(), (cleaned != original or ocr_changed or fragment_changed), ""
+
+
+def _extract_followup_context_window(text: str, target_item: str, char_budget: int = 1200) -> str:
+    """Return nearby sentences/paragraph text around a targeted list item."""
+    if not text or not target_item:
+        return ""
+    paragraphs = [
+        paragraph.strip()
+        for paragraph in _re_followup.split(r"\n\s*\n|---+", str(text or ""))
+        if paragraph and paragraph.strip()
+    ]
+    selected: list[str] = []
+    for paragraph in paragraphs:
+        if not _followup_text_mentions_item(paragraph, target_item):
+            continue
+        sentences = _split_followup_sentences(paragraph)
+        if not sentences:
+            selected.append(re.sub(r"\s+", " ", paragraph)[:char_budget])
+            continue
+        for index, sentence in enumerate(sentences):
+            if not _followup_text_mentions_item(sentence, target_item):
+                continue
+            start_index = max(0, index - 1)
+            end_index = min(len(sentences), index + 2)
+            selected.append(" ".join(sentences[start_index:end_index]))
+    if not selected:
+        return ""
+    compact = " ".join(dict.fromkeys(selected))
+    return re.sub(r"\s+", " ", compact).strip()[:char_budget]
+
+
+def _build_followup_excerpts(last_chunks: list[dict], target_item: str | None = None) -> str:
+    """Build saved follow-up context, focused around the target when present."""
+    excerpt_parts: list[str] = []
+    total_chars = 0
+    if target_item:
+        for chunk in (last_chunks or [])[:_FOLLOWUP_KEEP_TOP_K]:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_text = str(chunk.get("text") or "").strip()
+            focused = _extract_followup_context_window(chunk_text, target_item)
+            if not focused:
+                continue
+            remaining = _FOLLOWUP_CHUNK_CHAR_BUDGET - total_chars
+            if remaining <= 0:
+                break
+            excerpt_parts.append(focused[:remaining])
+            total_chars += len(excerpt_parts[-1])
+    if not excerpt_parts:
+        for chunk in (last_chunks or [])[:_FOLLOWUP_KEEP_TOP_K]:
+            if not isinstance(chunk, dict):
+                continue
+            chunk_text = str(chunk.get("text") or "").strip()
+            if not chunk_text:
+                continue
+            remaining = _FOLLOWUP_CHUNK_CHAR_BUDGET - total_chars
+            if remaining <= 0:
+                break
+            excerpt_parts.append(chunk_text[:remaining])
+            total_chars += len(excerpt_parts[-1])
+    return "\n\n---\n\n".join(excerpt_parts)
+
+
+def _extract_followup_strong_explanation(
+    target_item: str,
+    excerpts_block: str,
+    previous_items: list[str],
+    emit_cleanup_logs: bool = True,
+    apply_cleanup: bool = True,
+) -> str:
+    """Extract a direct explanatory sentence for a targeted item, if present."""
+    if not target_item or not excerpts_block:
+        return ""
+    best_sentence = ""
+    best_raw_sentence = ""
+    best_cleanup_changed = False
+    best_score = -1
+    for sentence in _split_followup_explanation_sentences(excerpts_block):
+        if not _followup_text_has_item_head_anchor(sentence, target_item):
+            continue
+        separators = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", sentence))
+        sentence_words = _re_followup.findall(r"[a-z]{3,}", sentence.lower())
+        if (
+            _sentence_mentions_many_followup_items(sentence, previous_items)
+            and separators >= 2
+            and len(sentence_words) < separators * 7
+        ):
+            continue
+        if separators >= 3 and len(sentence_words) < separators * 5:
+            continue
+        has_verb = bool(_EXPLAIN_VERB_RE.search(sentence.lower()))
+        content_words = [
+            word for word in _re_followup.findall(r"[a-z]{4,}", sentence.lower())
+            if word not in _EVIDENCE_STOPWORDS
+        ]
+        content_count = len(content_words)
+        if not ((has_verb and content_count >= 3) or content_count >= 7):
+            continue
+        has_explanatory_cue = bool(_FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence))
+        complete_statement = bool(
+            has_explanatory_cue
+            and len(_re_followup.findall(r"[a-z0-9]{3,}", sentence.lower())) >= 8
+        )
+        list_fragment_penalty = 3 if separators >= 2 else 0
+        score = (
+            content_count
+            + (4 if has_verb else 0)
+            + (6 if has_explanatory_cue else 0)
+            + (2 if complete_statement else 0)
+            - list_fragment_penalty
+        )
+        cleanup_changed = False
+        clean_sentence = sentence
+        if apply_cleanup:
+            clean_sentence, cleanup_changed, reject_reason = _cleanup_followup_extracted_answer(
+                sentence, target_item
+            )
+            if reject_reason:
+                if emit_cleanup_logs:
+                    logger.info(
+                        "[FOLLOWUP NOISY SENTENCE REJECTED] reason=%s sentence=%r",
+                        reject_reason,
+                        sentence[:180],
+                    )
+                continue
+            if not cleanup_changed:
+                score += 2
+        if score > best_score:
+            best_score = score
+            best_sentence = clean_sentence
+            best_raw_sentence = sentence
+            best_cleanup_changed = cleanup_changed
+    if not best_sentence:
+        return ""
+    best_sentence = re.sub(r"\s+", " ", best_sentence).strip(" \t\r\n-*")
+    if not re.search(r"[.!?]$", best_sentence):
+        best_sentence += "."
+    if emit_cleanup_logs and best_cleanup_changed:
+        logger.info(
+            "[FOLLOWUP CLEANUP APPLIED] before=%r after=%r",
+            best_raw_sentence[:180],
+            best_sentence[:180],
+        )
+    if emit_cleanup_logs:
+        logger.info("[FOLLOWUP CLEAN ANSWER] %s", best_sentence[:240])
+    return best_sentence[:700].strip()
+
+
+def _followup_explanation_candidate_score(
+    target_item: str,
+    candidate_text: str,
+    previous_items: list[str] | None = None,
+) -> float:
+    """Score a follow-up candidate by generic explanatory sentence shape."""
+    text_value = re.sub(r"\s+", " ", str(candidate_text or "")).strip()
+    if not text_value or not _followup_text_mentions_item(text_value, target_item):
+        return -1.0
+
+    score = 0.0
+    item_tokens = _followup_content_tokens(_followup_item_head(target_item))
+    text_tokens = set(_re_followup.findall(r"[a-z0-9]{3,}", text_value.lower()))
+    if item_tokens:
+        overlap = 0
+        for item_token in item_tokens:
+            if item_token in text_tokens:
+                overlap += 1
+                continue
+            if len(item_token) >= 5 and any(
+                text_token.startswith(item_token) or item_token.startswith(text_token)
+                for text_token in text_tokens
+            ):
+                overlap += 1
+        score += min(8.0, overlap * 2.0)
+        if len(item_tokens) >= 3 and overlap <= 1:
+            score -= 8.0
+
+    if _extract_followup_strong_explanation(
+        target_item,
+        text_value,
+        previous_items or [],
+        emit_cleanup_logs=False,
+        apply_cleanup=False,
+    ):
+        score += 12.0
+    if _evidence_has_explicit_explanation(target_item, text_value):
+        score += 8.0
+
+    for sentence in _split_followup_sentences(text_value):
+        if not _followup_text_has_item_head_anchor(sentence, target_item):
+            continue
+        words = _re_followup.findall(r"[a-z0-9]{3,}", sentence.lower())
+        separators = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", sentence))
+        if _FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence):
+            score += 4.0
+        if len(words) >= 8 and re.search(r"[.!?]$", sentence.strip()):
+            score += 2.0
+        if len(sentence) >= 80:
+            score += 1.0
+        if separators >= 3:
+            score -= 4.0
+        if previous_items and _sentence_mentions_many_followup_items(sentence, previous_items):
+            score -= 3.0
+    return score
+
+
+def _followup_doc_text(candidate_doc: dict) -> str:
+    return str(
+        (candidate_doc or {}).get("text")
+        or (candidate_doc or {}).get("page_content")
+        or (candidate_doc or {}).get("content")
+        or ""
+    ).strip()
+
+
+def _followup_doc_source(candidate_doc: dict) -> str:
+    metadata = (candidate_doc or {}).get("metadata")
+    source = (candidate_doc or {}).get("source")
+    if (not source) and isinstance(metadata, dict):
+        source = metadata.get("source") or metadata.get("doc_id") or metadata.get("file")
+    return str(source or "").strip()
+
+
+def _followup_doc_chunk_index(candidate_doc: dict) -> int | None:
+    metadata = (candidate_doc or {}).get("metadata")
+    raw_index = metadata.get("chunk_index") if isinstance(metadata, dict) else None
+    if raw_index is None:
+        raw_index = (candidate_doc or {}).get("chunk_index")
+    if raw_index is None:
+        return None
+    try:
+        return int(raw_index)
+    except Exception:
+        return None
+
+
+def _followup_fetch_adjacent_chunk(
+    source_name: str,
+    chunk_index: int,
+    target_item: str,
+    allowed_sources: set[str],
+) -> dict | None:
+    try:
+        collection = getattr(getattr(live_rag, "vs", None), "collection", None)
+    except Exception:
+        collection = None
+    if collection is None or not source_name:
+        return None
+
+    rows = None
+    where_candidates = [
+        {"$and": [{"source": source_name}, {"chunk_index": int(chunk_index)}]},
+        {"$and": [{"source": source_name}, {"chunk_index": str(chunk_index)}]},
+    ]
+    for where_clause in where_candidates:
+        try:
+            rows = collection.get(where=where_clause, include=["documents", "metadatas"])
+        except Exception:
+            rows = None
+        if rows and rows.get("documents"):
+            break
+    if not rows or not rows.get("documents"):
+        return None
+
+    documents = rows.get("documents") or []
+    metadatas = rows.get("metadatas") or []
+    adjacent_text = str(documents[0] or "").strip() if documents else ""
+    adjacent_metadata = dict(metadatas[0] or {}) if metadatas else {}
+    adjacent_source = str(
+        adjacent_metadata.get("source")
+        or adjacent_metadata.get("doc_id")
+        or adjacent_metadata.get("file")
+        or source_name
+        or ""
+    ).strip()
+    if allowed_sources and adjacent_source and adjacent_source not in allowed_sources:
+        return None
+    if not adjacent_text or not _followup_text_mentions_item(adjacent_text, target_item):
+        return None
+    adjacent_focus = _extract_followup_context_window(adjacent_text, target_item) or adjacent_text
+    return {"text": adjacent_focus[:600], "source": adjacent_source, "metadata": adjacent_metadata}
+
+
+def _followup_expand_adjacent_chunks(
+    seed_docs: list[dict],
+    target_item: str,
+    allowed_sources: set[str],
+    previous_items: list[str],
+) -> list[dict]:
+    expanded: list[dict] = []
+    seen_keys: set[tuple[str, int]] = set()
+    for seed_doc in seed_docs or []:
+        seed_source = _followup_doc_source(seed_doc)
+        seed_index = _followup_doc_chunk_index(seed_doc)
+        if not seed_source or seed_index is None:
+            continue
+        for adjacent_index in (seed_index - 1, seed_index + 1):
+            adjacent_key = (seed_source, adjacent_index)
+            if adjacent_key in seen_keys:
+                continue
+            seen_keys.add(adjacent_key)
+            adjacent_doc = _followup_fetch_adjacent_chunk(
+                seed_source, adjacent_index, target_item, allowed_sources
+            )
+            if adjacent_doc is None:
+                continue
+            expanded.append(adjacent_doc)
+    expanded.sort(
+        key=lambda candidate: _followup_explanation_candidate_score(
+            target_item, _followup_doc_text(candidate), previous_items
+        ),
+        reverse=True,
+    )
+    return expanded[:2]
+
+
+def _followup_lexical_explanation_rescue(
+    focus_phrase: str,
+    target_item: str,
+    allowed_sources: set[str],
+    previous_items: list[str],
+    max_candidates: int = 16,
+) -> list[dict]:
+    """Find same-source chunks containing the focused item phrase.
+
+    This is a bounded lexical rescue for follow-ups only. It uses the active
+    Chroma collection as stored evidence, then applies the same generic
+    explanatory sentence scoring used by semantic rescue.
+    """
+    phrase = re.sub(r"\s+", " ", str(focus_phrase or "").strip())
+    if not phrase:
+        return []
+    try:
+        collection = getattr(getattr(live_rag, "vs", None), "collection", None)
+    except Exception:
+        collection = None
+    if collection is None:
+        return []
+
+    phrase_variants: list[str] = []
+    for variant in (phrase, phrase.lower(), phrase.title()):
+        if variant and variant not in phrase_variants:
+            phrase_variants.append(variant)
+
+    candidates: list[tuple[float, int, dict]] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for phrase_variant in phrase_variants:
+        try:
+            rows = collection.get(
+                where_document={"$contains": phrase_variant},
+                include=["documents", "metadatas"],
+                limit=max_candidates,
+            )
+        except TypeError:
+            rows = collection.get(
+                where_document={"$contains": phrase_variant},
+                include=["documents", "metadatas"],
+            )
+        except Exception:
+            logger.exception("[FOLLOWUP LEXICAL RESCUE] collection lookup failed")
+            continue
+        documents = (rows or {}).get("documents") or []
+        metadatas = (rows or {}).get("metadatas") or []
+        for order, document_text in enumerate(documents[:max_candidates]):
+            text_value = str(document_text or "").strip()
+            if not text_value:
+                continue
+            metadata = dict(metadatas[order] or {}) if order < len(metadatas) else {}
+            source_value = str(
+                metadata.get("source")
+                or metadata.get("doc_id")
+                or metadata.get("file")
+                or ""
+            ).strip()
+            if allowed_sources and source_value and source_value not in allowed_sources:
+                continue
+            candidate_doc = {
+                "text": text_value[:600],
+                "source": source_value,
+                "metadata": metadata,
+            }
+            if not _followup_text_mentions_item(text_value, focus_phrase):
+                continue
+            chunk_key = (source_value, str(metadata.get("chunk_index")))
+            if chunk_key in seen_keys:
+                continue
+            seen_keys.add(chunk_key)
+            score = _followup_explanation_candidate_score(
+                target_item, text_value, previous_items
+            )
+            if score < 1.0:
+                continue
+            focused_text = (
+                _extract_followup_context_window(text_value, focus_phrase)
+                or _extract_followup_context_window(text_value, target_item)
+                or text_value
+            )
+            candidate_doc["text"] = focused_text[:600]
+            candidates.append((score, order, candidate_doc))
+
+    candidates.sort(key=lambda row: (-row[0], row[1]))
+    return [row[2] for row in candidates[:12]]
+
+
+def _build_grounded_explanation(query, item, context_docs):
+    logger.info("[FOLLOWUP EXPLANATION MODE] weak_evidence")
+
+    item_text = _followup_item_head(item)
+    if not item_text:
+        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=0")
+        return RAG_NO_MATCH_RESPONSE
+
+    if isinstance(context_docs, (str, bytes)) or context_docs is None:
+        docs_iterable = [context_docs]
+    else:
+        try:
+            docs_iterable = list(context_docs)
+        except TypeError:
+            docs_iterable = [context_docs]
+
+    context_parts: list[str] = []
+    for context_doc in docs_iterable:
+        if context_doc is None:
+            continue
+        if isinstance(context_doc, dict):
+            context_text = (
+                context_doc.get("text")
+                or context_doc.get("page_content")
+                or context_doc.get("content")
+                or ""
+            )
+        else:
+            context_text = context_doc.decode("utf-8", errors="ignore") if isinstance(context_doc, bytes) else str(context_doc)
+        context_text = re.sub(r"[ \t\r\f\v]+", " ", context_text or "")
+        context_text = re.sub(r"\n{3,}", "\n\n", context_text).strip()
+        if context_text:
+            context_parts.append(context_text)
+
+    context_text = "\n\n".join(context_parts)
+    if not context_text:
+        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=0")
+        return RAG_NO_MATCH_RESPONSE
+    context_text = re.sub(r"(?m)(?:^|\s)[-*\u2022]\s+(?=[A-Za-z0-9])", "\n", context_text)
+    context_text = re.sub(r"(?m)(?:^|\s)\d+[.)]\s+(?=[A-Za-z0-9])", "\n", context_text)
+
+    strong_sentence = _extract_followup_strong_explanation(item_text, context_text, [])
+    if strong_sentence:
+        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=1")
+        logger.info("[FOLLOWUP EXPLANATION LEVEL] weak_interpreted")
+        return strong_sentence
+
+    sentences = _split_followup_sentences(context_text)
+    item_sentence_indexes = [
+        index for index, sentence in enumerate(sentences)
+        if _followup_text_has_item_head_anchor(sentence, item_text)
+    ]
+    if not item_sentence_indexes:
+        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=0")
+        return RAG_NO_MATCH_RESPONSE
+
+    query_tokens = set(_followup_content_tokens(query or ""))
+    item_tokens = set(_followup_content_tokens(item_text))
+
+    def _strip_marker(value: str) -> str:
+        cleaned = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", value or "")
+        return re.sub(r"\s+", " ", cleaned).strip(" \t\r\n.;")
+
+    def _inline_phrase(value: str) -> str:
+        phrase = _strip_marker(value).strip(" :")
+        phrase = re.sub(
+            r"\s+(?:are|were|is|was|include|includes|included|including|"
+            r"consist(?:s|ed)?\s+of|comprise|comprises|contain|contains|"
+            r"has|have)(?:\s+the\s+following)?\s*$",
+            "",
+            phrase,
+            flags=re.IGNORECASE,
+        ).strip(" :")
+        if phrase.startswith("The "):
+            phrase = "the " + phrase[4:]
+        return phrase
+
+    def _content_token_count(value: str) -> int:
+        return len([
+            token for token in _followup_content_tokens(value or "")
+            if token not in item_tokens
+        ])
+
+    def _useful_phrase(value: str) -> bool:
+        return bool(value and _content_token_count(value) > 0)
+
+    def _relation_from_sentence(sentence: str) -> str:
+        cleaned = _strip_marker(sentence)
+        if not cleaned:
+            return ""
+        item_match = re.search(r"\b" + re.escape(item_text) + r"\b", cleaned, flags=re.IGNORECASE)
+        before_item = cleaned[:item_match.start()] if item_match else cleaned
+        relation_match = re.search(
+            r"^(.+?)\s+(?:are|were|is|was|include|includes|included|including|"
+            r"consist(?:s|ed)?\s+of|comprise|comprises|contain|contains|"
+            r"has|have)(?:\s+the\s+following)?\b",
+            before_item,
+            flags=re.IGNORECASE,
+        )
+        if relation_match:
+            phrase = _inline_phrase(relation_match.group(1))
+            return phrase if _useful_phrase(phrase) else ""
+        if cleaned.endswith(":") or re.search(
+            r"\b(?:are|were|is|was|include|includes|included|including|"
+            r"consist(?:s|ed)?\s+of|comprise|comprises|contain|contains|"
+            r"has|have)\b",
+            cleaned,
+            flags=re.IGNORECASE,
+        ):
+            phrase = _inline_phrase(cleaned)
+            return phrase if _useful_phrase(phrase) else ""
+        return ""
+
+    def _definition_fragment(sentence: str) -> str:
+        cleaned = _strip_marker(sentence)
+        item_match = re.search(r"\b" + re.escape(item_text) + r"\b", cleaned, flags=re.IGNORECASE)
+        if not item_match:
+            return ""
+        after_item = cleaned[item_match.end():]
+        fragment_match = re.match(r"\s*(?:[:\-\u2013\u2014]|is|are|means?|refers?\s+to)\s+(.+)$", after_item, flags=re.IGNORECASE)
+        if not fragment_match:
+            return ""
+        fragment = _inline_phrase(fragment_match.group(1))
+        return fragment if _useful_phrase(fragment) else ""
+
+    selected_sentences: list[str] = []
+    context_phrase = ""
+    sibling_items: list[str] = []
+
+    def _collect_sibling_items(item_index: int) -> list[str]:
+        collected: list[str] = []
+        sibling_window_start = max(0, item_index - 5)
+        sibling_window_end = min(len(sentences), item_index + 6)
+        for sibling_sentence in sentences[sibling_window_start:sibling_window_end]:
+            sibling_label = _strip_marker(sibling_sentence)
+            if not sibling_label or _followup_text_mentions_item(sibling_label, item_text):
+                continue
+            if len(_followup_content_tokens(sibling_label)) > 8:
+                continue
+            if re.search(r"[.!?]", sibling_label):
+                continue
+            collected.append(sibling_label)
+            if len(collected) >= 3:
+                break
+        return collected
+
+    relation_from_query = _infer_previous_list_relation_phrase(query or "")
+    if relation_from_query and relation_from_query != "the listed items":
+        first_item_index = item_sentence_indexes[0]
+        context_phrase = relation_from_query
+        selected_sentences = [sentences[first_item_index]]
+        sibling_items = _collect_sibling_items(first_item_index)
+
+    for item_index in item_sentence_indexes:
+        if context_phrase:
+            break
+        item_sentence = sentences[item_index]
+        selected_sentences.append(item_sentence)
+
+        fragment = _definition_fragment(item_sentence)
+        if fragment:
+            context_phrase = fragment
+            break
+
+        for lookback_index in range(item_index, max(-1, item_index - 6), -1):
+            candidate = sentences[lookback_index]
+            relation = _relation_from_sentence(candidate)
+            if relation:
+                candidate_tokens = set(_followup_content_tokens(candidate))
+                if not query_tokens or candidate_tokens.intersection(query_tokens) or lookback_index == item_index:
+                    context_phrase = relation
+                    if candidate not in selected_sentences:
+                        selected_sentences.insert(0, candidate)
+                    break
+        if context_phrase:
+            sibling_items = _collect_sibling_items(item_index)
+            break
+
+    if not context_phrase:
+        for item_index in item_sentence_indexes:
+            window_start = max(0, item_index - 1)
+            window_end = min(len(sentences), item_index + 2)
+            nearby = [_strip_marker(sentence) for sentence in sentences[window_start:window_end]]
+            nearby = [sentence for sentence in nearby if sentence]
+            joined = " ".join(dict.fromkeys(nearby)).strip()
+            if _useful_phrase(joined):
+                context_phrase = joined[:350].strip()
+                selected_sentences = sentences[window_start:window_end]
+                break
+
+    if not _useful_phrase(context_phrase):
+        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=0")
+        return RAG_NO_MATCH_RESPONSE
+
+    if sibling_items:
+        sibling_text = _join_short_item_names(sibling_items, max_items=3)
+        if sibling_text:
+            context_phrase = f"{context_phrase} in the same list as {sibling_text}"
+
+    sentences_used = len([sentence for sentence in dict.fromkeys(selected_sentences) if sentence])
+    logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=%d", sentences_used)
+    logger.info("[FOLLOWUP EXPLANATION LEVEL] weak_interpreted")
+    return f"This refers to {item_text}, which in the document is associated with {context_phrase}."
+
+
+def _build_grounded_explanations_for_items(query, items, context_docs):
+    explanations: list[str] = []
+    for explanation_item in items or []:
+        explanation = _build_grounded_explanation(query, explanation_item, context_docs)
+        if explanation and explanation != RAG_NO_MATCH_RESPONSE:
+            explanations.append(explanation)
+    return "\n".join(explanations).strip()
+
+
+def _build_followup_targeted_evidence_answer(
+    target_item: str,
+    previous_items: list[str],
+    previous_query: str,
+    previous_answer: str,
+    excerpts_block: str,
+) -> tuple[str, str]:
+    """Three-level strict response for targeted list-item follow-ups."""
+    anchored_items = _followup_items_anchored([target_item], excerpts_block, previous_answer)
+    if not anchored_items:
+        return RAG_NO_MATCH_RESPONSE, "no_evidence"
+
+    strong_answer = _extract_followup_strong_explanation(
+        target_item, excerpts_block, previous_items
+    )
+    if strong_answer:
+        return strong_answer, "strong"
+
+    return "", "weak"
+
 
 def _followup_items_anchored(
     items: list[str], excerpts_block: str, last_a: str
@@ -859,12 +2052,10 @@ def _followup_items_anchored(
         return []
     anchored: list[str] = []
     for it in items:
-        head = (it.split(":", 1)[0]).strip().lower()
+        head = _followup_item_head(it)
         if not head:
             continue
-        if _re_followup.search(
-            r"\b" + _re_followup.escape(head) + r"\b", haystack
-        ):
+        if _followup_text_mentions_item(haystack, head):
             anchored.append(it)
     return anchored
 
@@ -876,72 +2067,15 @@ async def _followup_controlled_explanation(
     excerpts_block: str,
     user_text: str,
 ) -> str:
-    """Build a strict, contextual explanation prompt and call the LLM.
-
-    This is NOT open-domain QA. The prompt forces the model to:
-      * stay consistent with the document's domain / topic,
-      * give one short explanation per provided item,
-      * not invent unrelated facts, names, dates, or numbers.
-
-    Returns the cleaned LLM text, or an empty string on failure.
-    Caller is responsible for appending the inferred-suffix disclaimer.
-    """
+    """Build controlled follow-up explanations from saved grounded text only."""
     if not items:
         return ""
-    items_block = "\n".join(f"- {it}" for it in items)
-    if len(items) == 1:
-        shape_rule = (
-            "Output EXACTLY one short paragraph (1-3 sentences) explaining the item. "
-            "Do NOT prefix with the item name and a colon; just write the explanation."
-        )
-    else:
-        shape_rule = (
-            "Output one line per item using EXACTLY this format:\n"
-            "ItemName: brief explanation (1-2 sentences).\n"
-            "Keep the original order. Do not skip, merge, or rename items."
-        )
-    instruction = (
-        "The user is asking a follow-up clarification on the PREVIOUS ANSWER. "
-        "The document mentions the following item(s) but does not give a "
-        "detailed definition for them:\n\n"
-        f"{items_block}\n\n"
-        f"{shape_rule}\n\n"
-        "Hard rules:\n"
-        "- Stay strictly consistent with the topic / domain established by "
-        "the PREVIOUS USER QUESTION, PREVIOUS ANSWER, and SOURCE EXCERPTS.\n"
-        "- Explain what each item commonly means within that topic / domain.\n"
-        "- Do NOT introduce unrelated facts, people, dates, statistics, or "
-        "examples that are not implied by the provided context.\n"
-        "- Do NOT contradict anything in the PREVIOUS ANSWER or SOURCE EXCERPTS.\n"
-        "- Do NOT add disclaimers, meta-commentary, or phrases like 'Not found', "
-        "'Based on the document', 'According to', or 'as an AI'."
+    grounded_query = (last_q or user_text or "").strip()
+    return _build_grounded_explanations_for_items(
+        grounded_query,
+        items,
+        [{"text": excerpts_block}, {"text": last_a}],
     )
-    system_prompt = (
-        "You are a contextual clarification assistant. " + instruction
-    )
-    context_text = (
-        f"PREVIOUS USER QUESTION: {last_q}\n\n"
-        f"PREVIOUS ANSWER:\n{last_a}\n\n"
-        f"SOURCE EXCERPTS:\n{excerpts_block if excerpts_block else '(none)'}"
-    )
-    try:
-        out = await call_llm_with_context(
-            (user_text or "").strip(), context_text, system_prompt
-        )
-    except Exception:
-        logger.exception("[FOLLOWUP EXPLANATION MODE] LLM call failed")
-        return ""
-    out = (out or "").strip()
-    # Strip any stray not-found sentinel that the model may emit.
-    _nf = RAG_NO_MATCH_RESPONSE.strip()
-    _nf_re = _re_followup.compile(
-        r"\s*" + _re_followup.escape(_nf).replace(r"\.", r"\.?") + r"\s*",
-        _re_followup.IGNORECASE,
-    )
-    out = _nf_re.sub(" ", out).strip()
-    if not out or out.lower() == _nf.lower():
-        return ""
-    return out
 
 
 async def _handle_followup_query(text: str, connection_id: str):
@@ -954,73 +2088,32 @@ async def _handle_followup_query(text: str, connection_id: str):
         logger.info("[FOLLOWUP] no prior state for connection_id=%s -> not_found", connection_id)
         return (RAG_NO_MATCH_RESPONSE, [])
 
-    intent = _classify_followup_intent(text)
+    followup_action = _classify_followup_intent(text)
+    intent = "explanation"
+    is_followup = True
+    print("[FOLLOWUP MODE] list_lock_disabled=True")
+    print("[FOLLOWUP MERGE] enabled=True")
+    logger.info("[FOLLOWUP MODE] list_lock_disabled=True")
+    logger.info("[FOLLOWUP MERGE] enabled=True")
     last_q = state.get("query", "") or ""
     last_a = state.get("answer", "") or ""
     last_chunks = state.get("chunks", []) or []
-
-    excerpt_parts = []
-    total_chars = 0
-    for c in last_chunks[:_FOLLOWUP_KEEP_TOP_K]:
-        ct = (c.get("text") or "").strip()
-        if not ct:
-            continue
-        remaining = _FOLLOWUP_CHUNK_CHAR_BUDGET - total_chars
-        if remaining <= 0:
-            break
-        snippet = ct[:remaining]
-        excerpt_parts.append(snippet)
-        total_chars += len(snippet)
-    excerpts_block = "\n\n---\n\n".join(excerpt_parts)
-
-    # --- detect whether the previous answer was a list ---
-    list_lines = [
-        ln.strip() for ln in last_a.splitlines()
-        if _re_followup.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", ln)
+    base_list_q = state.get("list_query", "") or last_q
+    base_list_a = state.get("list_answer", "") or last_a
+    stored_items = [
+        re.sub(r"\s+", " ", str(item or "").strip().strip(" .;:-"))
+        for item in (state.get("items") or [])
     ]
-    prev_is_list = len(list_lines) >= 2
+    stored_items = [item for item in stored_items if item]
+    excerpts_block = _build_followup_excerpts(last_chunks)
 
-    # --- extract explicit list items for structured prompting ---
-    extracted_items: list[str] = []
-    if prev_is_list:
-        for ln in list_lines:
-            # Strip bullet/number prefix
-            item = _re_followup.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s*", "", ln).strip()
-            if item:
-                extracted_items.append(item)
-    # Fallback A: single-line bullet/numbered list rendered without newlines,
-    # e.g. "- People - Money - Machines - Materials - Methods - Markets" or
-    # "1) Foo 2) Bar 3) Baz". The earlier per-line scan misses these because
-    # there is only one physical line. Split on inline bullet/number markers.
-    if not extracted_items and not prev_is_list:
-        bullet_parts_raw = _re_followup.split(
-            r"(?:^|\s)(?:[-*\u2022]|\d+[.)])\s+", last_a
-        )
-        bullet_parts = [p.strip().rstrip(".") for p in bullet_parts_raw if p and p.strip()]
-        if len(bullet_parts) >= 3 and all(len(p) <= 60 for p in bullet_parts):
-            extracted_items = bullet_parts
-            prev_is_list = True
-    # Fallback B: try comma/semicolon separated single-line list
-    if not extracted_items and not prev_is_list:
-        # Check if last_a is essentially "X, Y, Z, ..." pattern (≥3 items)
-        comma_parts = [p.strip().rstrip(".") for p in _re_followup.split(r"[,;]", last_a) if p.strip()]
-        # Heuristic: each part is short (≤60 chars) and there are ≥3 → treat as inline list
-        if len(comma_parts) >= 3 and all(len(p) <= 60 for p in comma_parts):
-            # Remove intro prefix from first part (e.g. "The six Ms are Men")
-            first = comma_parts[0]
-            # Strip common intro phrases: "The X are Y" → "Y"
-            intro_m = _re_followup.search(r"\b(?:are|include|includes|consist of|consists of|namely)\s+", first, _re_followup.IGNORECASE)
-            if intro_m:
-                first = first[intro_m.end():].strip()
-            # Also strip "and" prefix from last item
-            if comma_parts:
-                last_item = comma_parts[-1]
-                last_item = _re_followup.sub(r"^\s*and\s+", "", last_item, flags=_re_followup.IGNORECASE).strip()
-                comma_parts[-1] = last_item
-            comma_parts[0] = first
-            extracted_items = [p for p in comma_parts if p]
-            if len(extracted_items) >= 3:
-                prev_is_list = True
+    # --- detect whether the current saved answer is a list ---
+    prev_is_list, extracted_items = _extract_followup_items_from_answer(last_a)
+    list_detected = prev_is_list
+    if is_followup:
+        list_detected = False
+    target_item_pool = extracted_items if extracted_items else stored_items
+    previous_list_items_all = list(extracted_items if extracted_items else stored_items)
 
     # --- single-item targeting -------------------------------------
     # If the user's follow-up query mentions exactly ONE of the items
@@ -1028,44 +2121,35 @@ async def _handle_followup_query(text: str, connection_id: str):
     # follow-up flow to just that item. Matching is purely against the
     # previously extracted list items (no hardcoded vocabulary).
     targeted_item: str | None = None
-    if prev_is_list and extracted_items:
+    if target_item_pool:
         try:
-            _q_low = (text or "").lower()
-            _q_tokens = set(_re_followup.findall(r"[a-z0-9]+", _q_low))
-            _matches: list[str] = []
-            for _it in extracted_items:
-                _head = (_it.split(":", 1)[0]).strip()
-                if not _head:
-                    continue
-                _head_low = _head.lower()
-                # Whole-phrase containment for multi-word item names.
-                if " " in _head_low:
-                    if _re_followup.search(
-                        r"\b" + _re_followup.escape(_head_low) + r"\b", _q_low
-                    ):
-                        _matches.append(_it)
-                    continue
-                # Single-word item: require a whole-word token match so
-                # "machines" does not also match inside "machinery".
-                if _head_low in _q_tokens:
-                    _matches.append(_it)
-            # Deduplicate while preserving order.
-            _seen = set()
-            _matches = [m for m in _matches if not (m in _seen or _seen.add(m))]
-            if len(_matches) == 1:
-                targeted_item = _matches[0]
+            targeted_item, target_reason = _select_followup_target_item(
+                target_item_pool, text
+            )
+            if targeted_item:
+                logger.info(
+                    "[FOLLOWUP ITEM DETECTION] item=%r reason=%s query=%r",
+                    targeted_item, target_reason, (text or "")[:120],
+                )
                 logger.info(
                     "[FOLLOWUP ITEM TARGET] item=%r query=%r",
                     targeted_item, (text or "")[:120],
                 )
-            elif len(_matches) > 1:
+            else:
                 logger.info(
-                    "[FOLLOWUP ITEM TARGET] multiple matches=%d -> full-list path",
-                    len(_matches),
+                    "[FOLLOWUP ITEM DETECTION] no_single_item reason=%s query=%r",
+                    target_reason, (text or "")[:120],
                 )
         except Exception:
             logger.exception("[FOLLOWUP ITEM TARGET] detection failed")
             targeted_item = None
+
+    if targeted_item is not None and not extracted_items and stored_items:
+        prev_is_list = True
+        extracted_items = list(stored_items)
+        previous_list_items_all = list(stored_items)
+        last_q = base_list_q
+        last_a = base_list_a
 
     # When a single item is targeted, narrow the working item list to
     # just that item. Everything downstream (prompt template, retry,
@@ -1073,6 +2157,36 @@ async def _handle_followup_query(text: str, connection_id: str):
     # single item only.
     if targeted_item is not None:
         extracted_items = [targeted_item]
+        excerpts_block = _build_followup_excerpts(last_chunks, targeted_item)
+        logger.info(
+            "[FOLLOWUP CONTEXT BUILD] target=%r chars=%d chunks=%d",
+            targeted_item, len(excerpts_block or ""), len(last_chunks or []),
+        )
+
+    def _update_followup_state(answer_text: str) -> None:
+        try:
+            answer_is_list, answer_items = _extract_followup_items_from_answer(answer_text)
+            preserved_items = list(stored_items or previous_list_items_all or [])
+            next_state = {
+                "query": (text or "").strip(),
+                "answer": str(answer_text or "").strip(),
+                "chunks": last_chunks,
+                "ts": time.time(),
+                "answer_type": "followup",
+                "base_answer_type": state.get("base_answer_type") or state.get("answer_type"),
+            }
+            if preserved_items:
+                next_state["items"] = preserved_items
+                next_state["list_query"] = base_list_q
+                next_state["list_answer"] = base_list_a
+            elif answer_is_list and answer_items:
+                next_state["items"] = answer_items
+                next_state["list_query"] = (text or "").strip()
+                next_state["list_answer"] = str(answer_text or "").strip()
+                next_state["base_answer_type"] = "list"
+            last_answer_state[connection_id] = next_state
+        except Exception:
+            logger.exception("[FOLLOWUP] failed to update follow-up state")
 
     # --- targeted micro-retrieval (item rescue) --------------------
     # When ONE item is targeted from a previous list answer and the
@@ -1083,28 +2197,34 @@ async def _handle_followup_query(text: str, connection_id: str):
     # chunks, no rerank, no cross-document leakage.
     if targeted_item is not None and prev_is_list:
         try:
-            _item_head = (targeted_item.split(":", 1)[0]).strip().lower()
-            _haystack_low = (excerpts_block or "").lower()
+            _item_head = _followup_item_head(targeted_item)
             # Only spend the round-trip when the saved excerpts clearly
             # don't carry an explanation for this specific item. If the
             # item name already appears alongside other content in the
             # saved excerpts, the existing prompt path is sufficient.
-            _item_in_excerpts = bool(_item_head) and bool(
-                _re_followup.search(r"\b" + _re_followup.escape(_item_head) + r"\b", _haystack_low)
+            _has_strong_local = bool(
+                _extract_followup_strong_explanation(
+                    targeted_item, excerpts_block, previous_list_items_all
+                )
             )
-            # Threshold: even if the name is present, if the surrounding
-            # text is very short we still try a rescue.
-            _excerpts_len = len(_haystack_low)
-            _needs_rescue = (not _item_in_excerpts) or (_excerpts_len < 200)
+            _needs_rescue = not _has_strong_local
             if _needs_rescue and _item_head:
+                _query_focus_item = _followup_query_focus_phrase(targeted_item, text)
                 # Scope to the source(s) of the previously saved chunks.
                 _allowed_sources = {
                     (c.get("source") or "").strip()
                     for c in (last_chunks or [])
                     if isinstance(c, dict) and c.get("source")
                 }
-                _rescue_query = f"{targeted_item} meaning {last_q}".strip()
-                _rescue_docs = []
+                _seed_adjacent_rescue = _followup_expand_adjacent_chunks(
+                    last_chunks,
+                    _query_focus_item,
+                    _allowed_sources,
+                    previous_list_items_all,
+                )
+                _rescue_query = f"{_query_focus_item} explanation".strip()
+                print(f"[FOLLOWUP QUERY] {_rescue_query}")
+                logger.info("[FOLLOWUP QUERY] %s", _rescue_query)
                 try:
                     _raw_rescue = live_rag.search(
                         query=_rescue_query,
@@ -1115,20 +2235,24 @@ async def _handle_followup_query(text: str, connection_id: str):
                 except Exception:
                     logger.exception("[FOLLOWUP MICRO-RETRIEVAL] search failed")
                     _raw_rescue = []
-                _kept_rescue = []
-                for _d in _raw_rescue:
-                    if not isinstance(_d, dict):
+                logger.info(
+                    "[FOLLOWUP CONTEXT QUERY] query=%r",
+                    _rescue_query[:180],
+                )
+                _rescue_candidates: list[tuple[float, int, dict]] = []
+                for _candidate_order, _candidate_doc in enumerate(_raw_rescue):
+                    if not isinstance(_candidate_doc, dict):
                         continue
                     _txt = (
-                        _d.get("text")
-                        or _d.get("page_content")
-                        or _d.get("content")
+                        _candidate_doc.get("text")
+                        or _candidate_doc.get("page_content")
+                        or _candidate_doc.get("content")
                         or ""
                     ).strip()
                     if not _txt:
                         continue
-                    _src = _d.get("source")
-                    _md = _d.get("metadata")
+                    _src = _candidate_doc.get("source")
+                    _md = _candidate_doc.get("metadata")
                     if (not _src) and isinstance(_md, dict):
                         _src = _md.get("source") or _md.get("doc_id") or _md.get("file")
                     _src = (_src or "").strip()
@@ -1141,18 +2265,108 @@ async def _handle_followup_query(text: str, connection_id: str):
                         continue
                     # Require the targeted item name to actually appear in
                     # the rescue chunk; otherwise it is not a real rescue.
-                    if not _re_followup.search(
-                        r"\b" + _re_followup.escape(_item_head) + r"\b", _txt.lower()
-                    ):
+                    if not _followup_text_mentions_item(_txt, _query_focus_item):
                         continue
-                    _kept_rescue.append({"text": _txt[:600], "source": _src})
-                    if len(_kept_rescue) >= 2:
-                        break
+                    _candidate_score = _followup_explanation_candidate_score(
+                        targeted_item, _txt, previous_list_items_all
+                    )
+                    _focused_txt = (
+                        _extract_followup_context_window(_txt, _query_focus_item)
+                        or _extract_followup_context_window(_txt, targeted_item)
+                        or _txt
+                    )
+                    _rescue_candidates.append((
+                        _candidate_score,
+                        _candidate_order,
+                        {
+                            "text": _focused_txt[:600],
+                            "source": _src,
+                            "metadata": dict(_md or {}) if isinstance(_md, dict) else {},
+                        },
+                    ))
+                _rescue_candidates.sort(key=lambda row: (-row[0], row[1]))
+                _kept_rescue = [row[2] for row in _rescue_candidates[:2]]
+                _adjacent_rescue = _followup_expand_adjacent_chunks(
+                    _kept_rescue,
+                    _query_focus_item,
+                    _allowed_sources,
+                    previous_list_items_all,
+                )
+                _lexical_rescue = _followup_lexical_explanation_rescue(
+                    _query_focus_item,
+                    targeted_item,
+                    _allowed_sources,
+                    previous_list_items_all,
+                )
+                if _seed_adjacent_rescue or _adjacent_rescue or _lexical_rescue:
+                    _last_chunk_indexes_by_source: dict[str, list[int]] = {}
+                    for _last_doc in last_chunks or []:
+                        if not isinstance(_last_doc, dict):
+                            continue
+                        _last_src = _followup_doc_source(_last_doc)
+                        _last_idx = _followup_doc_chunk_index(_last_doc)
+                        if _last_src and _last_idx is not None:
+                            _last_chunk_indexes_by_source.setdefault(_last_src, []).append(_last_idx)
+
+                    def _followup_rescue_distance(candidate: dict) -> int | None:
+                        _cand_src = _followup_doc_source(candidate)
+                        _cand_idx = _followup_doc_chunk_index(candidate)
+                        if not (_cand_src and _cand_idx is not None):
+                            return None
+                        _anchor_indexes = _last_chunk_indexes_by_source.get(_cand_src) or []
+                        if not _anchor_indexes:
+                            return None
+                        return min(abs(_cand_idx - _anchor_idx) for _anchor_idx in _anchor_indexes)
+
+                    def _followup_rescue_sort_score(candidate: dict) -> float:
+                        _base_score = _followup_explanation_candidate_score(
+                            targeted_item,
+                            _followup_doc_text(candidate),
+                            previous_list_items_all,
+                        )
+                        _min_distance = _followup_rescue_distance(candidate)
+                        if _min_distance is not None:
+                            if _min_distance <= 1:
+                                _base_score += 28.0
+                            elif _min_distance <= 5:
+                                _base_score += 22.0
+                            elif _min_distance <= 12:
+                                _base_score += 10.0
+                            elif _min_distance <= 25:
+                                _base_score -= 8.0
+                            elif _min_distance < 50:
+                                _base_score -= 14.0
+                            elif _min_distance >= 50:
+                                _base_score -= 18.0
+                        return _base_score
+
+                    _merged_rescue: list[dict] = []
+                    _seen_rescue: set[tuple[str, str]] = set()
+                    for _rescue_doc in (
+                        _seed_adjacent_rescue
+                        + _kept_rescue
+                        + _adjacent_rescue
+                        + _lexical_rescue
+                    ):
+                        _key = (
+                            _followup_doc_source(_rescue_doc),
+                            str(_followup_doc_chunk_index(_rescue_doc)),
+                        )
+                        if _key in _seen_rescue:
+                            continue
+                        _seen_rescue.add(_key)
+                        _merged_rescue.append(_rescue_doc)
+                    _merged_rescue.sort(key=_followup_rescue_sort_score, reverse=True)
+                    _nearby_rescue = [
+                        _rescue_doc for _rescue_doc in _merged_rescue
+                        if (_followup_rescue_distance(_rescue_doc) or 9999) <= 12
+                    ]
+                    _kept_rescue = (_nearby_rescue or _merged_rescue)[:4]
                 if _kept_rescue:
                     logger.info(
                         "[FOLLOWUP MICRO-RETRIEVAL] item=%r rescued=%d sources=%r",
                         targeted_item, len(_kept_rescue),
-                        sorted({c.get("source") for c in _kept_rescue if c.get("source")}),
+                        sorted({str(c.get("source")) for c in _kept_rescue if c.get("source")}),
                     )
                     # Append to excerpts_block (do not replace the prior
                     # context; just enrich it). Keeps the LLM grounded on
@@ -1170,10 +2384,50 @@ async def _handle_followup_query(text: str, connection_id: str):
         except Exception:
             logger.exception("[FOLLOWUP MICRO-RETRIEVAL] unexpected failure")
 
+    if targeted_item is not None and prev_is_list and len(extracted_items) == 1:
+        ai_text, evidence_level = _build_followup_targeted_evidence_answer(
+            targeted_item,
+            previous_list_items_all,
+            last_q,
+            last_a,
+            excerpts_block,
+        )
+        logger.info(
+            "[FOLLOWUP CONTROLLED LEVEL] level=%s item=%r",
+            evidence_level, targeted_item,
+        )
+        if ai_text == RAG_NO_MATCH_RESPONSE:
+            logger.info("[FOLLOWUP GROUNDING VERIFIED] level=no_evidence")
+            try:
+                last_answer_state.pop(connection_id, None)
+            except Exception:
+                pass
+            return (RAG_NO_MATCH_RESPONSE, [])
+        if evidence_level == "strong":
+            logger.info("[FOLLOWUP STRONG EVIDENCE] item=%r", targeted_item)
+        elif evidence_level == "weak":
+            logger.info(
+                "[FOLLOWUP STRICT MODE TRIGGERED] item=%r reason=no_explanatory_sentence list_lock_disabled=True",
+                targeted_item,
+            )
+            logger.info("[FOLLOWUP GROUNDING VERIFIED] level=no_explanatory_evidence")
+            try:
+                last_answer_state.pop(connection_id, None)
+            except Exception:
+                pass
+            return (RAG_NO_MATCH_RESPONSE, [])
+        logger.info("[FOLLOWUP GROUNDING VERIFIED] level=%s", evidence_level)
+        _update_followup_state(ai_text)
+        logger.info(
+            "[FOLLOWUP] answered locally | intent=%s prev_list=%s len=%d",
+            intent, prev_is_list, len(ai_text),
+        )
+        return (ai_text, [])
+
     # --- build instruction by intent + prior-answer shape ---
     if prev_is_list and extracted_items:
         items_block = "\n".join(f"- {item}" for item in extracted_items)
-        if intent == "simplify":
+        if followup_action == "simplify":
             instruction = (
                 "The PREVIOUS ANSWER contains the following list items:\n\n"
                 f"{items_block}\n\n"
@@ -1187,7 +2441,7 @@ async def _handle_followup_query(text: str, connection_id: str):
                 "- Do NOT skip any item.\n"
                 "- If you do not explain each item individually, the answer is INCORRECT."
             )
-        elif intent == "rephrase":
+        elif followup_action == "rephrase":
             instruction = (
                 "The PREVIOUS ANSWER contains the following list items:\n\n"
                 f"{items_block}\n\n"
@@ -1219,7 +2473,7 @@ async def _handle_followup_query(text: str, connection_id: str):
     elif prev_is_list:
         # Fallback: we know it's a list but couldn't extract items cleanly.
         # Still force per-item format.
-        if intent == "simplify":
+        if followup_action == "simplify":
             instruction = (
                 "The PREVIOUS ANSWER is a list. For EACH item in the list, output one line:\n"
                 "ItemName: short plain-language clarification (max ~15 words)\n\n"
@@ -1228,7 +2482,7 @@ async def _handle_followup_query(text: str, connection_id: str):
                 "Do NOT invent new items. Do NOT skip any item.\n"
                 "If you do not explain each item individually, the answer is INCORRECT."
             )
-        elif intent == "rephrase":
+        elif followup_action == "rephrase":
             instruction = (
                 "The PREVIOUS ANSWER is a list. For EACH item in the list, output one line:\n"
                 "ItemName: rephrased description in different wording\n\n"
@@ -1248,14 +2502,14 @@ async def _handle_followup_query(text: str, connection_id: str):
                 "If you do not explain each item individually, the answer is INCORRECT."
             )
     else:
-        if intent == "simplify":
+        if followup_action == "simplify":
             instruction = (
                 "Restate the PREVIOUS ANSWER in 2-4 short sentences using simpler, plainer "
                 "language. Use ONLY information already present in the PREVIOUS ANSWER and "
                 "SOURCE EXCERPTS. Do NOT add any fact, name, number, definition, or example "
                 "that is not already there."
             )
-        elif intent == "rephrase":
+        elif followup_action == "rephrase":
             instruction = (
                 "Rephrase the PREVIOUS ANSWER in 2-4 sentences using clearer, different "
                 "wording. Use ONLY information already present in the PREVIOUS ANSWER and "
@@ -1423,21 +2677,47 @@ async def _handle_followup_query(text: str, connection_id: str):
                     _anchored, last_q, last_a, excerpts_block, text
                 )
             if _ce:
+                _expl_score_d = _compute_explanation_grounding_score(
+                    _ce, excerpts_block, last_a
+                )
                 logger.info(
-                    "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                    "[FOLLOWUP GROUNDING SCORE] score=%.2f threshold=%.2f",
+                    _expl_score_d, _FOLLOWUP_EXPL_GROUND_THRESHOLD,
                 )
-                ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
+                if _expl_score_d < _FOLLOWUP_EXPL_GROUND_THRESHOLD:
+                    logger.info(
+                        "[FOLLOWUP STRICT MODE TRIGGERED] score=%.2f -> limited explanation",
+                        _expl_score_d,
+                    )
+                    logger.info("[FOLLOWUP LIMITED EXPLANATION]")
+                    ai_text = _build_grounded_explanations_for_items(
+                        last_q,
+                        extracted_items,
+                        [{"text": excerpts_block}, {"text": last_a}],
+                    )
+                    if not ai_text:
+                        return (RAG_NO_MATCH_RESPONSE, [])
+                else:
+                    logger.info(
+                        "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                    )
+                    ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
             elif targeted_item is not None and len(extracted_items) == 1:
-                _itm = extracted_items[0]
-                ai_text = (
-                    f"{_itm} is listed in the document as one of the items, "
-                    "but the available text does not provide a further explanation for it."
+                ai_text = _build_grounded_explanation(
+                    last_q,
+                    extracted_items[0],
+                    [{"text": excerpts_block}, {"text": last_a}],
                 )
+                if ai_text == RAG_NO_MATCH_RESPONSE:
+                    return (RAG_NO_MATCH_RESPONSE, [])
             else:
-                ai_text = "\n".join(
-                    f"{item}: the document lists this item but does not explain it further"
-                    for item in extracted_items
+                ai_text = _build_grounded_explanations_for_items(
+                    last_q,
+                    extracted_items,
+                    [{"text": excerpts_block}, {"text": last_a}],
                 )
+                if not ai_text:
+                    return (RAG_NO_MATCH_RESPONSE, [])
 
     # Strip a trailing not-found sentinel that the model sometimes appends
     # despite the instruction. Done BEFORE the empty/not-found check so a
@@ -1503,21 +2783,48 @@ async def _handle_followup_query(text: str, connection_id: str):
                         _anchored, last_q, last_a, excerpts_block, text
                     )
                 if _ce:
+                    _expl_score_w = _compute_explanation_grounding_score(
+                        _ce, excerpts_block, last_a
+                    )
                     logger.info(
-                        "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                        "[FOLLOWUP GROUNDING SCORE] score=%.2f threshold=%.2f",
+                        _expl_score_w, _FOLLOWUP_EXPL_GROUND_THRESHOLD,
                     )
-                    ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
+                    if _expl_score_w < _FOLLOWUP_EXPL_GROUND_THRESHOLD:
+                        logger.info(
+                            "[FOLLOWUP STRICT MODE TRIGGERED] score=%.2f -> limited explanation",
+                            _expl_score_w,
+                        )
+                        logger.info("[FOLLOWUP LIMITED EXPLANATION]")
+                        logger.info("[FOLLOWUP GROUNDING VERIFIED]")
+                        ai_text = _build_grounded_explanations_for_items(
+                            last_q,
+                            extracted_items,
+                            [{"text": excerpts_block}, {"text": last_a}],
+                        )
+                        if not ai_text:
+                            return (RAG_NO_MATCH_RESPONSE, [])
+                    else:
+                        logger.info(
+                            "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
+                        )
+                        ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
                 elif targeted_item is not None and len(extracted_items) == 1:
-                    _itm = extracted_items[0]
-                    ai_text = (
-                        f"{_itm} is listed in the document as one of the items, "
-                        "but the available text does not provide a further explanation for it."
+                    ai_text = _build_grounded_explanation(
+                        last_q,
+                        extracted_items[0],
+                        [{"text": excerpts_block}, {"text": last_a}],
                     )
+                    if ai_text == RAG_NO_MATCH_RESPONSE:
+                        return (RAG_NO_MATCH_RESPONSE, [])
                 else:
-                    ai_text = "\n".join(
-                        f"{item}: the document lists this item but does not explain it further"
-                        for item in extracted_items
+                    ai_text = _build_grounded_explanations_for_items(
+                        last_q,
+                        extracted_items,
+                        [{"text": excerpts_block}, {"text": last_a}],
                     )
+                    if not ai_text:
+                        return (RAG_NO_MATCH_RESPONSE, [])
             else:
                 logger.info(
                     "[FOLLOWUP GROUNDING WEAK] overlap_ratio=%.2f threshold=%.2f -> not_found",
@@ -1542,50 +2849,24 @@ async def _handle_followup_query(text: str, connection_id: str):
         and not _evidence_has_explicit_explanation(targeted_item, excerpts_block)
     ):
         _itm = extracted_items[0]
-        _anchored = _followup_items_anchored([_itm], excerpts_block, last_a)
-        if _anchored:
-            logger.info("[FOLLOWUP EXPLANATION MODE TRIGGERED]")
-            logger.info(
-                "[FOLLOWUP EXPLANATION ITEM = %s]", _anchored[0]
-            )
-            _ce = await _followup_controlled_explanation(
-                _anchored, last_q, last_a, excerpts_block, text
-            )
-            if _ce:
-                logger.info(
-                    "[FOLLOWUP EXPLANATION SOURCE = inferred_from_context]"
-                )
-                ai_text = _ce.rstrip() + "\n\n" + _FOLLOWUP_INFERRED_SUFFIX
-            else:
-                logger.info(
-                    "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
-                    _itm,
-                )
-                ai_text = (
-                    f"{_itm} is mentioned in the document, "
-                    "but the available text does not provide a further explanation for it."
-                )
-        else:
-            logger.info(
-                "[FOLLOWUP WEAK EVIDENCE] item=%r -> downgrade to mention-only",
-                _itm,
-            )
-            ai_text = (
-                f"{_itm} is mentioned in the document, "
-                "but the available text does not provide a further explanation for it."
-            )
+        # When the retrieved evidence only lists the item without an
+        # explanatory sentence, do not fall back to a list-relationship
+        # explanation. Follow-up explanation mode must be grounded in
+        # descriptive document text or fail strictly.
+        logger.info(
+            "[FOLLOWUP STRICT MODE TRIGGERED] item=%r no_explicit_evidence list_lock_disabled=True",
+            _itm,
+        )
+        logger.info("[FOLLOWUP GROUNDING VERIFIED] level=no_explanatory_evidence")
+        try:
+            last_answer_state.pop(connection_id, None)
+        except Exception:
+            pass
+        return (RAG_NO_MATCH_RESPONSE, [])
 
     # Update state so successive "explain more" works on the latest explanation,
     # but PRESERVE the original chunks (never broaden the grounding window).
-    try:
-        last_answer_state[connection_id] = {
-            "query": (text or "").strip(),
-            "answer": ai_text,
-            "chunks": last_chunks,
-            "ts": time.time(),
-        }
-    except Exception:
-        pass
+    _update_followup_state(ai_text)
 
     logger.info(
         "[FOLLOWUP] answered locally | intent=%s prev_list=%s len=%d",
@@ -3753,7 +5034,7 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             return -10**9
         if re.search(r"\b(?:believed|famous|educator|founder|introduced\s+by|developed\s+by|born|died|stimulus\s+response)\b", low):
             return -10**9
-        if re.search(r"\b(?:in\s+dividual|for\s+mula|psy\s+chology|struc\s+turalism|func\s+tionalism)\b", low):
+        if re.search(r"\b(?:in\s+dividual|for\s+mula)\b", low):
             return -10**9
 
         def_verb = bool(re.search(r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on|characterized\s+by)\b", low))
@@ -3873,7 +5154,7 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
         ranked.sort(key=lambda x: x[0], reverse=True)
         for _score, candidate in ranked:
             if _passes_strict_definition_relevance_guard(query_text, candidate):
-                return candidate
+                return _append_rich_definition_context(query_text, docs, candidate)
 
     for candidate in candidates:
         cleaned = _cleanup_final_answer_text(str(candidate or "").strip())
@@ -3891,8 +5172,156 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
             if prefix_words >= 3 and len(re.findall(r"[A-Za-z][A-Za-z0-9\-']*", tail)) >= 5:
                 cleaned = tail
         if _passes_strict_definition_relevance_guard(query_text, cleaned):
-            return cleaned
+            return _append_rich_definition_context(query_text, docs, cleaned)
     return None
+
+
+def _append_rich_definition_context(query_text: str, docs: list[dict], base_answer: str) -> str:
+    """Append at most two nearby grounded context sentences to a definition.
+
+    The direct definition remains first. Extra sentences must come from the
+    selected document chunks near the definition sentence and must share the
+    queried entity or substantive terms from the definition itself.
+    """
+    base = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(base_answer or "").strip()))
+    if not base or base == RAG_NO_MATCH_RESPONSE:
+        logger.info("[RICH DEF SKIPPED reason=empty_base]")
+        return base_answer
+
+    has_entity, entity = _extract_entity_from_definition_query(query_text)
+    entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
+    if not entity_l:
+        logger.info("[RICH DEF SKIPPED reason=no_entity]")
+        return base
+    if not docs:
+        logger.info("[RICH DEF SKIPPED reason=no_docs]")
+        return base
+
+    base_sentences = [s.strip() for s in _split_text_into_sentences(base) if s.strip()]
+    if len(base_sentences) >= 3:
+        logger.info("[RICH DEF SKIPPED reason=already_rich]")
+        return base
+
+    stop = {
+        "the", "and", "for", "with", "that", "this", "from", "into", "about", "were", "have", "has",
+        "what", "which", "who", "when", "where", "why", "how", "their", "there", "your", "than",
+        "document", "according", "provided", "context", "based", "defined", "refers", "means", "study",
+        "scientific", "can", "being", "been", "are", "was", "one", "two", "each", "also",
+    }
+    entity_tokens = set(re.findall(r"[a-z0-9]{3,}", entity_l))
+
+    def _content_tokens(text: str) -> set[str]:
+        return {
+            t for t in re.findall(r"[a-z0-9]{3,}", str(text or "").lower())
+            if t not in stop and t not in entity_tokens
+        }
+
+    base_tokens = _content_tokens(base)
+    if not base_tokens:
+        logger.info("[RICH DEF SKIPPED reason=no_base_terms]")
+        return base
+
+    base_norms = {
+        re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+        for s in base_sentences
+        if s.strip()
+    }
+    scored: list[tuple[float, str]] = []
+    seen: set[str] = set()
+
+    for doc_i, d in enumerate((docs or [])[:4]):
+        text = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+        if not text.strip():
+            continue
+        sentences = [re.sub(r"\s+", " ", s).strip() for s in _split_text_into_sentences(text) if re.sub(r"\s+", " ", s).strip()]
+        if not sentences:
+            continue
+
+        anchor_indexes: list[int] = []
+        for i, sent in enumerate(sentences[:80]):
+            low = sent.lower()
+            norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
+            if norm in base_norms:
+                anchor_indexes.append(i)
+                continue
+            if entity_l and re.search(rf"\b{re.escape(entity_l)}\b", low) and re.search(
+                r"\b(?:is|are|refers\s+to|defined\s+as|means|involves|includes|focuses\s+on)\b",
+                low,
+            ):
+                anchor_indexes.append(i)
+        if not anchor_indexes:
+            continue
+
+        for anchor_i in anchor_indexes[:2]:
+            window_start = max(0, anchor_i - 1)
+            window_end = min(len(sentences), anchor_i + 5)
+            for j in range(window_start, window_end):
+                if j == anchor_i:
+                    continue
+                sent = sentences[j]
+                low = sent.lower()
+                norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
+                if not norm or norm in seen or norm in base_norms:
+                    continue
+                if len(sent) > 260:
+                    continue
+                words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", sent)
+                if len(words) < 7 or len(words) > 36:
+                    continue
+                if sent.endswith("?") or _looks_table_or_heading_like_chunk(sent):
+                    continue
+                if re.match(r"^\s*(?:table|figure|chapter|section|contents|references?)\b", low):
+                    continue
+                if re.search(r"\b(?:copyright|table\s+of\s+contents|references?|chapter\s+objectives?)\b", low):
+                    continue
+                if re.search(r"\b(?:for\s+example|e\.g\.|example[s]?\s+include)\b", low):
+                    continue
+                cand_tokens = _content_tokens(sent)
+                shared = cand_tokens & base_tokens
+                sent_has_entity = bool(entity_l and re.search(rf"\b{re.escape(entity_l)}\b", low))
+                if not sent_has_entity and len(shared) < 1:
+                    continue
+                score = float(len(shared) * 2)
+                score += 1.5 if sent_has_entity else 0.0
+                score += max(0.0, 2.0 - (abs(j - anchor_i) * 0.45))
+                if re.search(r"\b(?:means|refers\s+to|is|are|includes|involves|consists\s+of|focuses\s+on|describes)\b", low):
+                    score += 0.8
+                score -= doc_i * 0.2
+                seen.add(norm)
+                scored.append((score, sent.rstrip(" .;:") + "."))
+
+    if not scored:
+        logger.info("[RICH DEF SKIPPED reason=no_nearby_context]")
+        return base
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+    chosen: list[str] = []
+    chosen_norms: set[str] = set()
+    for _score, sent in scored:
+        norm = re.sub(r"[^a-z0-9]+", " ", sent.lower()).strip()
+        if not norm or norm in chosen_norms:
+            continue
+        if chosen:
+            current_tokens = _content_tokens(sent)
+            previous_tokens = set().union(*[_content_tokens(s) for s in chosen]) if chosen else set()
+            if current_tokens and previous_tokens and len(current_tokens & previous_tokens) / max(1, len(current_tokens)) > 0.72:
+                continue
+        chosen.append(sent)
+        chosen_norms.add(norm)
+        if len(chosen) >= max(0, 3 - len(base_sentences)):
+            break
+
+    if not chosen:
+        logger.info("[RICH DEF SKIPPED reason=duplicate_context]")
+        return base
+
+    logger.info("[RICH DEF CONTEXT FOUND] candidates=%d chosen=%d", len(scored), len(chosen))
+    enriched = _cleanup_final_answer_text(" ".join([base] + chosen))
+    if not _is_answer_grounded_in_docs(enriched, docs, query_text=query_text):
+        logger.info("[RICH DEF SKIPPED reason=grounding_failed]")
+        return base
+    logger.info("[RICH DEF APPENDED] sentences=%d", len(chosen))
+    return enriched
 
 
 def _mpc6_anchor_score_for_text(text: str, query_text: str) -> int:
@@ -3975,7 +5404,7 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
         # contain ALL of them. Prevents accepting a list whose primary chunk is missing a
         # distinguishing query token (e.g. the chunk has "management" but not "six").
         # Generic: only inspects whether each query token appears in the first source chunk.
-        if 2 <= len(query_terms) <= 4 and support_docs:
+        if 2 <= len(query_terms) <= 4 and support_docs and (not _is_structure_query(query_text)):
             first_blob = str(
                 (support_docs[0] or {}).get("page_content")
                 or (support_docs[0] or {}).get("text")
@@ -4037,6 +5466,70 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
         for d in candidate_docs
         if str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
     )
+
+    if _is_structure_query(query_text):
+        logger.info("[STRUCTURE QUERY DETECTED] query=%s", str(query_text or "")[:160])
+
+        structure_sentence_answer = _extract_structure_concept_cluster_from_docs(query_text, candidate_docs, max_docs=8)
+        if structure_sentence_answer and _list_relevance_ok(structure_sentence_answer, candidate_docs):
+            logger.info("[STRUCTURE QUERY RESCUE] route_sentence_cluster=true")
+            logger.info("[STRUCTURE ANSWER FINAL] source=route_sentence_cluster")
+            return structure_sentence_answer
+
+        def _clean_structure_label_candidate(raw_answer: str, source_text: str) -> str | None:
+            shaped_answer = _sanitize_list_answer_text(query_text, str(raw_answer or ""))
+            if not shaped_answer:
+                return None
+            source_has_structure_word = bool(_STRUCTURE_QUERY_RE.search(str(source_text or "")))
+            if not source_has_structure_word:
+                logger.info("[JUNK LABEL REJECTED] reason=no_explicit_structure_word_in_candidate")
+                return None
+            labels: list[str] = []
+            norms: set[str] = set()
+            source_low = str(source_text or "").lower()
+            for line in str(shaped_answer or "").splitlines():
+                item = re.sub(r"^\s*[-*•]\s+", "", line).strip(" .;:-")
+                if not item:
+                    continue
+                words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+                if not (1 <= len(words) <= 5):
+                    return None
+                if re.search(r"\b(?:is|are|was|were|has|have|include|includes|refers|means|allows|helps|drives)\b", item, flags=re.IGNORECASE):
+                    return None
+                if re.search(r"[.!?]", item):
+                    return None
+                if len(words) == 1 and item[:1].islower() and re.match(r"^(?:the|and|or|to|of|for|in|on|with)[a-z]", item.lower()):
+                    return None
+                if len(words) == 1 and item.lower() in {"modern", "historical", "theoretical", "essential", "general", "basic", "important", "major", "main", "chapter", "section", "overview", "introduction", "summary", "contents"}:
+                    logger.info("[JUNK LABEL REJECTED] reason=generic_single_word label=%s", item[:80])
+                    return None
+                item_norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+                if not item_norm or item_norm in norms:
+                    continue
+                item_terms = [w.lower() for w in words if len(w) >= 3]
+                if item_terms and not any(re.search(rf"\b{re.escape(w)}\b", source_low) for w in item_terms):
+                    return None
+                norms.add(item_norm)
+                labels.append(item[:1].upper() + item[1:])
+            if len(labels) < 3:
+                return None
+            cluster_answer = "\n".join(f"- {label}" for label in labels[:12])
+            logger.info("[CONCEPT CLUSTER DETECTED] count=%d", len(labels))
+            logger.info("[STRUCTURE QUERY RESCUE] route_preferred_labels=true items=%d", len(labels))
+            logger.info("[STRUCTURE ANSWER FINAL] source=route_preferred_labels items=%d", len(labels))
+            return cluster_answer
+
+        for d in candidate_docs[:8]:
+            dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+            if not dtxt.strip() or not _STRUCTURE_QUERY_RE.search(dtxt):
+                continue
+            for raw_candidate in (
+                _extract_list_from_context(query_text, dtxt, max_candidate_blocks=3),
+                _extract_simple_list_from_docs([d], query_text=query_text),
+            ):
+                structure_answer = _clean_structure_label_candidate(str(raw_candidate or ""), dtxt)
+                if structure_answer and _list_relevance_ok(structure_answer, [d]):
+                    return structure_answer
 
     # MP-C6: prefer per-chunk anchored extraction on any doc whose body has a
     # structural subsection / caption matching the query focus tokens. This
@@ -4153,30 +5646,6 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
             shaped = _sanitize_list_answer_text(query_text, "\n".join(f"- {x}" for x in parsed_items))
             if shaped and _list_relevance_ok(shaped, docs[:5]):
                 return shaped
-
-    # DISABLED_CHEATING_LOGIC: Topic-specific psychology label extraction branch.
-    # if "psychology" in q_norm and re.search(r"\b(?:area|areas|branch|branches|type|types|field|fields|category|categories)\b", q_norm):
-    #     psych_labels: list[str] = []
-    #     seen_psych: set[str] = set()
-    #     for d in docs[:5]:
-    #         dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
-    #         if not dtxt.strip():
-    #             continue
-    #         for m in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\s+psychology)\b", dtxt):
-    #             lbl = re.sub(r"\s+", " ", (m.group(1) or "").strip())
-    #             norm = re.sub(r"[^a-z0-9]+", " ", lbl.lower()).strip()
-    #             if not norm or norm in seen_psych:
-    #                 continue
-    #             seen_psych.add(norm)
-    #             psych_labels.append(lbl)
-    #             if len(psych_labels) >= 8:
-    #                 break
-    #         if len(psych_labels) >= 8:
-    #             break
-    #     if len(psych_labels) >= 3:
-    #         shaped = _sanitize_list_answer_text(query_text, "\n".join(f"- {x}" for x in psych_labels))
-    #         if shaped and _list_relevance_ok(shaped, docs[:5]):
-    #             return shaped
 
     return None
 
@@ -4646,7 +6115,7 @@ def _is_explanation_sentence_for_entity(sentence: str, entity: str, chunk_is_top
         if not (chunk_is_topic and token_hits >= 1):
             return False
 
-    if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+    if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
         return False
 
     if re.search(r"\b(?:one\s+of\s+the\s+components?|listed\s+with|associating\s+model|the\s+answers\s+to\s+all\s+these\s+questions\s+can\s+be\s+found)\b", s_low):
@@ -5498,7 +6967,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
                 return -10**9
             if re.search(r"\bby\s+[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", sent):
                 score -= 1.5
-            if re.search(r"\b(?:in\s+dividual|for\s+mula|psy\s+chology|struc\s+turalism|func\s+tionalism)\b", low):
+            if re.search(r"\b(?:in\s+dividual|for\s+mula)\b", low):
                 score -= 1.6
             if entity_l:
                 ent_m = re.search(rf"\b{re.escape(entity_l)}\b", low)
@@ -5724,7 +7193,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
             and (not _is_fragmentary_garbage(ans))
             and (not _is_incomplete_definition_fragment(ans))
             and (not re.search(r"\b(?:believed|famous|educator|founder|introduced\s+by|developed\s+by|born|died|stimulus\s+response)\b", ans, flags=re.IGNORECASE))
-            and (not re.search(r"\b(?:in\s+dividual|for\s+mula|psy\s+chology|struc\s+turalism|func\s+tionalism)\b", ans, flags=re.IGNORECASE))
+            and (not re.search(r"\b(?:in\s+dividual|for\s+mula)\b", ans, flags=re.IGNORECASE))
             and _passes_strict_definition_relevance_guard(query, ans)
         ):
             strict_answer_lock = True
@@ -5822,7 +7291,7 @@ def _best_term_explanation_from_docs(term: str, docs: list[dict]) -> tuple[str, 
                 continue
             if len(s) > 200:
                 continue
-            if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+            if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
                 continue
             if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
                 continue
@@ -5847,7 +7316,7 @@ def _best_term_explanation_from_docs(term: str, docs: list[dict]) -> tuple[str, 
                 sl = s.lower()
                 if len(s) < 30 or len(s) > 220:
                     continue
-                if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+                if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
                     continue
                 if re.search(r"\b(?:one\s+of\s+the\s+components?|listed\s+with|associating\s+model|the\s+answers\s+to\s+all\s+these\s+questions\s+can\s+be\s+found|answers\s+to\s+all\s+these\s+questions)\b", sl):
                     continue
@@ -5916,7 +7385,7 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
                     continue
                 if _is_definition_boilerplate_sentence(s):
                     continue
-                if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+                if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
                     continue
                 if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
                     continue
@@ -5968,7 +7437,7 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
                     word_count = len(re.findall(r"[a-z0-9]+", sl))
                     if word_count < 8 or word_count > 34:
                         continue
-                    if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+                    if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
                         continue
                     if s.count("•") >= 1 or re.search(r"\btable\b|\bfigure\b", sl):
                         continue
@@ -6026,7 +7495,7 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
         if not s:
             return True
         sl = s.lower()
-        if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+        if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
             return True
         if re.search(r"\b(?:is|refers\s+to|defined\s+as|means|forms\s+an\s+association|associates)\b", sl):
             return False
@@ -6042,8 +7511,6 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
     if _is_fragment_like_compare_sentence(left, str(left_sent or "")):
         if left_rescue and not _is_fragment_like_compare_sentence(left, left_rescue):
             left_sent, left_md = left_rescue, left_rescue_md
-        elif left.lower() == "classical conditioning":
-            left_sent = "Classical conditioning forms an association between stimuli, where a neutral stimulus comes to trigger a learned response."
 
     if _is_fragment_like_compare_sentence(right, str(right_sent or "")):
         if right_rescue and not _is_fragment_like_compare_sentence(right, right_rescue):
@@ -6152,13 +7619,16 @@ def is_indirect_entity_explanation(sentence: str, entity: str) -> bool:
         r"\bconsists\s+of\b",
         r"\bimprovement\s+over\b",
         r"\bimprovements\s+over\b",
-        r"\bstud(?:ied|y)\s+scientifically\b",
-        r"\bbest\s+and\s+cheapest\s+way\b",
-        r"\bone\s+best\s+way\b",
-        r"\btime\s+and\s+motion\b",
-        r"\bwork\s+study\b",
-        r"\befficien(?:cy|t)\b",
-        r"\bproductiv(?:ity|e)\b",
+        r"\bdefined\s+as\b",
+        r"\brefers\s+to\b",
+        r"\bmeans\b",
+        r"\binvolves?\b",
+        r"\buses?\b",
+        r"\baims?\s+to\b",
+        r"\bused\s+to\b",
+        r"\bpurposes?\b",
+        r"\bfunctions?\b",
+        r"\broles?\b",
     ]
     descriptive_re = re.compile("|".join(descriptive_cues), re.IGNORECASE)
     if not descriptive_re.search(s_l):
@@ -6399,18 +7869,27 @@ def _mentions_other_approach(text: str, entity: str) -> bool:
     e = re.sub(r"\s+", " ", str(entity or "").strip().lower())
     if not s:
         return False
-    other_concepts = (
-        "quantitative approach",
-        "mathematical approach",
-        "behavioral approach",
-        "system approach",
-        "situational approach",
-        "contingency approach",
-        "human relations approach",
+    if e and re.search(rf"\b{re.escape(e)}\b", s):
+        return False
+    concept_suffix_re = re.compile(
+        r"\b[a-z][a-z0-9\-]*(?:\s+[a-z][a-z0-9\-]*){0,3}\s+"
+        r"(?:approach|theory|model|system|method|framework|school|perspective)\b"
     )
-    if any(re.search(rf"\b{re.escape(c)}\b", s) for c in other_concepts):
-        if e and re.search(rf"\b{re.escape(e)}\b", s):
-            return False
+    candidates = {
+        re.sub(r"\s+", " ", m.group(0)).strip()
+        for m in concept_suffix_re.finditer(s)
+    }
+    if not candidates:
+        return False
+    if not e:
+        return True
+    e_tokens = set(_definition_entity_tokens(e))
+    for candidate in candidates:
+        if candidate == e:
+            continue
+        cand_tokens = set(_definition_entity_tokens(candidate))
+        if cand_tokens and e_tokens and len(cand_tokens & e_tokens) >= max(1, min(2, len(e_tokens))):
+            continue
         return True
     return False
 
@@ -6582,22 +8061,20 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
             r"\bgrew\s+out\s+of\b",
             r"\bprinciples?\b",
             r"\bmethods?\b",
-            r"\befficiency\b",
-            r"\bproductivity\b",
-            r"\blower\s+costs?\b",
-            r"\bbest\s+and\s+cheapest\s+way\b",
-            r"\bstud(?:ied|y)\s+scientifically\b",
-            r"\bone\s+best\s+way\b",
-            r"\btime\s+and\s+motion\b",
-            r"\bwork\s+study\b",
+            r"\bpurposes?\b",
+            r"\bfunctions?\b",
+            r"\broles?\b",
+            r"\binvolves?\b",
+            r"\bincludes?\b",
+            r"\baims?\s+to\b",
+            r"\bused\s+to\b",
+            r"\bconsists?\s+of\b",
         ]
         explanatory_hits = sum(1 for pat in explanatory_cues if re.search(pat, s_l, flags=re.IGNORECASE))
         explanatory_boost = min(3.2, 0.95 * explanatory_hits)
 
         strong_explanatory_phrase_boost = 0.0
-        if re.search(r"\bbest\s+and\s+cheapest\s+way\b", s_l, flags=re.IGNORECASE):
-            strong_explanatory_phrase_boost += 2.2
-        if re.search(r"\bstud(?:ied|y)\s+scientifically\b", s_l, flags=re.IGNORECASE):
+        if re.search(r"\b(?:defined\s+as|refers\s+to|means|is\s+used\s+to|aims?\s+to|focus(?:es|ed)\s+on)\b", s_l, flags=re.IGNORECASE):
             strong_explanatory_phrase_boost += 1.8
         # DISABLED_CHEATING_LOGIC: Domain-specific principles+scientific boost.
         # if re.search(r"\b(?:principles?|methods?)\b", s_l, flags=re.IGNORECASE) and re.search(r"\bscientific\b", s_l, flags=re.IGNORECASE):
@@ -6629,7 +8106,7 @@ def collect_indirect_entity_evidence(text: str, entity: str, return_scored: bool
 
         historical_context_penalty = 0.0
         if re.search(r"\b(?:come\s+to\s+mind\s+whenever|changed\s+over\s+time|histor(?:y|ical)|era|you\s+can\s+also\s+call\s+it)\b", s_l, flags=re.IGNORECASE):
-            if not re.search(r"\b(?:is|refers\s+to|means|defined\s+as|best\s+and\s+cheapest\s+way|stud(?:ied|y)\s+scientifically)\b", s_l, flags=re.IGNORECASE):
+            if not re.search(r"\b(?:is|refers\s+to|means|defined\s+as|includes?|involves?|focus(?:es|ed)\s+on|aims?\s+to)\b", s_l, flags=re.IGNORECASE):
                 historical_context_penalty = 4.4
 
         broken_fragment_penalty = 0.0
@@ -6723,7 +8200,7 @@ def _extract_relation_subject_terms(query_text: str, fact_type: str | None) -> l
 
 def _has_likely_person_name_for_fact_relation(text: str) -> bool:
     person_noise_tokens = {
-        "model", "models", "theory", "approach", "therapy",
+        "model", "models", "theory", "approach",
         "introduction", "chapter", "division", "university",
         "science", "scientific", "learning",
     }
@@ -6763,12 +8240,6 @@ def _chunk_satisfies_fact_relation_rule(chunk_text: str, query_text: str, fact_t
                     sl,
                 )
             )
-            # DISABLED_CHEATING_LOGIC: Topic-specific father/psychology relation filter.
-            # if "father" in ql and "psycholog" in ql:
-            #     if re.search(r"\bsport\s+psycholog\w*\b", sl):
-            #         continue
-            #     if not re.search(r"\bfather\s+of\b", sl):
-            #         continue
             if has_person_name and has_action_verb and has_subject:
                 return True
 
@@ -7334,9 +8805,6 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             focus_hits = sum(1 for t in query_focus_terms if re.search(rf"\b{re.escape(t)}\b", txt))
             if chunk_entities and has_action and (focus_hits >= 1):
                 direct_fact_bonus += 0.85
-            # DISABLED_CHEATING_LOGIC: Topic-specific psychology bonus.
-            # if re.search(r"\bpsycholog\w*\b", txt) and re.search(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
-            #     direct_fact_bonus += 0.55
             if "father" in query_actions and re.search(r"\bfather\s+of\b", txt):
                 direct_fact_bonus += 0.5
                 direct_fact_bonus += 2.2
@@ -7346,14 +8814,6 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
                 direct_fact_bonus += 1.3
                 direct_fact_bonus += 1.0
                 direct_fact_bonus += 1.6
-            # DISABLED_CHEATING_LOGIC: Topic-specific father/psychology frequency bonus.
-            # if "father" in q_terms and person_name_counts and re.search(r"\bpsycholog\w*\b", txt):
-            #     max_freq = 0
-            #     for nm in re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b", txt_raw):
-            #         norm_nm = " ".join(str(nm).split()).strip().lower()
-            #         max_freq = max(max_freq, int(person_name_counts.get(norm_nm, 0)))
-            #     if max_freq >= 2:
-            #         direct_fact_bonus += min(0.9, 0.35 * float(max_freq))
         elif fact_type == "when":
             if chunk_years and re.search(r"\b(?:in|during|year|emerged|established|introduced|proposed|first)\b", txt):
                 direct_fact_bonus += 0.9
@@ -7372,12 +8832,6 @@ def _select_fact_anchor_docs(query_text: str, docs: list[dict], top_k: int = 5, 
             generic_penalty += 1.1
             generic_penalty += 0.85
             generic_penalty += 1.5
-        # DISABLED_CHEATING_LOGIC: Topic-specific sport-psychology penalty routing.
-        # if "father" in q_terms and re.search(r"\bfather\s+of\s+sport\s+psycholog\w*\b", txt):
-        #     generic_penalty += 2.2
-        # if "father" in q_terms and re.search(r"\bsport\s+psycholog\w*\b", txt):
-        #     generic_penalty += 1.6
-        #     generic_penalty += 1.25
         if query_acronyms and not any(re.search(rf"\b{re.escape(a.lower())}\b", txt) for a in query_acronyms):
             generic_penalty += 0.95
             generic_penalty += 1.4
@@ -7826,11 +9280,6 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
             if _looks_table_or_heading_like_chunk(txt_raw[:1800]) or table_or_classification_re.search(txt[:1400]) or list_like_re.search(txt_raw):
                 bonus -= 0.20
                 retrieval_boost_applied = True
-
-            # DISABLED_CHEATING_LOGIC: Domain-specific retrieval boost for classical/scientific management terms.
-            # if re.search(r"\bclassical\s+approach\b", txt) or re.search(r"\bscientific\s+management\b", txt):
-            #     bonus += 0.30
-            #     retrieval_boost_applied = True
 
             if retrieval_boost_applied:
                 logger.info("[DEF BOOST] before=%.3f after=%.3f", def_boost_before, float(bonus))
@@ -10577,7 +12026,7 @@ def _extract_multichunk_who_candidate(query_text: str, docs: list[dict]) -> Opti
             return ""
         bad_tokens = {
             "that", "this", "these", "those", "about", "other", "people", "objects", "events",
-            "behaviors", "beliefs", "model", "models", "theory", "approach", "therapy",
+            "behaviors", "beliefs", "model", "models", "theory", "approach",
         }
         if any(p.lower() in bad_tokens for p in parts):
             return ""
@@ -12138,7 +13587,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             return True
         if re.search(r"\bwho\s+is\s+.+?\s+most\s+effective\s+with\b", low):
             return True
-        if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", sentence, flags=re.IGNORECASE):
+        if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", sentence, flags=re.IGNORECASE):
             return True
         if sentence.count("•") >= 2:
             return True
@@ -13076,7 +14525,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 if wc < 8 or wc > 35:
                     continue
                 score = float(token_hits)
-                if re.search(r"\b(is|refers to|defined as|known as|means|method|approach|efficiency)\b", low):
+                if re.search(r"\b(is|refers to|defined as|known as|means|method|approach|purpose|function|role)\b", low):
                     score += 1.2
                 if score > best_score:
                     best_score = score
@@ -13190,168 +14639,6 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
                 return f"{person_cell} is associated with {concept_title}."
 
     def _extract_related_concept_sentence_from_docs(source_docs: list[dict]) -> str | None:
-        return None
-
-        relation_kw_re = re.compile(
-            r"\b(?:includes?|including|consists\s+of|classification|approach)\b",
-            flags=re.IGNORECASE,
-        )
-        split_item_re = re.compile(r"\s*(?:,|;|\band\b|\bor\b)\s*", flags=re.IGNORECASE)
-
-        def _sentences(src: str) -> List[str]:
-            return [s.strip() for s in re.split(r"(?<=[.!?])\s+|\n+", src or "") if s.strip()]
-
-        def _clean_parent(parent: str) -> str:
-            p = re.sub(r"\s+", " ", str(parent or "").strip().lower())
-            p = p.replace("appraoch", "approach")
-            p = re.sub(r"^(?:the|a|an)\s+", "", p)
-            p = re.sub(r"\b(?:such\s+as|namely)\b.*$", "", p).strip(" ,;:-")
-            return p
-
-        def _find_contributor_for_entity(src: str) -> str | None:
-            ent_tokens = [t for t in re.findall(r"[a-z0-9]{2,}", entity_l) if t not in {"the", "a", "an", "of", "and", "in", "to"}]
-            ent_need = max(1, min(2, len(ent_tokens))) if ent_tokens else 1
-            for raw_line in (src or "").splitlines():
-                line_norm = re.sub(r"\s+", " ", str(raw_line or "").strip())
-                if not line_norm:
-                    continue
-                pair = _extract_concept_person_pair_from_line(line_norm)
-                if not pair:
-                    continue
-                concept_cell, person_cell = pair
-                concept_low = concept_cell.lower()
-                phrase_hit = bool(re.search(rf"\b{re.escape(entity_l)}\b", concept_low))
-                token_hits = sum(1 for tok in ent_tokens if re.search(rf"\b{re.escape(tok)}\b", concept_low))
-                if (not phrase_hit) and token_hits < ent_need:
-                    continue
-                if len(person_cell.split()) >= 2:
-                    return re.sub(r"\s+", " ", person_cell).strip()
-            src_one = re.sub(r"\s+", " ", str(src or "")).strip()
-            if entity_l and src_one:
-                pair_re = re.compile(
-                    r"\b(scientific\s+management|administrative\s+theory|administrative\s+management|bureaucratic\s+management|bureaucracy)\b\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
-                    flags=re.IGNORECASE,
-                )
-                ent_norm = re.sub(r"\s+", " ", entity_l).strip().lower()
-                for concept_raw, person_raw in pair_re.findall(src_one):
-                    concept_norm = re.sub(r"\s+", " ", concept_raw).strip().lower()
-                    if concept_norm == ent_norm:
-                        candidate = re.sub(r"\s+", " ", person_raw).strip()
-                        if len(candidate.split()) >= 2:
-                            return candidate
-                m = re.search(
-                    rf"\b{re.escape(entity_l)}\b\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){{1,2}})",
-                    src_one,
-                )
-                if m:
-                    candidate = re.sub(r"\s+", " ", m.group(1)).strip()
-                    if len(candidate.split()) >= 2:
-                        return candidate
-            return None
-
-        for d in (source_docs or [])[:5]:
-            txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")
-            if not txt:
-                continue
-            for sent in _sentences(txt)[:52]:
-                s = re.sub(r"\s+", " ", sent).strip()
-                low = s.lower()
-                if not re.search(rf"\b{re.escape(entity_l)}\b", low):
-                    continue
-
-                has_relation_kw = bool(relation_kw_re.search(low))
-                has_enumeration_shape = bool(
-                    ("•" in s)
-                    or bool(re.search(r"(?:^|\s)\d+[.)]\s+", s))
-                    or s.count(",") >= 2
-                )
-                has_classification_cue = bool(re.search(r"\bclassification\b", low))
-                if not (has_relation_kw or has_enumeration_shape or has_classification_cue):
-                    continue
-
-                # Ensure same-sentence related concept list exists around relation cue.
-                right = low
-                km = re.search(r"\b(?:includes?|including|consists\s+of|classification|approach)\b", low)
-                if km:
-                    right = low[km.end():]
-                rel_items = [
-                    re.sub(r"\s+", " ", it).strip(" ,;:-")
-                    for it in split_item_re.split(right)
-                    if re.search(r"[a-z]", it or "")
-                ]
-                rel_items = [it for it in rel_items if len(re.findall(r"[a-z]{3,}", it)) >= 1]
-                if len(rel_items) < 2 and ("•" in s or has_classification_cue):
-                    rel_items = [
-                        re.sub(r"\s+", " ", x).strip(" ,;:-")
-                        for x in re.split(r"[•|]", s)
-                        if re.search(r"[A-Za-z]", x or "")
-                    ]
-                    rel_items = [it for it in rel_items if len(re.findall(r"[a-z]{3,}", it.lower())) >= 1]
-                if len(rel_items) < 2:
-                    continue
-
-                parent = ""
-                pm = re.search(
-                    r"\b([a-z][a-z0-9\s\-]{2,90}?)\s+(?:includes?|including|consists\s+of|classification|approach)\b",
-                    low,
-                    flags=re.IGNORECASE,
-                )
-                if pm:
-                    parent = _clean_parent(pm.group(1))
-                if not parent:
-                    left = low[: max(0, low.find(entity_l))]
-                    pm2 = re.search(
-                        r"([a-z][a-z0-9\s\-]{2,80}?\b(?:approach|appraoch|theory|system|method|model))\b",
-                        left,
-                        flags=re.IGNORECASE,
-                    )
-                    if pm2:
-                        parent = _clean_parent(pm2.group(1))
-                if not parent:
-                    others = [
-                        it for it in rel_items
-                        if not re.search(rf"\b{re.escape(entity_l)}\b", it.lower())
-                    ]
-                    if not others:
-                        continue
-                    other_comp = re.sub(r"\s+", " ", others[0]).strip(" ,;:-")
-                    if len(re.findall(r"[a-z0-9]{2,}", other_comp.lower())) < 2:
-                        continue
-                    entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
-                    contributor = _find_contributor_for_entity(txt)
-                    logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, s[:220])
-                    if contributor:
-                        return f"{entity_title} is listed with {other_comp} and mentions {contributor}."
-                    return f"{entity_title} is one of the components listed with {other_comp}."
-                if len(re.findall(r"[a-z0-9]{2,}", parent)) < 2:
-                    continue
-
-                entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
-                contributor = _find_contributor_for_entity(txt)
-                logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, s[:220])
-                if contributor:
-                    return f"{entity_title} is one of the components of the {parent} and mentions {contributor}."
-                return f"{entity_title} is one of the components of the {parent}."
-
-            low_txt = re.sub(r"\s+", " ", txt.lower())
-            if re.search(rf"\b{re.escape(entity_l)}\b", low_txt):
-                concept_terms = [
-                    "scientific management",
-                    "administrative theory",
-                    "bureaucratic management",
-                    "bureaucracy",
-                    "administrative management",
-                ]
-                found_terms = [t for t in concept_terms if re.search(rf"\b{re.escape(t)}\b", low_txt)]
-                if len(found_terms) >= 2:
-                    entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or entity
-                    other = next((t for t in found_terms if t != entity_l), "related concepts")
-                    contributor = _find_contributor_for_entity(txt)
-                    logger.info("[RELATED CONCEPT PASS] entity=%s sentence=%s", entity_l, (txt or "")[:220].replace("\n", " "))
-                    if contributor:
-                        return f"{entity_title} is listed with {other} and mentions {contributor}."
-                    return f"{entity_title} is one of the components listed with {other}."
-
         return None
 
     related_concept_answer = _extract_related_concept_sentence_from_docs(docs[:5])
@@ -13564,24 +14851,11 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
             return None
         if re.search(r"\b(introduction\s+concepts?|\w+\s+of\s+\w+)\b", item, flags=re.IGNORECASE):
             return None
-        # DISABLED_CHEATING_LOGIC: Domain-specific management-role filtering for advantages queries.
-        # if is_advantages_query and re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|disciplinarian|time\s+and\s+cost\s+clerk|table|figure)\b", item, flags=re.IGNORECASE):
-        #     return None
         return item
 
     ql = (query_text or "").lower()
 
     def _list_topic_gate(text: str) -> bool:
-        # DISABLED_CHEATING_LOGIC: Domain-specific gating for advantages/planning/principles queries.
-        # low = (text or "").lower()
-        # if "advantage" in ql:
-        #     if re.search(r"\bcriticisms?|limitations?|drawbacks?\b", low):
-        #         return False
-        #     return bool(re.search(r"\bbenefits?|merits?|pros|scientific\s+management|efficien|productiv\b", low))
-        # if ("planning" in ql) and ("process" in ql):
-        #     return bool(re.search(r"\bplanning\b", low) and re.search(r"\bprocess|objectives?|premises?|alternatives?\b", low))
-        # if "principle" in ql:
-        #     return bool(re.search(r"\bprinciples?\b", low))
         return True
 
     for d in docs[:3]:
@@ -13870,42 +15144,6 @@ def _extract_simple_list_from_docs(docs: list[dict], query_text: str = "") -> st
         if len(final_items) >= 3:
             return "\n".join(f"- {it}" for it in final_items)
 
-    # FINAL TUNING: relaxed evidence fallback from prose fragments.
-    # DISABLED_CHEATING_LOGIC: Domain-specific keyword reconstruction for advantages queries.
-    # if is_advantages_query:
-    #     keyword_items: List[str] = []
-    #     keyword_seen: set[str] = set()
-    #     for d in docs[:3]:
-    #         src = str((d or {}).get("page_content") or (d or {}).get("text") or "")
-    #         if not src:
-    #             continue
-    #         parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+|\n+|,", src) if p.strip()]
-    #         for part in parts:
-    #             cand = re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", part).strip(" ,;:-\"'")
-    #             cand = re.sub(r"\s+", " ", cand)
-    #             if not cand:
-    #                 continue
-    #             low = cand.lower()
-    #             if not re.search(r"\b(advantage|benefit|efficien|improvement|productiv)\b", low):
-    #                 continue
-    #             if re.search(r"\b(foreman|foremen|inspector|speed\s*boss|gang\s*boss|route\s*clerk|instruction\s*card\s*clerk|table|figure)\b", low):
-    #                 continue
-    #             if len(cand.split()) < 4 or len(cand.split()) > 28:
-    #                 continue
-    #             norm = re.sub(r"[^a-z0-9]+", " ", low).strip()
-    #             if not norm or norm in keyword_seen:
-    #                 continue
-    #             keyword_seen.add(norm)
-    #             keyword_items.append(cand.rstrip(".") + ".")
-    #             if len(keyword_items) >= 3:
-    #                 break
-    #         if len(keyword_items) >= 3:
-    #             break
-    #     if len(keyword_items) >= 2:
-    #         final_items = _finalize_items(keyword_items, limit=3)
-    #         if len(final_items) >= 2:
-    #             return "\n".join(f"- {it}" for it in final_items)
-
     # Inline numbered list extraction: handles "1. Item one. 2. Item two. 3. Item three."
     # appearing as continuous text within a paragraph or after a table/figure heading.
     inline_items: List[str] = []
@@ -14019,7 +15257,11 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 right = parts[i + 1].strip(" ,;:-")
                 if re.fullmatch(r"[A-Za-z]{3,8}", left) and re.fullmatch(r"[A-Za-z]{3,12}", right):
                     combined = left + right
-                    if 7 <= len(combined) <= 18 and (left[:1].isupper() or len(left) <= 4):
+                    right_is_suffix_fragment = bool(
+                        re.fullmatch(r"(?:ve|ion|ions|al|ally|ity|ities|ing|ed|er|ers|es|s)", right, flags=re.IGNORECASE)
+                    )
+                    short_left_fragment = len(left) <= 4 and len(right) <= 8
+                    if 7 <= len(combined) <= 18 and (right_is_suffix_fragment or short_left_fragment):
                         merged_parts.append(combined)
                         i += 2
                         continue
@@ -14086,6 +15328,38 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         if ln.count(",") >= 2 and len(ln) <= 220:
             for part in [p.strip() for p in ln.split(",") if p.strip()]:
                 raw_candidates.append(part)
+
+    if raw_candidates:
+        merged_candidates: List[str] = []
+
+        def _continuation_payload(candidate_text: str) -> str:
+            payload = re.sub(
+                r"^\s*(?:[-*]|\d+[.)]|[a-z][.)])\s*",
+                "",
+                str(candidate_text or ""),
+                flags=re.IGNORECASE,
+            ).strip()
+            return payload
+
+        def _starts_list_continuation(candidate_text: str) -> bool:
+            payload = _continuation_payload(candidate_text)
+            return bool(
+                re.match(r"^\s*(?:and|or)\b\s+\S", payload, flags=re.IGNORECASE)
+                or re.match(r"^\s*&\s*\S", payload)
+            )
+
+        def _ends_list_connector(candidate_text: str) -> bool:
+            payload = _continuation_payload(candidate_text)
+            return bool(re.search(r"(?:\b(?:and|or)|&)\s*$", payload, flags=re.IGNORECASE))
+
+        for cand in raw_candidates:
+            payload = _continuation_payload(cand)
+            if merged_candidates and (_starts_list_continuation(cand) or _ends_list_connector(merged_candidates[-1])):
+                merged_candidates[-1] = merged_candidates[-1].rstrip(" ,;:-") + " " + payload
+                logger.info("[LIST ITEM CONTINUATION MERGED] continuation=%s", payload[:100])
+                continue
+            merged_candidates.append(str(cand or "").strip())
+        raw_candidates = merged_candidates
 
     if not raw_candidates:
         return None
@@ -14261,6 +15535,45 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             it_tokens = {t for t in re.findall(r"[a-z]{3,}", it.lower()) if t not in stopwords}
             if tail_tokens and it_tokens and (tail_tokens & it_tokens):
                 tail_overlap += 1
+        tail_is_continuation = bool(
+            re.match(r"^\s*(?:and|or)\b\s+\S", tail, flags=re.IGNORECASE)
+            or re.match(r"^\s*&\s*\S", tail)
+            or re.search(r"(?:\b(?:and|or)|&)\s*$", prev, flags=re.IGNORECASE)
+        )
+        tail_is_orphan_continuation = bool(
+            tail
+            and tail[0].islower()
+            and 1 <= tail_wc <= 3
+            and upper_ratio >= 0.55
+            and prev_wc >= 3
+            and prev_has_prep
+            and not re.search(r"[.!?]$", prev)
+            and not re.search(r"\b(?:is|are|was|were|has|have|include|includes|refers|means)\b", tail, flags=re.IGNORECASE)
+        )
+        if tail_is_orphan_continuation:
+            joiner = "" if re.search(r"(?:\b(?:and|or)|&)\s*$", prev, flags=re.IGNORECASE) else " and"
+            cleaned[-2] = prev.rstrip(" ,;:-") + joiner + " " + tail.strip()
+            logger.info("[LIST ITEM CONTINUATION MERGED] orphan_tail=%s", tail[:120])
+            logger.info("[LIST FINAL ITEM PRESERVED] item=%s", cleaned[-2][:120])
+            cleaned = cleaned[:-1]
+            tail = cleaned[-1] if cleaned else ""
+            tail_wc = len(tail.split()) if tail else 0
+            tail_tokens = {t for t in re.findall(r"[a-z]{3,}", tail.lower()) if t not in stopwords}
+            lead = cleaned[:-1]
+            prev = lead[-1] if lead else ""
+            prev_wc = len(prev.split()) if prev else 0
+            prev_has_prep = bool(prev and re.search(r"\b(?:of|for|in|on|with|by|to|from)\b", prev.lower()))
+            upper_ratio = (sum(1 for it in lead if it and it[0].isupper()) / max(1, len(lead))) if lead else 0.0
+            tail_overlap = 0
+            for it in lead:
+                it_tokens = {t for t in re.findall(r"[a-z]{3,}", it.lower()) if t not in stopwords}
+                if tail_tokens and it_tokens and (tail_tokens & it_tokens):
+                    tail_overlap += 1
+            tail_is_continuation = bool(
+                re.match(r"^\s*(?:and|or)\b\s+\S", tail, flags=re.IGNORECASE)
+                or re.match(r"^\s*&\s*\S", tail)
+                or re.search(r"(?:\b(?:and|or)|&)\s*$", prev, flags=re.IGNORECASE)
+            )
 
         tail_is_spill = bool(
             tail
@@ -14270,7 +15583,10 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             and prev_wc >= 4
             and prev_has_prep
             and tail_overlap == 0
+            and not tail_is_continuation
         )
+        if tail_is_continuation:
+            logger.info("[LIST FINAL ITEM PRESERVED] continuation_tail=%s", tail[:120])
         if tail_is_spill:
             logger.info("[LIST CLEAN OUTLIER] dropped_tail_fragment=%s", tail[:120])
             cleaned = lead
@@ -14303,7 +15619,11 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         words = re.findall(r"[A-Za-z][A-Za-z\-']*", str(item_text or ""))
         item_tokens = {t for t in re.findall(r"[a-z0-9]{3,}", low)}
         query_token_set = {t for t in query_tokens if len(t) >= 3}
-        if len(words) == 1 and len(words[0]) <= 10:
+        # Threshold lowered from 10 to 4: only truly tiny noise tokens
+        # (<=4 chars) are treated as heading artifacts when not matching
+        # query tokens. This preserves valid single-word list items like
+        # "Prediction" (10 chars) that previously were incorrectly dropped.
+        if len(words) == 1 and len(words[0]) <= 4:
             if not any(_token_match_light(low, tok) for tok in query_tokens):
                 return True
         if 2 <= len(words) <= 5 and item_tokens and item_tokens <= query_token_set:
@@ -14335,6 +15655,9 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             continue
         if (not _uniform_single_word_set) and _is_heading_artifact(adjusted):
             continue
+        # Log single-word items that passed the artifact filter.
+        if len(re.findall(r"[A-Za-z][A-Za-z\-']*", adjusted)) == 1:
+            logger.info("[LIST CLEAN KEEP] single_word_item=%r", adjusted[:40])
         norm = re.sub(r"[^a-z0-9]+", " ", adjusted.lower()).strip()
         if not norm or norm in seen_norm_final:
             continue
@@ -14371,8 +15694,16 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
 
     cleaned = normalized_cleaned
 
+    if cleaned:
+        final_item = cleaned[-1]
+        final_words = re.findall(r"[A-Za-z][A-Za-z\-']*", final_item)
+        if len(final_words) >= 4 and re.search(r"\b(?:and|or)\b|&", final_item, flags=re.IGNORECASE):
+            logger.info("[LIST FINAL ITEM PRESERVED] item=%s", final_item[:120])
+
     if len(cleaned) < 2:
         return None
+    logger.info("[LIST FINAL ITEMS] count=%d items=%s", len(cleaned),
+                [it[:30] for it in cleaned[:10]])
     return "\n".join(f"- {it}" for it in cleaned)
 
 
@@ -14788,6 +16119,21 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
                 alignment_score = max(0.70, alignment_score)
                 logger.info("[LIST COUNT-MATCH OVERRIDE] enabled=True target=%d items=%d", _q_count_target, len(cleaned_items))
 
+    if (len(aligned_items) < min_required_items or alignment_score < 0.70) and _is_structure_query(query_text):
+        _cluster_labels = [
+            it for it in cleaned_items
+            if 1 <= len(re.findall(r"[A-Za-z][A-Za-z\-']*", str(it or ""))) <= 5
+            and not re.search(r"\b(?:is|are|was|were|has|have|include|includes|refers|means)\b", str(it or ""), flags=re.IGNORECASE)
+        ]
+        _cluster_norms = [re.sub(r"[^a-z0-9]+", " ", str(it or "").lower()).strip() for it in _cluster_labels]
+        _all_distinct = bool(_cluster_norms and len(set(_cluster_norms)) == len(_cluster_norms))
+        if len(_cluster_labels) >= max(3, min_required_items) and _all_distinct:
+            aligned_items = list(_cluster_labels)
+            alignment_score = max(0.70, alignment_score)
+            logger.info("[STRUCTURE QUERY DETECTED] query=%s", str(query_text or "")[:160])
+            logger.info("[CONCEPT CLUSTER DETECTED] count=%d", len(_cluster_labels))
+            logger.info("[STRUCTURE QUERY RESCUE] alignment_override=true items=%d", len(_cluster_labels))
+
     if len(aligned_items) < min_required_items or alignment_score < 0.70:
         logger.info("[LIST DEBUG] total_items=%d kept_items=%d rejected_items=%d source_chunks_count=%d structure_score=%.3f alignment_score=%.3f", total_items, len(aligned_items), total_items - len(aligned_items), 0, 0.0, alignment_score)
         logger.info("[LIST FINAL DECISION] accepted=False reason=alignment_failed")
@@ -15005,7 +16351,43 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         and len(aligned_items) >= min_required_items
         and coherent_override_items
     )
-    locality_ok = bool(same_chunk_locality or same_window_locality or single_selected_locality or adjacent_section_locality)
+    structure_cluster_locality = False
+    if _is_structure_query(query_text) and isinstance(local_support, dict):
+        _scope_chunks = local_support.get("chunk_texts", [])
+        if isinstance(_scope_chunks, list):
+            _selected_scope_text = "\n".join(
+                str((row or {}).get("text") or "")
+                for row in _scope_chunks
+                if isinstance(row, dict)
+            ).lower()
+        else:
+            _selected_scope_text = ""
+        _structure_clean_labels = [it for it in aligned_items if _is_clean_label_item(it)]
+        _structure_norms = [re.sub(r"[^a-z0-9]+", " ", str(it or "").lower()).strip() for it in _structure_clean_labels]
+        _structure_distinct = bool(_structure_norms and len(set(_structure_norms)) == len(_structure_norms))
+        _structure_items_in_scope = 0
+        if _selected_scope_text:
+            for _it in _structure_clean_labels:
+                _item_low = str(_it or "").lower().strip()
+                if _item_low and re.search(r"\b" + re.escape(_item_low) + r"\b", _selected_scope_text):
+                    _structure_items_in_scope += 1
+                    continue
+                _item_toks = [t for t in re.findall(r"[a-z0-9]{3,}", _item_low) if t not in {"the", "and", "for", "with", "from", "of", "to"}]
+                if _item_toks and sum(1 for t in _item_toks if _token_match_light(_selected_scope_text, t)) >= max(1, min(2, len(_item_toks))):
+                    _structure_items_in_scope += 1
+        _structure_scope_ratio = float(_structure_items_in_scope) / float(max(1, len(_structure_clean_labels)))
+        structure_cluster_locality = bool(
+            len(_structure_clean_labels) >= min_required_items
+            and _structure_distinct
+            and _structure_items_in_scope >= min_required_items
+            and _structure_scope_ratio >= 0.70
+            and int(round(selected_chunks_count)) <= 3
+            and source_chunk_count <= 3.0
+            and (merged_extra_chunks_count >= 1.0 or same_section_adjacent_labels or used_single_window)
+        )
+        if structure_cluster_locality:
+            logger.info("[STRUCTURE QUERY RESCUE] locality_override=true items_in_scope=%d", _structure_items_in_scope)
+    locality_ok = bool(same_chunk_locality or same_window_locality or single_selected_locality or adjacent_section_locality or structure_cluster_locality)
 
     validation_scope = "selected_chunks"
     locality_reason = "chunk_locality"
@@ -15052,6 +16434,8 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
             locality_reason = "single_selected_chunk"
         elif adjacent_section_locality:
             locality_reason = "adjacent_section_labels"
+        elif structure_cluster_locality:
+            locality_reason = "structure_cluster_selected_chunks"
         logger.info("[LOCALITY DEBUG] accepted=%s reason=%s", bool(locality_ok), locality_reason)
 
     logger.info(
@@ -15110,6 +16494,13 @@ def _assess_list_coherence(query_text: str, answer_text: str, strict_fast: bool 
         logger.info("[LIST FINAL DECISION] accepted=False reason=concept_mismatch detail=%s", concept_reason)
         return (False, "concept_mismatch", None)
 
+    if _is_structure_query(query_text):
+        aligned_items = [
+            (it[:1].upper() + it[1:]) if _is_clean_label_item(it) and str(it or "").islower() else it
+            for it in aligned_items
+        ]
+        shaped_clean = "\n".join(f"- {it}" for it in aligned_items)
+
     logger.info("[LIST FINAL DECISION] accepted=True reason=ok")
     return (True, "ok", shaped_clean)
 
@@ -15162,6 +16553,199 @@ def _extract_query_concept_signature(query_text: str) -> dict[str, Any]:
         "categorical_count": cat_count,
         "query_text": q
     }
+
+
+_STRUCTURE_QUERY_RE = re.compile(r"\b(?:perspectives?|models?|approaches?|types?|branches?|schools?)\b", re.IGNORECASE)
+_STRUCTURE_WORD_VARIANTS: dict[str, tuple[str, ...]] = {
+    "perspective": ("perspective", "perspectives"),
+    "model": ("model", "models"),
+    "approach": ("approach", "approaches"),
+    "type": ("type", "types"),
+    "branch": ("branch", "branches"),
+    "school": ("school", "schools"),
+}
+
+
+def _is_structure_query(query_text: str) -> bool:
+    return bool(_STRUCTURE_QUERY_RE.search(str(query_text or "")))
+
+
+def _structure_words_in_text(text: str) -> list[str]:
+    low = str(text or "").lower()
+    hits: list[str] = []
+    for canonical, variants in _STRUCTURE_WORD_VARIANTS.items():
+        if any(re.search(rf"\b{re.escape(v)}\b", low) for v in variants):
+            hits.append(canonical)
+    return hits
+
+
+def _extract_structure_concept_cluster_from_docs(query_text: str, docs: list[dict], max_docs: int = 4) -> str | None:
+    if not _is_structure_query(query_text):
+        return None
+    q_low = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    query_structure_words = _structure_words_in_text(q_low)
+    query_terms = [
+        t for t in re.findall(r"[a-z0-9]{3,}", q_low)
+        if t not in {
+            "what", "which", "main", "major", "primary", "the", "and", "are",
+            "list", "name", "give", "mention", "identify", "perspective",
+            "perspectives", "model", "models", "approach", "approaches", "type",
+            "types", "branch", "branches", "school", "schools", "of", "for",
+            "with", "from",
+        }
+    ]
+
+    def _reject_junk_label(label: str, sentence_has_same_structure_word: bool) -> tuple[bool, str]:
+        item = re.sub(r"\s+", " ", str(label or "").strip())
+        low = item.lower()
+        compact = re.sub(r"[^a-z0-9]+", "", low)
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+        if not words:
+            return True, "empty"
+        if re.match(r"^(?:the|and|or|to|of|for|in|on|with|from)[a-z]{4,}$", compact):
+            return True, "glued_function_prefix"
+        if len(words) == 1 and low in {
+            "modern", "historical", "theoretical", "essential", "general",
+            "basic", "important", "major", "main", "chapter", "section",
+            "overview", "introduction", "summary", "contents",
+        }:
+            return True, "generic_single_word"
+        if len(words) == 1 and (not sentence_has_same_structure_word) and len(low) <= 9:
+            return True, "unsupported_short_label"
+        if re.search(r"\b(?:table|figure|chapter|contents|references?|copyright|isbn)\b", low):
+            return True, "document_noise"
+        return False, "ok"
+
+    def _clean_cluster_label(raw: str, sentence_has_same_structure_word: bool) -> str:
+        item = re.sub(r"\s+", " ", str(raw or "")).strip(" ,;:-.()[]{}")
+        item = re.sub(r"\+", " ", item)
+        item = re.sub(r"(?<=\s)[A-Za-z]\s*-\s*(?=[A-Za-z])", "", item)
+        item = re.sub(
+            r"\b([A-Za-z]{5,})\s+(ve|ion|ions|al|ally|ity|ities|ing|ed|er|ers|es|s)\b",
+            lambda m: m.group(1) + m.group(2),
+            item,
+            flags=re.IGNORECASE,
+        )
+        item = re.sub(r"^\s*(?:and|or|&)\s+", "", item, flags=re.IGNORECASE).strip()
+        item = re.sub(r"^\s*(?:the|a|an|these|those)\s+", "", item, flags=re.IGNORECASE).strip()
+        item = re.sub(r"^\s*(?:main|major|primary|basic|following)\s+", "", item, flags=re.IGNORECASE).strip()
+        item = re.sub(r"\b(?:perspectives?|models?|approaches?|types?|branches?|schools?)\b.*$", "", item, flags=re.IGNORECASE).strip(" ,;:-.")
+        item = re.sub(r"\s*\([^)]*\)\s*$", "", item).strip(" ,;:-.")
+        item = re.sub(r"\s+", " ", item).strip(" ,;:-.")
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", item)
+        if not words or len(words) > 5:
+            logger.info("[JUNK LABEL REJECTED] reason=shape label=%s", item[:80])
+            return ""
+        if re.search(r"\b(?:is|are|was|were|has|have|include|includes|consists?|comprise|comprises|refers)\b", item, re.IGNORECASE):
+            logger.info("[JUNK LABEL REJECTED] reason=clause label=%s", item[:80])
+            return ""
+        if len(item) < 3 or len(item) > 80:
+            logger.info("[JUNK LABEL REJECTED] reason=length label=%s", item[:80])
+            return ""
+        is_junk, junk_reason = _reject_junk_label(item, sentence_has_same_structure_word)
+        if is_junk:
+            logger.info("[JUNK LABEL REJECTED] reason=%s label=%s", junk_reason, item[:80])
+            return ""
+        return item[:1].upper() + item[1:]
+
+    def _label_clause_before_structure_word(sentence: str, matched_word: str) -> str:
+        if not sentence or not matched_word:
+            return ""
+        variants = _STRUCTURE_WORD_VARIANTS.get(matched_word, (matched_word,))
+        best = ""
+        for variant in variants:
+            for m in re.finditer(rf"\b{re.escape(variant)}\b", sentence, flags=re.IGNORECASE):
+                left = sentence[:m.start()].strip(" ,;:-")
+                if not left:
+                    continue
+                left = re.sub(r"^\s*(?:with\s+in|within|in)\s+[^,]{1,80},\s*", "", left, flags=re.IGNORECASE)
+                left = re.sub(r"^\s*(?:the|a|an|these|those)\s+", "", left, flags=re.IGNORECASE)
+                left = re.sub(r"^\s*(?:main|major|primary|basic|following)\s+", "", left, flags=re.IGNORECASE)
+                if not re.search(r"[,;|]|\b(?:and|or)\b", left, flags=re.IGNORECASE):
+                    continue
+                if len(left) > len(best):
+                    best = left
+        return best
+
+    def _dedupe_labels(labels: list[str]) -> list[str]:
+        out: list[str] = []
+        seen: set[str] = set()
+        for label in labels:
+            norm = re.sub(r"[^a-z0-9]+", " ", str(label or "").lower()).strip()
+            if not norm or norm in seen:
+                continue
+            seen.add(norm)
+            out.append(label)
+        return out
+
+    candidates: list[tuple[float, str, list[str], str, str]] = []
+
+    for doc in (docs or [])[: max(1, max_docs)]:
+        text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+        if not text.strip():
+            continue
+        doc_low = text.lower()
+        doc_has_query_context = (not query_terms) or any(re.search(rf"\b{re.escape(t)}\b", doc_low) for t in query_terms)
+        for sent in _split_text_into_sentences(text)[:48]:
+            s = re.sub(r"\s+", " ", str(sent or "")).strip()
+            if not s or len(s) > 520:
+                continue
+            low = s.lower()
+            if not doc_has_query_context and not any(re.search(rf"\b{re.escape(t)}\b", low) for t in query_terms):
+                continue
+            matched_structure_words = [w for w in _structure_words_in_text(low) if (not query_structure_words or w in query_structure_words)]
+            same_structure_word = bool(matched_structure_words)
+            if same_structure_word:
+                logger.info("[STRUCTURE WORD MATCH] word=%s sentence=%s", matched_structure_words[0], s[:220])
+            if not (same_structure_word or s.count(",") >= 2 or ";" in s or "|" in s):
+                continue
+            if not (s.count(",") >= 2 or ";" in s or "|" in s or re.search(r"\b(?:and|or)\b", low)):
+                continue
+
+            clause = s
+            if ":" in clause:
+                clause = clause.split(":", 1)[1]
+            cue = re.search(
+                r"\b(?:are|include|includes|including|consists?\s+of|comprise|comprises|classified\s+as|divided\s+into|types?\s+of|branches?\s+of|schools?\s+of)\b",
+                clause,
+                flags=re.IGNORECASE,
+            )
+            if cue:
+                clause = clause[cue.end():]
+
+            label_clauses: list[tuple[str, bool]] = []
+            if same_structure_word:
+                before_clause = _label_clause_before_structure_word(s, matched_structure_words[0])
+                if before_clause:
+                    label_clauses.append((before_clause, True))
+            label_clauses.append((clause, bool(cue)))
+
+            for label_clause, cue_like in label_clauses:
+                parts = [p for p in re.split(r"[;,|]|\b(?:and|or)\b", label_clause, flags=re.IGNORECASE) if str(p or "").strip()]
+                labels = _dedupe_labels([_clean_cluster_label(part, same_structure_word) for part in parts])
+                if len(labels) < 3:
+                    continue
+                query_context_hits = sum(1 for t in query_terms if re.search(rf"\b{re.escape(t)}\b", low))
+                score = float(query_context_hits)
+                score += 8.0 if same_structure_word else 0.0
+                score += 2.5 if cue_like else 0.0
+                score += min(2.0, len(labels) * 0.25)
+                candidates.append((score, matched_structure_words[0] if matched_structure_words else "", labels[:12], s, label_clause))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: (x[0], len(x[2])), reverse=True)
+    for _score, structure_word, labels, sentence, _clause in candidates:
+        bullet_answer = "\n".join(f"- {label}" for label in labels[:12])
+        sanitized = _sanitize_list_answer_text(query_text, bullet_answer)
+        if not sanitized:
+            continue
+        logger.info("[CONCEPT CLUSTER DETECTED] count=%d sentence=%s", len(labels), sentence[:220])
+        logger.info("[CONCEPT CLUSTER SELECTED] structure_word=%s count=%d", structure_word or "none", len(labels))
+        logger.info("[STRUCTURE ANSWER FINAL] source=sentence_cluster items=%d", len(labels))
+        return sanitized
+    return None
 
 
 def _validate_concept_match(query_text: str, items: list[str], family_v2: str = "", local_support: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -15242,6 +16826,38 @@ def _validate_concept_match(query_text: str, items: list[str], family_v2: str = 
             cat_count = sig.get("categorical_count")
             count_anchored = bool(cat_count is not None and int(cat_count) == len(items))
             if (not has_narrow_in_items) and (not count_anchored):
+                # Concept-cluster rescue: if the narrow focus token is an
+                # enumeration-type meta-word (perspectives, approaches, schools,
+                # theories, etc.) the ANSWER items are expected to be the NAMES
+                # of each perspective/approach — NOT to repeat the meta-word
+                # inside every item. Accept when items form a clean distinct
+                # cluster of short labels. Generic: no domain vocabulary.
+                _enum_type_modifiers = {
+                    "perspectives", "perspective", "approaches", "approach",
+                    "models", "model", "types", "type", "branches", "branch",
+                    "schools", "school", "theories", "theory",
+                    "viewpoints", "viewpoint", "orientations", "orientation",
+                    "frameworks", "framework",
+                }
+                _nf_is_enum_type = any(tok in _enum_type_modifiers for tok in narrow_focus)
+                if _nf_is_enum_type:
+                    _cluster_labels = [
+                        it for it in items
+                        if 1 <= len(re.findall(r"[A-Za-z][A-Za-z\-']*", it)) <= 5
+                    ]
+                    _all_distinct = (
+                        len({re.sub(r"[^a-z]+", " ", it.lower()).strip() for it in _cluster_labels})
+                        == len(_cluster_labels)
+                    )
+                    if len(_cluster_labels) >= 3 and _all_distinct:
+                        logger.info(
+                            "[CONCEPT CLUSTER DETECTED] %d distinct labels for enum-type narrow_focus=%s",
+                            len(_cluster_labels), narrow_focus,
+                        )
+                        logger.info(
+                            "[STRUCTURE QUERY RESCUE] items form distinct concept cluster -> accepted"
+                        )
+                        return True, "ok"
                 logger.info(
                     "[CONCEPT MATCH GUARD] reject narrow_focus_missing focus=%s items=%d count_target=%s",
                     narrow_focus,
@@ -15317,6 +16933,23 @@ def _preclean_list_answer_for_assessment(answer_text: str) -> str:
 
     bullet_prefix_re = re.compile(r"^(\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*)(.+)$", re.IGNORECASE)
 
+    def _strip_marker_for_continuation(line: str) -> str:
+        m = bullet_prefix_re.match(str(line or "").strip())
+        if m:
+            return (m.group(2) or "").strip()
+        return str(line or "").strip()
+
+    def _starts_list_continuation(line: str) -> bool:
+        payload = _strip_marker_for_continuation(line)
+        return bool(
+            re.match(r"^\s*(?:and|or)\b\s+\S", payload, flags=re.IGNORECASE)
+            or re.match(r"^\s*&\s*\S", payload)
+        )
+
+    def _ends_list_connector(line: str) -> bool:
+        payload = _strip_marker_for_continuation(line)
+        return bool(re.search(r"(?:\b(?:and|or)|&)\s*$", payload, flags=re.IGNORECASE))
+
     kept: list[str] = []
     for ln in raw.splitlines():
         s = re.sub(r"[ \t]+", " ", str(ln or "")).strip()
@@ -15334,6 +16967,11 @@ def _preclean_list_answer_for_assessment(answer_text: str) -> str:
         if len(s) > 200:
             continue
         if not re.search(r"[A-Za-z]", s):
+            continue
+        if kept and (_starts_list_continuation(s) or _ends_list_connector(kept[-1])):
+            payload = _strip_marker_for_continuation(s)
+            kept[-1] = kept[-1].rstrip(" ,;:-") + " " + payload
+            logger.info("[LIST ITEM CONTINUATION MERGED] continuation=%s", payload[:100])
             continue
         if _line_broken(s):
             continue
@@ -15729,7 +17367,7 @@ def _passes_strict_definition_relevance_guard(query_text: str, answer_sentence: 
     if not s:
         logger.info("[STRICT DEF PREF MISS] query=%s reason=empty_answer", q_low[:120])
         return False
-    if re.search(r"(?:©|copyright|virtual\s+university|psy\s*101)", s, flags=re.IGNORECASE):
+    if re.search(r"(?:©|copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", s, flags=re.IGNORECASE):
         logger.info("[STRICT DEF PREF MISS] query=%s reason=ocr_noise", q_low[:120])
         return False
     if _is_definition_boilerplate_sentence(s.lower()):
@@ -15963,37 +17601,20 @@ def _refine_concept_definition_answer(query_text: str, docs: list[dict], answer:
         return best[1] if best and best[0] >= 2.2 else None
 
     def _extract_contributor_from_docs() -> str | None:
-        # DISABLED_CHEATING_LOGIC: Domain-specific contributor extraction tied to management schools.
-        return None
-        if not docs or not entity_l:
-            return None
-        ent_norm = re.sub(r"\s+", " ", entity_l).strip().lower()
-        pair_re = re.compile(
-            r"\b(scientific\s+management|administrative\s+theory|administrative\s+management|bureaucratic\s+management|bureaucracy)\b\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2})",
-            flags=re.IGNORECASE,
-        )
-        for d in (docs or [])[:5]:
-            src = re.sub(r"\s+", " ", str((d or {}).get("page_content") or (d or {}).get("text") or "")).strip()
-            if not src:
-                continue
-            for concept_raw, person_raw in pair_re.findall(src):
-                concept_norm = re.sub(r"\s+", " ", concept_raw).strip().lower()
-                if concept_norm == ent_norm:
-                    person = re.sub(r"\s+", " ", person_raw).strip()
-                    if len(person.split()) >= 2:
-                        return person
         return None
 
     def _extract_richer_explanatory_sentence_from_docs() -> str | None:
         if not docs or not entity_l:
             return None
         cues = [
-            r"\bbest\s+and\s+cheapest\s+way\b",
-            r"\bstud(?:ied|y)\s+scientifically\b",
-            r"\bone\s+best\s+way\b",
-            r"\btime\s+and\s+motion\b",
-            r"\befficiency\b",
-            r"\bproductivity\b",
+            r"\bdefined\s+as\b",
+            r"\brefers\s+to\b",
+            r"\bmeans\b",
+            r"\binvolves?\b",
+            r"\bincludes?\b",
+            r"\bconsists?\s+of\b",
+            r"\baims?\s+to\b",
+            r"\bused\s+to\b",
             r"\bfocus(?:ed)?\s+on\b",
         ]
         best: tuple[float, str] | None = None
@@ -16044,9 +17665,6 @@ def _refine_concept_definition_answer(query_text: str, docs: list[dict], answer:
             if entity_l and not re.search(rf"\b{re.escape(entity_l)}\b", rich_sent.lower()):
                 entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or str(entity or "").strip()
                 rich_sent = f"{entity_title} {rich_sent[0].lower() + rich_sent[1:] if rich_sent else rich_sent}"
-            if re.search(r"\bbest\s+and\s+cheapest\s+way\b", rich_sent, flags=re.IGNORECASE):
-                entity_title = " ".join(w.capitalize() for w in re.findall(r"[A-Za-z0-9]+", entity_l)) or str(entity or "").strip()
-                return f"{entity_title} focuses on finding the best and cheapest way to do each job through scientific study."
             words = re.findall(r"\S+", rich_sent)
             if len(words) > 34:
                 rich_sent = " ".join(words[:34]).rstrip(" ,;:-") + "."
@@ -16427,6 +18045,31 @@ def _query_main_entity_tokens(query_text: str, family_v2: str = "") -> tuple[lis
 
     entity_tokens = _toks(tail_part)
     structure_tokens = _toks(head_part)
+
+    # When the structural part is an enumeration meta-word, promote those
+    # tokens so section anchor scoring discriminates on the requested grouping
+    # noun rather than only on the broad tail entity.
+    # Generic set: universal English concept-grouping nouns.
+    _ENUM_META_NORMALIZED = {
+        "perspectiv", "perspective",  # perspectives / perspective
+        "approach",                   # approaches / approach
+        "model",                      # models / model
+        "type",                       # types / type
+        "kind",                       # kinds / kind
+        "school",                     # schools / school
+        "theory",                     # theories / theory
+        "viewpoint",                  # viewpoints / viewpoint
+        "orientation",                # orientations / orientation
+        "framework",                  # frameworks / framework
+    }
+    _promoted = [t for t in structure_tokens if t in _ENUM_META_NORMALIZED]
+    if _promoted:
+        # Prepend promoted tokens; entity alignment will now check for them
+        # first, boosting chunks that contain the specific meta-word in their
+        # heading and penalising chunks that lack it entirely.
+        entity_tokens = list(dict.fromkeys(_promoted + entity_tokens))[:3]
+        structure_tokens = [t for t in structure_tokens if t not in _ENUM_META_NORMALIZED][:4]
+
     if not entity_tokens and structure_tokens:
         # Phrase was structure-only ("characteristics") — treat the same token
         # as the entity to avoid an empty entity set.
@@ -17261,7 +18904,7 @@ def clean_ocr_noise(text: str) -> str:
     text = re.sub(r"[^\x00-\x7F]+", " ", text)
     text = re.sub(r"^(DEFINITION|KEY TERMS|TERMS|CONCEPT)\s*[:\-]?\s*", "", text, flags=re.IGNORECASE)
     _ocr_split_heads = {
-        "acti", "emoti", "behav", "consequ", "organi", "experi", "environ", "psy", "scien", "cogni", "reinfor"
+        "acti", "emoti", "behav", "consequ", "organi", "experi", "environ", "scien"
     }
     text = re.sub(
         r"\b([A-Za-z]{2,8})\s+([A-Za-z]{2,})\b",
@@ -17271,10 +18914,6 @@ def clean_ocr_noise(text: str) -> str:
     split_fixes = [
         (r"\bin\s+dividuals?\b", lambda m: "individual" if m.group(0).lower().endswith("ual") else "individuals"),
         (r"\bfor\s+mulas?\b", lambda m: "formula" if m.group(0).lower().endswith("ula") else "formulas"),
-        (r"\bpsy\s+chology\b", "psychology"),
-        (r"\bstruc\s+turalism\b", "structuralism"),
-        (r"\bfunc\s+tionalism\b", "functionalism"),
-        (r"\bpsycho\s+dynamic\b", "psychodynamic"),
     ]
     for patt, repl in split_fixes:
         text = re.sub(patt, repl, text, flags=re.IGNORECASE)
@@ -17295,10 +18934,6 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
         (r"\bme\s*mory\b", "memory"),
         (r"\bin\s*dividuals?\b", "individual"),
         (r"\bfor\s*mulas?\b", "formula"),
-        (r"\bpsy\s*chology\b", "psychology"),
-        (r"\bfunc\s*tionalism\b", "functionalism"),
-        (r"\bstruc\s*turalism\b", "structuralism"),
-        (r"\bpsycho\s*dynamic\b", "psychodynamic"),
     ]
     for patt, repl in fixes:
         txt = re.sub(patt, repl, txt, flags=re.IGNORECASE)
@@ -18828,7 +20463,7 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
             return dec
 
         _candidate_docs = list(retrieved_docs or [])
-        _item_token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those","human", "behavior"}
+        _item_token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those"}
         _item_tokens: set[str] = set()
         for ln in str(shaped or "").splitlines():
             line = re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s+", "", ln).strip().lower()
@@ -19687,6 +21322,9 @@ def _shared_rag_final_answer_decision(
                 logger.info("[LIST SOURCE DEBUG] strict_single_window_mode=true reason=clean_labels_in_primary")
             p_idx = _safe_int(primary_chunk)
             strict_mode = bool(strict_label_query and int(primary_clean_count) >= 2)
+            structure_query_merge_mode = _is_structure_query(query)
+            if structure_query_merge_mode:
+                logger.info("[STRUCTURE QUERY DETECTED] query=%s", str(query or "")[:160])
             if p_idx is None or not primary_source:
                 logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="primary_chunk_missing"', primary_chunk)
             else:
@@ -19723,10 +21361,16 @@ def _shared_rag_final_answer_decision(
                     cand_signature = _section_signature_for_doc(cand_doc)
                     same_section = _same_section_signature(primary_signature, cand_signature)
                     owner_consistent = _owner_focus_consistent(primary_doc, cand_doc)
+                    structure_adjacent_labels = bool(
+                        structure_query_merge_mode
+                        and int(_cand_clean_count) >= 3
+                        and _is_weakly_semantic_match(cand_doc, cand_sig, cand_score)
+                    )
                     if (
                         primary_strong_section_for_merge_guard
                         and primary_has_deterministic_list_candidate
                         and not same_section
+                        and not structure_adjacent_labels
                     ):
                         logger.info("[LIST MERGE GUARD] primary_chunk=%s", primary_chunk)
                         logger.info("[LIST MERGE GUARD] primary_section_confidence=%.3f", float(primary_section_confidence))
@@ -19735,7 +21379,10 @@ def _shared_rag_final_answer_decision(
                         logger.info("[LIST MERGE GUARD] merge=False reason=strong_primary_section_preserved")
                         logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strong_primary_section_preserved"', cand_chunk)
                         continue
-                    if strict_mode:
+                    if structure_adjacent_labels:
+                        logger.info("[CONCEPT CLUSTER DETECTED] adjacent_chunk=%s clean_labels=%d", cand_chunk, int(_cand_clean_count))
+                        logger.info('[LIST SOURCE DEBUG] merge_allowed_chunk=%s reason="structure_query_adjacent_labels" same_section=%s semantic=%.3f', cand_chunk, same_section, _semantic_signal(cand_doc, cand_sig, cand_score))
+                    elif strict_mode:
                         if not owner_consistent:
                             logger.info('[LIST SOURCE DEBUG] merge_rejected_chunk=%s reason="strict_mode_owner_mismatch"', cand_chunk)
                             continue
@@ -21083,7 +22730,29 @@ def _shared_rag_final_answer_decision(
         logger.info("[LIST DEBUG] blocked_reason=%s", list_debug_blocked_reason or "")
         logger.info("[LIST DEBUG] fallback_to_llm=%s", bool(not list_section_confident))
         q_list_local = re.sub(r"\s+", " ", str(query or "").strip().lower())
-        if q_list_local.startswith("what are ") and (not _is_targeted_list_question(q_list_local)):
+        structure_query_mode = _is_structure_query(query)
+        if structure_query_mode:
+            logger.info("[STRUCTURE QUERY DETECTED] query=%s", (query or "")[:160])
+
+        def _try_structure_query_rescue() -> tuple[str | None, int]:
+            if not structure_query_mode:
+                return None, 0
+            cluster_answer = _extract_structure_concept_cluster_from_docs(query, routed_docs or doc_dicts or [], max_docs=4)
+            if not cluster_answer:
+                return None, 0
+            rescue_ok, rescue_reason, rescue_shaped = _assess_list_coherence(
+                query,
+                _preclean_list_answer_for_assessment(cluster_answer),
+                strict_fast=False,
+                local_support=list_local_support,
+            )
+            rescue_count = len([ln for ln in str(rescue_shaped or "").splitlines() if ln.strip()])
+            logger.info("[STRUCTURE QUERY RESCUE] accepted=%s reason=%s items=%d", bool(rescue_ok), rescue_reason, rescue_count)
+            if rescue_ok and rescue_shaped and rescue_count >= 2:
+                return rescue_shaped, rescue_count
+            return None, 0
+
+        if q_list_local.startswith("what are ") and (not structure_query_mode) and (not _is_targeted_list_question(q_list_local)):
             plural_term = re.sub(r"^what are\s+", "", q_list_local).strip(" .?")
             plural_sentence, _plural_md = _best_term_explanation_from_docs(plural_term, routed_docs or doc_dicts or [])
             if plural_sentence:
@@ -21120,6 +22789,10 @@ def _shared_rag_final_answer_decision(
             if single_doc_best and single_doc_count >= 2:
                 logger.info("[LIST WINNER] mode=deterministic_single_doc items=%s", single_doc_count)
                 return _result(single_doc_best, used_llm=False, answer_type="list_deterministic_context", items_count=single_doc_count)
+        structure_rescue_answer, structure_rescue_count = _try_structure_query_rescue()
+        if structure_rescue_answer:
+            logger.info("[LIST WINNER] mode=structure_query_rescue items=%s", structure_rescue_count)
+            return _result(structure_rescue_answer, used_llm=False, answer_type="list_structure_rescue", items_count=structure_rescue_count)
         if not list_section_confident and answer_route != "list":
             logger.info("[LIST REJECTED] reason=weak_section_signal")
             return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
@@ -21142,6 +22815,10 @@ def _shared_rag_final_answer_decision(
             if list_section_confident and has_local_window and fast_ok and has_non_empty_items and fast_shaped:
                 logger.info("[LIST WINNER] mode=fallback_fast_list_guarded items=%s", len(fast_items))
                 return _result(fast_shaped, used_llm=False, answer_type="list_fast_simple", items_count=len(fast_items))
+            structure_rescue_answer, structure_rescue_count = _try_structure_query_rescue()
+            if structure_rescue_answer:
+                logger.info("[LIST WINNER] mode=structure_query_rescue items=%s", structure_rescue_count)
+                return _result(structure_rescue_answer, used_llm=False, answer_type="list_structure_rescue", items_count=structure_rescue_count)
             logger.info("[LIST REJECTED] reason=fallback_list_path_blocked coherence_reason=%s items=%s local_window=%s", fast_reason, len(fast_items), has_local_window)
             return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="list_not_found", items_count=0)
 
@@ -21658,14 +23335,14 @@ def _extract_structured_list_from_context(context_chunks: List[str], query_text:
     if not context_chunks:
         return None
 
-    bullet_re = re.compile(r"^\s*(?:[-•*]|\d+[.)]|[ivxlcdm]+[.)])\s*(.+)$", re.IGNORECASE)
+    bullet_re = re.compile(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)]|[ivxlcdm]+[.)])\s*(.+)$", re.IGNORECASE)
     numbered_inline_re = re.compile(r"(?:^|\s)\d+[.)]\s*([^\d\n][^\n]*?)(?=(?:\s\d+[.)]\s)|$)")
     list_clause_re = re.compile(r"\b(?:are|has|have|include|includes|consists\s+of|comprise|comprises|composed\s+of)\s*:?\s*([^\n]+)", re.IGNORECASE)
     stop_noise_re = re.compile(r"\b(?:copyright|all rights reserved|isbn|page\s*\d+|table\s*\d+|figure\s*\d+|chapter\s*\d+)\b", re.IGNORECASE)
     header_re = re.compile(r"^\s*(?:table|figure|fig\.?|chapter|unit|lesson|contents?)\b", re.IGNORECASE)
 
     def _clean_item(raw: str) -> str:
-        item = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[ivxlcdm]+[.)])\s*", "", str(raw or ""), flags=re.IGNORECASE)
+        item = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)]|[ivxlcdm]+[.)])\s*", "", str(raw or ""), flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:the\s+)?(?:\w+\s+)?(?:items?|elements?)\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:\w+\s+)?components?\s*[:\-–—]\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"\s+", " ", item).strip(" ,;:-–—.")
@@ -21949,10 +23626,10 @@ def _explode_inline_ordered_enumerations(text: str) -> str:
     if not out:
         return out
 
-    # 1) Uppercase single-letter run: A. B. C. ...
+    # 1) Single-letter run: A. B. C. ... or a) b) c) ...
     letter_matches = [
-        (m.start(), m.group(1))
-        for m in re.finditer(r"(?:^|(?<=\s))([A-Z])\.\s", out)
+        (m.start(), m.group(1).lower())
+        for m in re.finditer(r"(?:^|(?<=\s))([A-Za-z])[.)]\s", out)
     ]
     letter_cuts: Set[int] = set()
     if letter_matches:
@@ -21963,11 +23640,11 @@ def _explode_inline_ordered_enumerations(text: str) -> str:
             if prev_letter is not None and ord(ltr) == ord(prev_letter) + 1:
                 current.append((pos, ltr))
             else:
-                if len(current) >= 3 and current[0][1] in ("A", "B"):
+                if len(current) >= 3 and current[0][1] in ("a", "b"):
                     runs.append(current)
                 current = [(pos, ltr)]
             prev_letter = ltr
-        if len(current) >= 3 and current[0][1] in ("A", "B"):
+        if len(current) >= 3 and current[0][1] in ("a", "b"):
             runs.append(current)
         for run in runs:
             for pos, _ in run:
@@ -22071,9 +23748,8 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             seen_query_tokens.add(cand_tok)
             query_tokens.append(cand_tok)
     year_re = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
-    # MP-C6: also accept single uppercase letter (A./B./...) line starts so the
-    # exploded inline-enumeration items are matched as bullets.
-    bullet_num_re = re.compile(r"^\s*(?:[-•*�]|\d+[.)]|[A-Z]\.)\s*(.+)$")
+    # Accept alphabetic line starts so exploded inline enumerations are matched as bullets.
+    bullet_num_re = re.compile(r"^\s*(?:[-•*�]|\d+[.)]|[A-Za-z][.)])\s*(.+)$")
     caption_re = re.compile(r"^\s*(?:figure|fig\.?|table)\b", flags=re.IGNORECASE)
 
     def _looks_like_heading(line: str) -> bool:
@@ -22088,7 +23764,7 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
 
     def _normalize_item(raw: str) -> str:
         item = (raw or "").strip()
-        item = re.sub(r"^\s*(?:[-•*�]|\d+[.)]|[A-Z]\.)\s*", "", item)
+        item = re.sub(r"^\s*(?:[-•*�]|\d+[.)]|[A-Za-z][.)])\s*", "", item)
         item = re.sub(r"^\s*\d+\s*:\s*", "", item)
         item = re.sub(r"^\s*(?:first|second|third|fourth|fifth|then|next|finally)\s*[:\-]?\s*", "", item, flags=re.IGNORECASE)
         item = re.sub(r"^\s*(?:this\s+is|it\s+is|they\s+are|according\s+to|for\s+example|in\s+order\s+to|there\s+are|there\s+is)\s*[,:\-]?\s*", "", item, flags=re.IGNORECASE)
@@ -22113,7 +23789,13 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             if wc < 1 or wc > 8:
                 return False
         elif wc < 2 or wc > 12:
-            return False
+            # Allow uppercase single-word concept labels (e.g. "Prediction",
+            # "Observation") that are >=4 chars — common in alpha-marked lists
+            # (a), b), c) …) across any domain.  Generic: only casing + length.
+            if wc == 1 and len(item) >= 4 and item[0].isupper():
+                pass  # keep: single uppercase concept label
+            else:
+                return False
         if not re.search(r"[a-zA-Z]", item):
             return False
         if re.search(r"https?://|www\.|\.com\b", low):
@@ -22264,11 +23946,48 @@ def _extract_list_from_context(query: str, context: str, max_candidate_blocks: i
             out.append(item)
         return out
 
+    # Regex to detect alpha-marked lines: a) Item, b) Item, a. Item, b. Item
+    _alpha_marker_re_ctx = re.compile(r"^\s*[a-z][.)]\s*\S", re.IGNORECASE)
+
     for block in candidate_blocks[:max_blocks]:
         if query_tokens and _anchor_hits(block) == 0:
             continue
+
+        # Continuation merge: for alpha-list blocks, continuation connector
+        # lines are merged into the preceding item before extraction.
+        raw_block_lines = block.get("lines") or []
+        _has_alpha_markers = any(_alpha_marker_re_ctx.match(ln) for ln in raw_block_lines)
+        if _has_alpha_markers:
+            _alpha_count = sum(1 for ln in raw_block_lines if _alpha_marker_re_ctx.match(ln))
+            logger.info("[ALPHA LIST DETECTED] block_heading='%s' alpha_lines=%d total_lines=%d",
+                        str(block.get("heading") or "")[:50], _alpha_count, len(raw_block_lines))
+            merged_block_lines: List[str] = []
+            for _ln in raw_block_lines:
+                # Also merge when the previous line ends with a connector word.
+                _prev_ends_connector = bool(
+                    merged_block_lines
+                    and re.search(
+                        r"(?:\b(?:and|or|but|with)|&)\s*$",
+                        merged_block_lines[-1],
+                        re.IGNORECASE,
+                    )
+                )
+                if (merged_block_lines
+                        and not _alpha_marker_re_ctx.match(_ln)
+                        and (
+                            re.match(r"^\s*(?:and|or|but|with|to)\s+\S", _ln, re.IGNORECASE)
+                            or re.match(r"^\s*&\s*\S", _ln)
+                            or _prev_ends_connector
+                        )):
+                    merged_block_lines[-1] = merged_block_lines[-1].rstrip() + " " + _ln.strip()
+                    logger.info("[LIST ITEM CONTINUATION MERGED] appended='%s'", _ln.strip()[:60])
+                else:
+                    merged_block_lines.append(_ln)
+        else:
+            merged_block_lines = raw_block_lines
+
         collected: List[str] = []
-        for ln in block.get("lines") or []:
+        for ln in merged_block_lines:
             collected.extend(_extract_items_from_line(ln))
         ordered = _dedupe_ordered(collected)
         if len(ordered) < 2:
@@ -26648,7 +28367,7 @@ STRICT BEHAVIOR:
     
     # Ollama streaming payload — optimized for speed on 8GB VRAM
     # Phase 2: SPEED UP LLM RESPONSE - fast mode config
-    # For simple factual inquiries like "what is psycholoy", decrease max tokens and context size.
+    # For simple factual inquiries, decrease max tokens and context size.
     is_simple_factual_query = bool(_is_simple_factual_text_query(text))
     
     # Lower temperature when KB context is present to prevent the LLM drifting
