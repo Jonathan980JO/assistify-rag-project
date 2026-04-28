@@ -1,4 +1,5 @@
 import os
+import hashlib
 os.environ['ANONYMIZED_TELEMETRY'] = 'False'
 os.environ['CHROMA_TELEMETRY_IMPL'] = 'none'
 
@@ -7,7 +8,7 @@ import torch
 import chromadb
 from sentence_transformers import SentenceTransformer
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Callable, Any
 
 # If posthog is present but incompatible, stub capture to avoid runtime errors
 try:
@@ -73,6 +74,241 @@ def _e5_passage(text: str) -> str:
 def _e5_query(text: str) -> str:
     cleaned = " ".join((text or "").split())
     return f"query: {cleaned}" if cleaned else "query:"
+
+
+_STORED_FILENAME_PREFIX_RE = re.compile(r"^[0-9a-fA-F]{8}_")
+_SAFE_METADATA_SOURCE_FIELDS = (
+    "source_doc_id",
+    "source_name",
+    "original_filename",
+    "stored_filename",
+    "normalized_filename",
+    "source",
+    "filename",
+    "source_filename",
+    "document_id",
+    "base_doc_id",
+    "doc_id",
+    "id",
+    "upload_id",
+    "document_version",
+)
+
+
+def normalize_uploaded_filename(name: str) -> str:
+    """Return the canonical filename key used for source identity matching."""
+    raw = Path(str(name or "").strip()).name
+    if not raw:
+        return ""
+    raw = _STORED_FILENAME_PREFIX_RE.sub("", raw)
+    return raw.lower()
+
+
+def original_filename_from_stored(stored_filename: str) -> str:
+    raw = Path(str(stored_filename or "").strip()).name
+    if not raw:
+        return ""
+    return _STORED_FILENAME_PREFIX_RE.sub("", raw)
+
+
+def canonical_source_doc_id(normalized_filename: str) -> str:
+    key = normalize_uploaded_filename(normalized_filename) or str(normalized_filename or "").strip().lower()
+    if not key:
+        key = "document"
+    digest = hashlib.sha1(key.encode("utf-8", errors="ignore")).hexdigest()[:16]
+    return f"doc_{digest}"
+
+
+def build_canonical_source_metadata(
+    *,
+    original_filename: str,
+    stored_filename: str = "",
+    upload_id: str = "",
+    document_version: str = "",
+) -> dict:
+    """Build canonical metadata shared by all RAG-owned ingestion paths."""
+    stored = Path(str(stored_filename or original_filename or "document").strip()).name
+    original = Path(str(original_filename or original_filename_from_stored(stored) or stored).strip()).name
+    normalized = normalize_uploaded_filename(original or stored)
+    source_doc_id = canonical_source_doc_id(normalized)
+    version = document_version or upload_id or source_doc_id
+    return {
+        "source_doc_id": source_doc_id,
+        "source_name": original,
+        "original_filename": original,
+        "stored_filename": stored,
+        "normalized_filename": normalized,
+        "upload_id": str(upload_id or ""),
+        "document_version": str(version or ""),
+        # Legacy compatibility fields. Keep them canonical and consistent.
+        "source": source_doc_id,
+        "filename": stored,
+        "source_filename": stored,
+    }
+
+
+def _identity_key_variants(*values: str) -> tuple[list[str], set[str], set[str], set[str]]:
+    ordered: list[str] = []
+    raw_l: set[str] = set()
+    normalized: set[str] = set()
+    id_prefixes: set[str] = set()
+
+    def add(raw_value: Any) -> None:
+        raw = str(raw_value or "").strip()
+        if not raw:
+            return
+        candidates = [raw, Path(raw).name]
+        if raw.startswith("upload_"):
+            candidates.append(raw[len("upload_"):])
+            candidates.append(Path(raw[len("upload_"):]).name)
+        for cand in list(candidates):
+            if not cand:
+                continue
+            stripped = _STORED_FILENAME_PREFIX_RE.sub("", cand)
+            if stripped and stripped != cand:
+                candidates.append(stripped)
+            if cand.startswith("upload_"):
+                upload_stripped = cand[len("upload_"):]
+                candidates.append(upload_stripped)
+                candidates.append(_STORED_FILENAME_PREFIX_RE.sub("", upload_stripped))
+
+        for cand in candidates:
+            item = str(cand or "").strip()
+            if not item:
+                continue
+            item_l = item.lower()
+            if item_l not in raw_l:
+                raw_l.add(item_l)
+                ordered.append(item)
+            norm = normalize_uploaded_filename(item)
+            if norm:
+                normalized.add(norm)
+            if len(item_l) >= 3:
+                id_prefixes.add(item_l)
+                id_prefixes.add(f"{item_l}_chunk_")
+
+    for value in values:
+        add(value)
+    return ordered, raw_l, normalized, id_prefixes
+
+
+def _metadata_matches_source_identity(
+    doc_id: str,
+    metadata: dict,
+    raw_keys_l: set[str],
+    normalized_keys: set[str],
+    id_prefixes_l: set[str],
+) -> bool:
+    sid_l = str(doc_id or "").strip().lower()
+    if sid_l:
+        for prefix in id_prefixes_l:
+            if prefix and (sid_l == prefix or sid_l.startswith(prefix)):
+                return True
+
+    md = metadata if isinstance(metadata, dict) else {}
+    for field in _SAFE_METADATA_SOURCE_FIELDS:
+        raw = str(md.get(field) or "").strip()
+        if not raw:
+            continue
+        raw_l = raw.lower()
+        if raw_l in raw_keys_l:
+            return True
+        if field in {"source_doc_id", "document_id", "base_doc_id", "doc_id", "id"}:
+            for prefix in id_prefixes_l:
+                if prefix and (raw_l == prefix or raw_l.startswith(prefix)):
+                    return True
+        norm = normalize_uploaded_filename(raw)
+        if norm and norm in normalized_keys:
+            return True
+    return False
+
+
+def delete_documents_by_source_identity(
+    *,
+    source_doc_id: str = "",
+    original_filename: str = "",
+    stored_filename: str = "",
+    normalized_filename: str = "",
+    upload_id: str = "",
+    document_version: str = "",
+    doc_prefix: str = "",
+    extra_keys: Optional[list[str]] = None,
+) -> dict:
+    """Delete chunks matching any canonical or legacy source identity key."""
+    attempted, raw_keys_l, normalized_keys, id_prefixes_l = _identity_key_variants(
+        source_doc_id,
+        original_filename,
+        stored_filename,
+        normalized_filename,
+        upload_id,
+        document_version,
+        doc_prefix,
+        *(extra_keys or []),
+    )
+    logger.info("[INGEST DELETE] attempted_keys=%s", attempted)
+
+    deleted_total = 0
+    remaining_total = 0
+    per_collection: list[dict] = []
+    try:
+        try:
+            collections = list(client.list_collections() or [])
+        except Exception:
+            collections = []
+
+        if not collections:
+            fallback = get_or_create_collection(allow_empty=True)
+            collections = [fallback] if fallback else []
+
+        for col in collections:
+            if not col:
+                continue
+            if isinstance(col, str):
+                try:
+                    col = client.get_collection(name=col)
+                except Exception as get_err:
+                    logger.warning("delete_documents_by_source_identity: could not open collection '%s': %s", col, get_err)
+                    continue
+            col_name = getattr(col, "name", "<unknown>")
+            try:
+                result = col.get(include=["metadatas"]) or {}
+                ids = result.get("ids", []) or []
+                metadatas = result.get("metadatas", []) or []
+                to_delete = [
+                    str(doc_id)
+                    for doc_id, meta in zip(ids, metadatas)
+                    if _metadata_matches_source_identity(str(doc_id), meta if isinstance(meta, dict) else {}, raw_keys_l, normalized_keys, id_prefixes_l)
+                ]
+                if to_delete:
+                    col.delete(ids=to_delete)
+                    deleted_total += len(to_delete)
+
+                verify = col.get(include=["metadatas"]) or {}
+                verify_ids = verify.get("ids", []) or []
+                verify_metas = verify.get("metadatas", []) or []
+                remaining = sum(
+                    1
+                    for doc_id, meta in zip(verify_ids, verify_metas)
+                    if _metadata_matches_source_identity(str(doc_id), meta if isinstance(meta, dict) else {}, raw_keys_l, normalized_keys, id_prefixes_l)
+                )
+                remaining_total += remaining
+                if to_delete or remaining:
+                    per_collection.append({"collection": col_name, "deleted": len(to_delete), "remaining": remaining})
+            except Exception as col_err:
+                logger.warning("delete_documents_by_source_identity: failed in collection '%s': %s", col_name, col_err)
+    except Exception as err:
+        logger.error("delete_documents_by_source_identity failed: %s", err)
+
+    logger.info("[INGEST DELETE] deleted_count=%s", deleted_total)
+    logger.info("[INGEST DELETE VERIFY] remaining_count=%s", remaining_total)
+    if remaining_total > 0:
+        logger.warning("[INGEST DELETE VERIFY] remaining_count=%s after attempted_keys=%s", remaining_total, attempted)
+    return {
+        "attempted_keys": attempted,
+        "deleted_count": int(deleted_total),
+        "remaining_count": int(remaining_total),
+        "collections": per_collection,
+    }
 
 def get_or_create_collection(allow_empty: bool = False):
     """Get collection or create if doesn't exist.
@@ -167,7 +403,15 @@ def add_document(doc_id: str, text: str, metadata: dict = None):
         return False
 
 
-def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_version: int = 0, return_details: bool = False, target_collection_name: str = None):
+def chunk_and_add_document(
+    doc_id: str,
+    text: str,
+    metadata: dict = None,
+    kb_version: int = 0,
+    return_details: bool = False,
+    target_collection_name: str = None,
+    progress_callback: Optional[Callable[[dict], None]] = None,
+):
     """
     Split *text* into fine-grained chunks and store each one with its own
     embedding.  This is the correct way to index a file that contains many
@@ -196,7 +440,18 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
     Returns the number of chunks successfully indexed.
     """
     import re as _re
+    import time as _time
     from datetime import datetime as _dt
+    total_t0 = _time.perf_counter()
+    chunking_t0 = _time.perf_counter()
+
+    def _emit_progress(event: dict) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(dict(event or {}))
+        except Exception as progress_err:
+            logger.debug("chunk_and_add_document progress callback failed: %s", progress_err)
 
     # Normalise Windows line-endings
     text = text.replace('\r\n', '\n').replace('\r', '\n')
@@ -617,6 +872,33 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
             record["section"] = mapped_chapter
 
     chunks = [r["text"] for r in chunk_records]
+    chunking_ms = int((_time.perf_counter() - chunking_t0) * 1000)
+    logger.info("[INGEST PERF] stage=chunking chunks=%s ms=%s", len(chunks), chunking_ms)
+    _emit_progress({"stage": "chunking", "chunks": len(chunks), "ms": chunking_ms})
+
+    all_pages = sorted({int(page_num) for page_num, _page_text in page_blocks if page_num is not None})
+    chunk_pages = sorted({int(r.get("page")) for r in chunk_records if r.get("page") is not None})
+    page_range = ""
+    if chunk_pages:
+        page_range = f"{chunk_pages[0]}-{chunk_pages[-1]}" if chunk_pages[0] != chunk_pages[-1] else str(chunk_pages[0])
+    missing_pages = [p for p in all_pages if p not in set(chunk_pages)]
+    sample_first = [
+        {"chunk_index": idx, "page": chunk_records[idx].get("page")}
+        for idx in range(min(3, len(chunk_records)))
+    ]
+    sample_last = [
+        {"chunk_index": idx, "page": chunk_records[idx].get("page")}
+        for idx in range(max(0, len(chunk_records) - 3), len(chunk_records))
+    ]
+    logger.info(
+        "[PAGE META SUMMARY] doc_id=%s chunks=%s page_range=%s missing_pages=%s sample_first=%s sample_last=%s",
+        doc_id,
+        len(chunks),
+        page_range or "None",
+        missing_pages[:25],
+        sample_first,
+        sample_last,
+    )
     details = {
         "doc_id": str(doc_id),
         "collection": None,
@@ -671,6 +953,7 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
         UPSERT_BATCH_SIZE = 100
     
     logger.info(f"Processing {len(chunks)} chunks using {device.upper()} (embed_batch={EMBEDDING_BATCH_SIZE}, upsert_batch={UPSERT_BATCH_SIZE})")
+    total_batches = max(1, (len(chunks) + UPSERT_BATCH_SIZE - 1) // UPSERT_BATCH_SIZE)
     
     for batch_start in range(0, len(chunks), UPSERT_BATCH_SIZE):
         batch_end = min(batch_start + UPSERT_BATCH_SIZE, len(chunks))
@@ -683,6 +966,7 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
             # On CPU: encode in sub-batches to avoid memory issues
             embedding_inputs = [_e5_passage(chunk) for chunk in batch_chunks]
 
+            embed_t0 = _time.perf_counter()
             if device == 'cuda':
                 batch_embeddings = embedder.encode(embedding_inputs, batch_size=EMBEDDING_BATCH_SIZE, show_progress_bar=False).tolist()
             else:
@@ -693,12 +977,27 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
                     embeddings.append(sub_emb)
                 import numpy as _np
                 batch_embeddings = _np.vstack(embeddings).tolist()
+            embed_ms = int((_time.perf_counter() - embed_t0) * 1000)
+            batch_no = (batch_start // UPSERT_BATCH_SIZE) + 1
+            logger.info(
+                "[INGEST PERF] stage=embedding batch=%s/%s chunks=%s ms=%s",
+                batch_no,
+                total_batches,
+                len(batch_chunks),
+                embed_ms,
+            )
+            _emit_progress({"stage": "embedding", "batch": batch_no, "batches": total_batches, "chunks": len(batch_chunks), "ms": embed_ms})
             
             # Prepare batch metadata and upsert
             batch_ids = [f"{doc_id}_chunk_{idx}" for idx in batch_indices]
             batch_metas = []
             base_meta = dict(metadata or {})
-            source_filename = str(base_meta.get("filename", "") or base_meta.get("source", "") or "")
+            canonical_source_doc_id = str(base_meta.get("source_doc_id") or "").strip()
+            original_filename = str(base_meta.get("original_filename") or "").strip()
+            stored_filename = str(base_meta.get("stored_filename") or base_meta.get("filename") or "").strip()
+            normalized_filename = str(base_meta.get("normalized_filename") or normalize_uploaded_filename(original_filename or stored_filename)).strip()
+            source_name = str(base_meta.get("source_name") or original_filename or stored_filename).strip()
+            source_filename = stored_filename or str(base_meta.get("source_filename", "") or base_meta.get("source", "") or "")
 
             def _coerce_page_value(record: dict, fallback_text: str) -> Optional[int]:
                 raw_page = record.get("page")
@@ -732,6 +1031,18 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
                 chunk_meta["chunk_total"] = len(chunks)
                 chunk_meta["document_id"] = str(doc_id)
                 chunk_meta["base_doc_id"] = str(doc_id)
+                if canonical_source_doc_id:
+                    chunk_meta["source_doc_id"] = canonical_source_doc_id
+                    chunk_meta["source"] = canonical_source_doc_id
+                if source_name:
+                    chunk_meta["source_name"] = source_name
+                if original_filename:
+                    chunk_meta["original_filename"] = original_filename
+                if stored_filename:
+                    chunk_meta["stored_filename"] = stored_filename
+                    chunk_meta["filename"] = stored_filename
+                if normalized_filename:
+                    chunk_meta["normalized_filename"] = normalized_filename
                 chunk_meta["updated_at"] = now_iso
                 chunk_meta["kb_version"] = kb_version
                 chunk_meta["unit"] = str(record.get("unit") or "")
@@ -743,14 +1054,8 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
                 if resolved_page is not None:
                     chunk_meta["page"] = int(resolved_page)
                 chunk_meta["source_filename"] = source_filename
-                if source_filename:
+                if source_filename and not canonical_source_doc_id:
                     chunk_meta["source"] = source_filename
-                logger.info(
-                    "[PAGE META] chunk_id=%s page=%s source=%s",
-                    batch_ids[local_idx],
-                    (chunk_meta.get("page") if chunk_meta.get("page") is not None else "None"),
-                    (chunk_meta.get("source") or chunk_meta.get("source_filename") or ""),
-                )
                 # Chroma metadata must be scalar primitive values and cannot include None.
                 clean_meta = {}
                 for mk, mv in chunk_meta.items():
@@ -763,14 +1068,25 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
                 batch_metas.append(clean_meta)
             
             # Batch upsert (much faster than individual upserts)
+            upsert_t0 = _time.perf_counter()
             collection.upsert(
                 ids=batch_ids,
                 embeddings=batch_embeddings,
                 documents=batch_chunks,
                 metadatas=batch_metas,
             )
+            upsert_ms = int((_time.perf_counter() - upsert_t0) * 1000)
+            logger.info(
+                "[INGEST PERF] stage=upsert batch=%s/%s chunks=%s ms=%s",
+                batch_no,
+                total_batches,
+                len(batch_chunks),
+                upsert_ms,
+            )
             success += len(batch_chunks)
-            logger.info(f"  ✓ Indexed [{batch_start}-{batch_end-1}]/{len(chunks)} chunks")
+            percent = int(round((success / max(1, len(chunks))) * 100))
+            logger.info("[INGEST PROGRESS] indexed=%s/%s percent=%s", success, len(chunks), percent)
+            _emit_progress({"stage": "writing", "indexed": success, "total": len(chunks), "percent": percent, "batch": batch_no, "batches": total_batches, "ms": upsert_ms})
             
         except Exception as e:
             err_msg = f"Error upserting batch [{batch_start}-{batch_end-1}] for doc_id={doc_id}: {e}"
@@ -787,6 +1103,9 @@ def chunk_and_add_document(doc_id: str, text: str, metadata: dict = None, kb_ver
         len(chunks),
         len(details["batch_errors"]),
     )
+    total_ms = int((_time.perf_counter() - total_t0) * 1000)
+    logger.info("[INGEST PERF] stage=complete chunks=%s total_ms=%s", success, total_ms)
+    _emit_progress({"stage": "complete", "chunks": success, "total_ms": total_ms})
 
     if success == 0 and details["batch_errors"]:
         raise RuntimeError("All upsert batches failed. First error: " + details["batch_errors"][0])
@@ -940,58 +1259,18 @@ def delete_documents_by_filename(filename: str) -> int:
     Returns the number of documents deleted.
     """
     try:
-        import re as _re
-
-        # Strip any leading UUID prefix (8 hex chars + underscore) from the
-        # target filename so we can match both prefixed and unprefixed variants.
-        bare_name = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
-        deleted_total = 0
-
-        try:
-            collections = list(client.list_collections() or [])
-        except Exception:
-            collections = []
-
-        if not collections:
-            fallback = get_or_create_collection(allow_empty=True)
-            collections = [fallback] if fallback else []
-
-        for col in collections:
-            if not col:
-                continue
-            try:
-                col_name = getattr(col, "name", "<unknown>")
-                result = col.get(include=["metadatas"]) or {}
-                ids = result.get("ids", [])
-                metadatas = result.get("metadatas", [])
-
-                to_delete = set()
-                for doc_id, meta in zip(ids, metadatas):
-                    sid = str(doc_id)
-                    fn = meta.get("filename", "") if isinstance(meta, dict) else ""
-                    src = meta.get("source", "") if isinstance(meta, dict) else ""
-
-                    if fn == filename or src == filename:
-                        to_delete.add(sid)
-                        continue
-
-                    if bare_name and (fn.endswith(bare_name) or src.endswith(bare_name)):
-                        to_delete.add(sid)
-                        continue
-
-                    if filename in sid or bare_name in sid:
-                        to_delete.add(sid)
-                        continue
-
-                if not to_delete:
-                    continue
-
-                col.delete(ids=list(to_delete))
-                deleted_total += len(to_delete)
-                logger.info(f"✓ Deleted {len(to_delete)} chunks matching filename '{filename}' from '{col_name}'")
-            except Exception as col_err:
-                logger.warning(f"delete_documents_by_filename: failed in collection '{getattr(col, 'name', '<unknown>')}': {col_err}")
-
+        stored_filename = Path(str(filename or "").strip()).name
+        original_filename = original_filename_from_stored(stored_filename)
+        normalized_filename = normalize_uploaded_filename(original_filename or stored_filename)
+        report = delete_documents_by_source_identity(
+            original_filename=original_filename,
+            stored_filename=stored_filename,
+            normalized_filename=normalized_filename,
+            source_doc_id=canonical_source_doc_id(normalized_filename) if normalized_filename else "",
+            doc_prefix=str(filename or ""),
+            extra_keys=[f"upload_{stored_filename}", f"upload_{original_filename}"] if stored_filename else [],
+        )
+        deleted_total = int(report.get("deleted_count") or 0)
         if deleted_total == 0:
             logger.info(f"delete_documents_by_filename: nothing found for '{filename}'")
         return deleted_total

@@ -55,7 +55,7 @@ from itsdangerous import URLSafeSerializer
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
-from typing import Optional, TYPE_CHECKING, List, Set, Dict, Tuple, Any, Union
+from typing import Optional, TYPE_CHECKING, List, Set, Dict, Tuple, Any, Union, Callable, Awaitable
 ###############################
 # Voice pipeline globals (fix NameError)
 _active_voice_task = None
@@ -3021,6 +3021,7 @@ _current_active_doc_id: str = ""
 
 _kb_pipeline_state: dict = {
     "state": "ready",  # uploading | processing | ready | failed
+    "stage": "ready",  # uploading | extracting | chunking | embedding | writing | activating | ready | failed
     "message": "ready",
     "filename": None,
     "updated_at": time.time(),
@@ -3029,6 +3030,9 @@ _kb_pipeline_state: dict = {
     "stage_timings": {},  # name -> seconds since started_at
     "last_total_seconds": None,
     "last_bottleneck": None,
+    "indexed_chunks": 0,
+    "total_chunks": 0,
+    "percent": 100,
 }
 
 
@@ -3037,6 +3041,7 @@ def _set_kb_pipeline_state(state: str, message: str = "", filename: Optional[str
     if normalized not in {"uploading", "processing", "ready", "failed"}:
         normalized = "processing"
     _kb_pipeline_state["state"] = normalized
+    _kb_pipeline_state["stage"] = "uploading" if normalized == "uploading" else ("ready" if normalized == "ready" else ("failed" if normalized == "failed" else _kb_pipeline_state.get("stage", "processing")))
     _kb_pipeline_state["message"] = str(message or normalized)
     _kb_pipeline_state["filename"] = filename
     _kb_pipeline_state["updated_at"] = time.time()
@@ -3047,9 +3052,13 @@ def _set_kb_pipeline_state(state: str, message: str = "", filename: Optional[str
         _kb_pipeline_state["stage_timings"] = {}
         _kb_pipeline_state["last_total_seconds"] = None
         _kb_pipeline_state["last_bottleneck"] = None
+        _kb_pipeline_state["indexed_chunks"] = 0
+        _kb_pipeline_state["total_chunks"] = 0
+        _kb_pipeline_state["percent"] = 0
     elif normalized == "ready":
         now = time.time()
         _kb_pipeline_state["ready_at"] = now
+        _kb_pipeline_state["percent"] = 100
         started = _kb_pipeline_state.get("started_at") or now
         _kb_pipeline_state["last_total_seconds"] = round(now - started, 3)
         timings = _kb_pipeline_state.get("stage_timings") or {}
@@ -3078,6 +3087,60 @@ def _record_kb_stage(stage: str) -> None:
         return
     timings = _kb_pipeline_state.setdefault("stage_timings", {})
     timings[str(stage)] = round(time.time() - float(started), 3)
+
+
+def _set_kb_pipeline_stage(
+    stage: str,
+    message: str = "",
+    filename: Optional[str] = None,
+    indexed: Optional[int] = None,
+    total: Optional[int] = None,
+    percent: Optional[int] = None,
+) -> None:
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage not in {"uploading", "extracting", "chunking", "embedding", "writing", "activating", "ready", "failed"}:
+        normalized_stage = "processing"
+    if normalized_stage == "ready":
+        _set_kb_pipeline_state("ready", message=message or "ready", filename=filename)
+    elif normalized_stage == "failed":
+        _set_kb_pipeline_state("failed", message=message or "failed", filename=filename)
+    elif normalized_stage == "uploading":
+        _set_kb_pipeline_state("uploading", message=message or "uploading", filename=filename)
+    else:
+        _kb_pipeline_state["state"] = "processing"
+        _kb_pipeline_state["stage"] = normalized_stage
+        _kb_pipeline_state["message"] = str(message or normalized_stage)
+        if filename is not None:
+            _kb_pipeline_state["filename"] = filename
+        _kb_pipeline_state["updated_at"] = time.time()
+    if indexed is not None:
+        _kb_pipeline_state["indexed_chunks"] = int(indexed)
+    if total is not None:
+        _kb_pipeline_state["total_chunks"] = int(total)
+    if percent is not None:
+        _kb_pipeline_state["percent"] = max(0, min(100, int(percent)))
+    _record_kb_stage(normalized_stage)
+
+
+def _on_ingest_progress(event: dict, filename: str) -> None:
+    stage = str((event or {}).get("stage") or "").strip().lower()
+    if stage == "complete":
+        return
+    status_stage = "writing" if stage == "writing" else (stage if stage in {"chunking", "embedding"} else "processing")
+    indexed = (event or {}).get("indexed")
+    total = (event or {}).get("total")
+    percent = (event or {}).get("percent")
+    message = status_stage
+    if total:
+        message = f"{status_stage} {indexed or 0}/{total}"
+    _set_kb_pipeline_stage(
+        status_stage,
+        message=message,
+        filename=filename,
+        indexed=int(indexed) if indexed is not None else None,
+        total=int(total) if total is not None else None,
+        percent=int(percent) if percent is not None else None,
+    )
 
 
 def _kb_is_ready_for_queries() -> Tuple[bool, str]:
@@ -3130,9 +3193,18 @@ def _get_active_sources() -> Set[str]:
 def _metadata_source_keys(metadata: Optional[Dict[Any, Any]]) -> Set[str]:
     md = metadata or {}
     candidates = {
+        str(md.get("source_doc_id") or "").strip(),
+        str(md.get("source_name") or "").strip(),
+        str(md.get("original_filename") or "").strip(),
+        str(md.get("stored_filename") or "").strip(),
+        str(md.get("normalized_filename") or "").strip(),
         str(md.get("source") or "").strip(),
         str(md.get("filename") or "").strip(),
         str(md.get("source_filename") or "").strip(),
+        str(md.get("file") or "").strip(),
+        str(md.get("doc_id") or "").strip(),
+        str(md.get("document_id") or "").strip(),
+        str(md.get("base_doc_id") or "").strip(),
     }
     keys = set()
     for c in candidates:
@@ -3157,14 +3229,379 @@ def _filter_results_to_active_sources(results: List[Dict[Any, Any]]) -> List[Dic
             filtered.append(item)
     if filtered:
         return filtered
-    if results and items_without_source_keys == len(results):
+    if results and items_without_source_keys:
         logger.warning(
-            "Active-source filter fallback: metadata lacked source keys for %s result(s); returning unfiltered results",
+            "Active-source filter dropped unverifiable result(s): active_sources=%s total=%s missing_source_keys=%s",
+            sorted(active_sources),
             len(results),
+            items_without_source_keys,
         )
-        return results
     return filtered
     logger.info("All caches invalidated (conversations + Ollama KV cache)")
+
+
+_DOC_ROUTER_STOPWORDS: Set[str] = {
+    "a", "an", "the", "and", "or", "but", "if", "then", "else", "of", "to", "in", "on", "at",
+    "for", "from", "by", "with", "without", "within", "into", "onto", "as", "is", "are", "was",
+    "were", "be", "being", "been", "do", "does", "did", "can", "could", "should", "would", "may",
+    "might", "must", "will", "shall", "what", "which", "who", "whom", "whose", "when", "where",
+    "why", "how", "during", "about", "regarding", "concerning", "between", "among", "against",
+    "tell", "show", "give", "name", "mention", "identify", "list", "define", "explain", "describe",
+    "please", "me", "we", "you", "they", "he", "she", "it", "this", "that", "these", "those",
+    "document", "documents", "source", "sources", "file", "files", "pdf", "pdfs", "both", "all", "each",
+    "combine", "combined", "synthesize", "synthesise", "summarize", "summarise", "summary", "info",
+    "information", "details", "based", "using", "provided", "context",
+}
+
+_DOC_ROUTER_VAGUE_TERMS: Set[str] = {
+    "policy", "rule", "rules", "procedure", "procedures", "guideline", "guidelines", "requirement",
+    "requirements", "topic", "subject", "section", "chapter", "overview", "summary", "detail", "details",
+    "information", "document", "source", "file", "item", "items", "thing", "things",
+}
+
+
+def _doc_router_text(doc: Dict[str, Any]) -> str:
+    return str(
+        (doc or {}).get("page_content")
+        or (doc or {}).get("text")
+        or (doc or {}).get("content")
+        or ""
+    )
+
+
+def _doc_router_score(doc: Dict[str, Any]) -> float:
+    for key in ("score", "final_score", "similarity", "_boosted_score"):
+        if key in (doc or {}):
+            try:
+                return float((doc or {}).get(key) or 0.0)
+            except Exception:
+                return 0.0
+    md = dict((doc or {}).get("metadata") or {})
+    try:
+        return float(md.get("_score") or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _doc_router_source_key(doc: Dict[str, Any]) -> str:
+    md = dict((doc or {}).get("metadata") or {})
+    active_sources = _get_active_sources()
+    keys = _metadata_source_keys(md)
+    active_hits = sorted(keys & active_sources)
+    if active_hits:
+        return active_hits[0]
+    for field in ("filename", "source_filename", "file", "doc_id", "source", "id"):
+        raw = str(md.get(field) or "").strip()
+        normalized = _normalize_source_label(raw)
+        if normalized:
+            return normalized
+    return "unknown"
+
+
+def _doc_router_display_source(doc: Dict[str, Any], source_key: str) -> str:
+    md = dict((doc or {}).get("metadata") or {})
+    for field in ("filename", "source_filename", "file", "doc_id", "source", "title"):
+        raw = str(md.get(field) or "").strip()
+        if raw and _normalize_source_label(raw) not in {"upload", "watcher"}:
+            return raw
+    return source_key or "unknown"
+
+
+def _filter_doc_dicts_to_active_sources(doc_dicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    active_sources = _get_active_sources()
+    if not active_sources:
+        return list(doc_dicts or [])
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    unverifiable = 0
+    for doc in doc_dicts or []:
+        md = dict((doc or {}).get("metadata") or {})
+        keys = _metadata_source_keys(md)
+        if not keys:
+            unverifiable += 1
+            dropped += 1
+            continue
+        if keys & active_sources:
+            kept.append(doc)
+        else:
+            dropped += 1
+    if dropped:
+        logger.info(
+            "[DOC ROUTER] stale_source_filter active_sources=%s kept=%s dropped=%s unverifiable=%s",
+            sorted(active_sources),
+            len(kept),
+            dropped,
+            unverifiable,
+        )
+    return kept
+
+
+def _doc_router_normalized_query_tokens(query_text: str) -> List[str]:
+    q = re.sub(r"[^A-Za-z0-9\s'-]+", " ", str(query_text or "").lower())
+    tokens: List[str] = []
+    seen: Set[str] = set()
+    for raw in re.findall(r"[a-z0-9][a-z0-9'-]*", q):
+        cleaned = raw.strip("'-")
+        if len(cleaned) < 2 or cleaned in _DOC_ROUTER_STOPWORDS:
+            continue
+        norm = _light_normalize_query_token(cleaned)
+        if not norm or norm in _DOC_ROUTER_STOPWORDS or norm in seen:
+            continue
+        seen.add(norm)
+        tokens.append(norm)
+    return tokens[:12]
+
+
+def _extract_doc_router_query_concepts(query_text: str) -> Tuple[List[str], List[str]]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    query_tokens = _doc_router_normalized_query_tokens(q)
+    concepts: List[str] = []
+    seen: Set[str] = set()
+
+    boundary_re = re.compile(
+        r"\b(?:of|during|about|regarding|concerning|between|among|versus|vs|against|while|when|where|"
+        r"with|without|for|from|into|onto|and|or)\b",
+        re.IGNORECASE,
+    )
+    for part in boundary_re.split(q):
+        part_tokens = _doc_router_normalized_query_tokens(part)
+        if not part_tokens:
+            continue
+        phrase = " ".join(part_tokens[:5]).strip()
+        if not phrase or phrase in seen:
+            continue
+        seen.add(phrase)
+        concepts.append(phrase)
+
+    if not concepts:
+        concepts = list(query_tokens[:6])
+    elif len(concepts) == 1 and len(query_tokens) > len(concepts[0].split()):
+        for token in query_tokens:
+            if token not in seen:
+                seen.add(token)
+                concepts.append(token)
+            if len(concepts) >= 6:
+                break
+
+    return concepts[:6], query_tokens
+
+
+def _doc_router_concept_hit(concept: str, text_l: str) -> bool:
+    concept_tokens = [
+        _light_normalize_query_token(t)
+        for t in re.findall(r"[a-z0-9][a-z0-9'-]*", str(concept or "").lower())
+    ]
+    concept_tokens = [t for t in concept_tokens if t and t not in _DOC_ROUTER_STOPWORDS]
+    if not concept_tokens or not text_l:
+        return False
+    if len(concept_tokens) > 1:
+        phrase_re = r"\b" + r"\s+".join(re.escape(t) for t in concept_tokens) + r"\b"
+        if re.search(phrase_re, text_l):
+            return True
+    token_hits = sum(1 for token in concept_tokens if _token_match_light(text_l, token))
+    needed = 1 if len(concept_tokens) <= 2 else max(2, math.ceil(len(concept_tokens) * 0.60))
+    return token_hits >= needed
+
+
+def _doc_router_explicit_multi_source_request(query_text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+    source_noun = r"(?:documents?|sources?|files?|pdfs?)"
+    return bool(
+        re.search(rf"\b(?:both|all|each|multiple|several)\s+{source_noun}\b", q)
+        or re.search(rf"\b(?:combine|synthesi[sz]e|summari[sz]e|compare|merge)\b.{0,80}\b{source_noun}\b", q)
+        or re.search(rf"\bacross\s+{source_noun}\b", q)
+    )
+
+
+def _doc_router_query_is_ambiguous(query_text: str, concepts: List[str], query_tokens: List[str], explicit_multi: bool) -> bool:
+    if explicit_multi:
+        return False
+    if not query_tokens:
+        return True
+    if len(concepts or []) <= 1 and len(query_tokens) <= 2:
+        return any(t in _DOC_ROUTER_VAGUE_TERMS for t in query_tokens)
+    return False
+
+
+def _doc_router_interleave_docs(
+    doc_dicts: List[Dict[str, Any]],
+    selected_sources: List[str],
+    per_source_limit: int = 3,
+    total_limit: int = 10,
+) -> List[Dict[str, Any]]:
+    selected_set = set(selected_sources or [])
+    grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for doc in doc_dicts or []:
+        source_key = _doc_router_source_key(doc)
+        if source_key in selected_set:
+            grouped[source_key].append(doc)
+
+    ordered: List[Dict[str, Any]] = []
+    seen_ids: Set[int] = set()
+    for round_idx in range(max(1, per_source_limit)):
+        for source in selected_sources or []:
+            candidates = grouped.get(source) or []
+            if round_idx >= len(candidates):
+                continue
+            doc = candidates[round_idx]
+            doc_identity = id(doc)
+            if doc_identity in seen_ids:
+                continue
+            seen_ids.add(doc_identity)
+            ordered.append(doc)
+            if len(ordered) >= total_limit:
+                return ordered
+    return ordered
+
+
+def _route_multi_document_evidence(query_text: str, doc_dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    safe_docs = _filter_doc_dicts_to_active_sources(doc_dicts or [])
+    concepts, query_tokens = _extract_doc_router_query_concepts(query_text)
+    explicit_multi = _doc_router_explicit_multi_source_request(query_text)
+
+    groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    source_display: Dict[str, str] = {}
+    for rank, doc in enumerate(safe_docs):
+        source_key = _doc_router_source_key(doc)
+        if not source_key or source_key == "unknown":
+            continue
+        groups[source_key].append((rank, doc))
+        source_display.setdefault(source_key, _doc_router_display_source(doc, source_key))
+
+    stats: List[Dict[str, Any]] = []
+    for source_key, ranked_docs in groups.items():
+        scores = [_doc_router_score(doc) for _, doc in ranked_docs]
+        group_text_l = "\n".join(_doc_router_text(doc)[:3500] for _, doc in ranked_docs[:8]).lower()
+        token_hits = [token for token in query_tokens if _token_match_light(group_text_l, token)]
+        concept_hits = [concept for concept in concepts if _doc_router_concept_hit(concept, group_text_l)]
+        top_rank = min((rank for rank, _doc in ranked_docs), default=999)
+        top_score = max(scores) if scores else 0.0
+        avg_score = (sum(scores) / len(scores)) if scores else 0.0
+        query_coverage = float(len(token_hits)) / max(1.0, float(len(query_tokens)))
+        concept_coverage = float(len(concept_hits)) / max(1.0, float(len(concepts))) if concepts else 0.0
+        rank_strength = 1.0 / (1.0 + float(top_rank))
+        score_floor = max(0.0, top_score)
+        router_score = (
+            (3.0 * concept_coverage)
+            + (1.5 * query_coverage)
+            + (1.2 * rank_strength)
+            + (0.20 * min(5.0, math.log1p(len(ranked_docs))))
+            + (0.05 * score_floor)
+        )
+        stats.append({
+            "source": source_key,
+            "display_source": source_display.get(source_key, source_key),
+            "top_score": float(top_score),
+            "average_score": float(avg_score),
+            "chunk_count": len(ranked_docs),
+            "query_coverage": float(query_coverage),
+            "concept_coverage": float(concept_coverage),
+            "concept_hits": concept_hits,
+            "token_hits": token_hits,
+            "top_rank": int(top_rank),
+            "router_score": float(router_score),
+        })
+
+    stats.sort(key=lambda row: (float(row.get("router_score", 0.0)), -int(row.get("top_rank", 999))), reverse=True)
+    candidate_sources = [str(row.get("display_source") or row.get("source")) for row in stats]
+    source_scores_log = {
+        str(row.get("display_source") or row.get("source")): {
+            "top_score": round(float(row.get("top_score") or 0.0), 4),
+            "average_score": round(float(row.get("average_score") or 0.0), 4),
+            "chunks": int(row.get("chunk_count") or 0),
+            "query_coverage": round(float(row.get("query_coverage") or 0.0), 3),
+            "concept_coverage": round(float(row.get("concept_coverage") or 0.0), 3),
+            "concept_hits": list(row.get("concept_hits") or []),
+        }
+        for row in stats
+    }
+
+    mode = "single_source"
+    reason = "single active retrieved source"
+    selected_sources: List[str] = [str(stats[0].get("source"))] if stats else []
+
+    if not stats:
+        mode = "single_source"
+        reason = "no verifiable active retrieved sources"
+        selected_sources = []
+    elif len(stats) == 1:
+        mode = "single_source"
+        reason = "only one verifiable source after active-source filtering"
+    else:
+        top = stats[0]
+        second = stats[1]
+        ambiguous = _doc_router_query_is_ambiguous(query_text, concepts, query_tokens, explicit_multi)
+        top_cov = float(top.get("concept_coverage") or 0.0)
+        second_cov = float(second.get("concept_coverage") or 0.0)
+        top_query_cov = float(top.get("query_coverage") or 0.0)
+        second_query_cov = float(second.get("query_coverage") or 0.0)
+        top_router = float(top.get("router_score") or 0.0)
+        second_router = float(second.get("router_score") or 0.0)
+
+        concept_best_sources: Dict[str, str] = {}
+        for concept in concepts:
+            concept_candidates = [row for row in stats if concept in set(row.get("concept_hits") or [])]
+            if concept_candidates:
+                concept_best_sources[concept] = str(concept_candidates[0].get("source"))
+        union_concept_coverage = float(len(concept_best_sources)) / max(1.0, float(len(concepts))) if concepts else 0.0
+        best_sources_for_concepts = list(dict.fromkeys(concept_best_sources.values()))
+
+        if explicit_multi:
+            selected_sources = [str(row.get("source")) for row in stats[: min(3, len(stats))]]
+            mode = "multi_source_synthesis" if len(selected_sources) > 1 else "single_source"
+            reason = "query explicitly asks to combine evidence across sources"
+        elif ambiguous and (top_cov <= 0.75 or abs(top_router - second_router) < 1.25) and (second_cov > 0.0 or second_query_cov > 0.0):
+            selected_sources = [str(row.get("source")) for row in stats[: min(3, len(stats))]]
+            mode = "clarification"
+            reason = "ambiguous query with multiple plausible active sources"
+        elif len(best_sources_for_concepts) >= 2 and union_concept_coverage >= 0.75 and union_concept_coverage > (top_cov + 0.20):
+            selected_sources = best_sources_for_concepts[:3]
+            mode = "multi_source_synthesis"
+            reason = "different sources cover different query concepts"
+        elif top_cov >= 0.75 and (top_cov - second_cov >= 0.34 or top_router >= (second_router * 1.25) or second_query_cov < 0.25):
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "one source dominates and covers most query concepts"
+        elif top_query_cov >= 0.60 and (top_query_cov - second_query_cov >= 0.35 or top_router >= (second_router * 1.30)):
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "one source has the strongest query coverage"
+        elif second_cov > 0.0 and top_cov < 0.75 and union_concept_coverage > top_cov:
+            selected_sources = [str(row.get("source")) for row in stats[:2]]
+            mode = "multi_source_synthesis"
+            reason = "combined source coverage is stronger than the top source alone"
+        else:
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "preserving strongest single-source evidence"
+
+    selected_docs = safe_docs
+    if mode == "multi_source_synthesis":
+        selected_docs = _doc_router_interleave_docs(safe_docs, selected_sources, per_source_limit=3, total_limit=10)
+    elif mode == "single_source" and selected_sources:
+        selected_docs = [doc for doc in safe_docs if _doc_router_source_key(doc) == selected_sources[0]]
+
+    selected_display = [source_display.get(src, src) for src in selected_sources]
+    logger.info("[DOC ROUTER] candidate_sources=%s", candidate_sources)
+    logger.info("[DOC ROUTER] source_scores=%s", json.dumps(source_scores_log, sort_keys=True))
+    logger.info("[DOC ROUTER] query_concepts=%s", concepts)
+    logger.info("[DOC ROUTER] selected_sources=%s", selected_display)
+    logger.info("[DOC ROUTER] mode=%s", mode)
+    logger.info("[DOC ROUTER] reason=%s", reason)
+
+    return {
+        "mode": mode,
+        "reason": reason,
+        "query_concepts": concepts,
+        "query_tokens": query_tokens,
+        "candidate_sources": candidate_sources,
+        "selected_sources": selected_sources,
+        "selected_display_sources": selected_display,
+        "source_scores": source_scores_log,
+        "docs": selected_docs,
+    }
 
 # ========== ANALYTICS DB ==========
 ANALYTICS_DB = str(ANALYTICS_DB)
@@ -3221,7 +3658,14 @@ _arabic_opener_counter: int = 0            # round-robin index across queries
 import chromadb
 from sentence_transformers import SentenceTransformer
 from backend.pdf_ingestion_rag import VectorStore
-from backend.knowledge_base import get_or_create_collection
+from backend.knowledge_base import (
+    get_or_create_collection,
+    build_canonical_source_metadata,
+    canonical_source_doc_id,
+    delete_documents_by_source_identity,
+    normalize_uploaded_filename,
+    original_filename_from_stored,
+)
 
 class LiveRAGManager:
     def __init__(self):
@@ -3366,6 +3810,10 @@ async def startup_event():
     
     init_database()
     init_analytics_db()
+    logger.warning(
+        "[INGEST OWNER] RAG server is the single ingestion/delete owner; "
+        "admin/login servers must proxy upload, update, and delete requests only."
+    )
     
     # Create persistent session for LLM requests with connection pooling
     connector = aiohttp.TCPConnector(
@@ -3914,6 +4362,7 @@ logger.info("Initializing Assistify RAG System with faster-whisper...")
 
 _assets_reindex_tasks: dict[str, asyncio.Task] = {}
 _assets_recently_indexed_until: dict[str, float] = {}
+_assets_upload_owned_until: dict[str, float] = {}
 _assets_reindex_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 _collection_mutation_lock: asyncio.Lock = asyncio.Lock()
 
@@ -3951,18 +4400,68 @@ def _is_recently_deleted(name: str) -> bool:
     return True
 
 
+def _ownership_keys_for_filename(name: str) -> set[str]:
+    raw = str(name or "").strip()
+    keys = {raw.lower()} if raw else set()
+    try:
+        base = Path(raw).name
+        if base:
+            keys.add(base.lower())
+            keys.add(original_filename_from_stored(base).lower())
+            normalized = normalize_uploaded_filename(base)
+            if normalized:
+                keys.add(normalized)
+    except Exception:
+        pass
+    return {k for k in keys if k}
+
+
+def _mark_upload_pipeline_owned(*names: str, seconds: float = 600.0) -> None:
+    expiry = time.time() + float(seconds)
+    for name in names:
+        for key in _ownership_keys_for_filename(name):
+            _assets_upload_owned_until[key] = expiry
+
+
+def _is_upload_pipeline_owned(name: str) -> bool:
+    now = time.time()
+    owned = False
+    for key in _ownership_keys_for_filename(name):
+        expiry = _assets_upload_owned_until.get(key)
+        if not expiry:
+            continue
+        if now >= expiry:
+            _assets_upload_owned_until.pop(key, None)
+            continue
+        owned = True
+    return owned
+
+
+def _assets_reindex_skip_reason(filename: str) -> str:
+    if _is_recently_deleted(filename):
+        return "recently_deleted"
+    if _is_upload_pipeline_owned(filename):
+        return "owned_by_upload_pipeline"
+    now = time.time()
+    until = _assets_recently_indexed_until.get(filename)
+    if until and now < until:
+        return "recently_indexed"
+    return ""
+
+
+def _log_assets_reindex_skip(filename: str, reason: str) -> None:
+    if reason == "owned_by_upload_pipeline":
+        logger.info("[INGEST WATCHER] skipped reason=owned_by_upload_pipeline file=%s", filename)
+    elif reason:
+        logger.info("Assets watcher: skip reason=%s file=%s", reason, filename)
+
+
 def _should_skip_assets_reindex(filename: str) -> bool:
     """Return True if we should skip reindexing because the upload endpoint
     already indexed it (prevents double work from watchdog create/modify)
     OR because the file was explicitly deleted (anti-resurrection guard).
     """
-    if _is_recently_deleted(filename):
-        return True
-    now = time.time()
-    until = _assets_recently_indexed_until.get(filename)
-    if until and now < until:
-        return True
-    return False
+    return bool(_assets_reindex_skip_reason(filename))
 
 
 def _mark_assets_recently_indexed(filename: str, seconds: float = 120.0) -> None:
@@ -3971,8 +4470,9 @@ def _mark_assets_recently_indexed(filename: str, seconds: float = 120.0) -> None
 
 def _queue_assets_reindex(filename: str, delay_s: float = 0.75) -> None:
     """Debounce reindex requests for the same filename."""
-    if _should_skip_assets_reindex(filename):
-        logger.info(f"Assets watcher: skip (recently indexed) — {filename}")
+    skip_reason = _assets_reindex_skip_reason(filename)
+    if skip_reason:
+        _log_assets_reindex_skip(filename, skip_reason)
         return
     prev = _assets_reindex_tasks.get(filename)
     if prev and not prev.done():
@@ -3982,7 +4482,9 @@ def _queue_assets_reindex(filename: str, delay_s: float = 0.75) -> None:
 
 async def _debounced_reindex(filename: str, delay_s: float = 0.75) -> None:
     await asyncio.sleep(delay_s)
-    if _should_skip_assets_reindex(filename):
+    skip_reason = _assets_reindex_skip_reason(filename)
+    if skip_reason:
+        _log_assets_reindex_skip(filename, skip_reason)
         return
     save_path = ASSETS_DIR / filename
     if not save_path.exists():
@@ -4003,7 +4505,9 @@ async def _debounced_reindex(filename: str, delay_s: float = 0.75) -> None:
 
     async with _assets_reindex_locks[filename]:
         # Double-check skip inside the lock
-        if _should_skip_assets_reindex(filename):
+        skip_reason = _assets_reindex_skip_reason(filename)
+        if skip_reason:
+            _log_assets_reindex_skip(filename, skip_reason)
             return
         await _reindex_file_auto(filename)
 
@@ -4066,6 +4570,10 @@ async def _reindex_file_auto(filename: str):
     Verifies the new content is searchable after write.
     """
     try:
+        skip_reason = _assets_reindex_skip_reason(filename)
+        if skip_reason:
+            _log_assets_reindex_skip(filename, skip_reason)
+            return
         save_path = ASSETS_DIR / filename
         if not save_path.exists():
             logger.warning(f"Assets watcher: file disappeared before reindex: {filename}")
@@ -4078,14 +4586,25 @@ async def _reindex_file_auto(filename: str):
 
         # ---- STEP 1+2 under collection mutation lock ----
         # Serialize delete+index+switch to avoid races with upload/delete endpoints.
-        import re as _re
-        bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)  # strip UUID prefix if any
-        safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
-        doc_id = f"upload_{safe}"
-        metadata = {"source": "watcher", "filename": filename, "file_ext": save_path.suffix.lower()}
+        original_filename = original_filename_from_stored(filename)
+        metadata = build_canonical_source_metadata(
+            original_filename=original_filename,
+            stored_filename=filename,
+            upload_id="assets_watcher",
+            document_version=str(int(save_path.stat().st_mtime)),
+        )
+        metadata.update({"file_ext": save_path.suffix.lower(), "ingestion_owner": "rag_server_watcher"})
+        doc_id = str(metadata.get("source_doc_id") or canonical_source_doc_id(metadata.get("normalized_filename") or original_filename))
 
         async with _collection_mutation_lock:
-            deleted = int(delete_documents_by_filename(filename) or 0)
+            delete_report = delete_documents_by_source_identity(
+                source_doc_id=str(metadata.get("source_doc_id") or ""),
+                original_filename=str(metadata.get("original_filename") or ""),
+                stored_filename=str(metadata.get("stored_filename") or filename),
+                normalized_filename=str(metadata.get("normalized_filename") or ""),
+                doc_prefix=doc_id,
+            )
+            deleted = int(delete_report.get("deleted_count") or 0)
             logger.info(f"Assets watcher [{filename}]: deleted {deleted} old chunk(s)")
 
             _cad_result = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
@@ -4093,7 +4612,7 @@ async def _reindex_file_auto(filename: str):
             added = int(_cad_result) if isinstance(_cad_result, int) else 0
             active_collection = _sync_live_retrieval_collection()
         if added > 0:
-            _register_active_source(filename)
+            _register_active_source(str(metadata.get("normalized_filename") or filename))
         logger.info(f"Assets watcher [{filename}]: indexed {added} new chunk(s) (doc_id={doc_id}, collection={active_collection})")
 
         # Prevent immediate duplicate reindex triggers (created+modified)
@@ -5995,11 +6514,7 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
         logger.info("[STRICT DEF PREF MISS] entity=%s reason=empty_entity", entity)
         return False
 
-    classical_alias_entity_hit = bool(
-        False
-        and re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", t)
-    )
-    if (e not in t) and (not classical_alias_entity_hit):
+    if e not in t:
         logger.info("[STRICT DEF PREF MISS] entity=%s reason=no_entity_hit", entity)
         return False
 
@@ -6019,30 +6534,9 @@ def is_entity_definition_like(text: str, entity: str) -> bool:
 
     for sentence in sentence_candidates:
         has_entity_anywhere = bool(entity_anywhere_re.search(sentence))
-        if False:
-            has_entity_anywhere = bool(
-                re.search(r"\b(?:classical\s+management\s+theory|classical\s+method|classical\s+management)\b", sentence)
-            )
         has_definition_pattern = bool(definition_pattern_re.search(sentence))
         sentence_low = sentence.lower()
         if has_entity_anywhere and has_definition_pattern:
-            if False:
-                if re.search(r"\b(?:classification|major\s+classification|contributors?|table\s*\d+)\b", sentence_low):
-                    logger.info("[DEF REJECT WEAK] entity=%s reason=classification_style sentence=%s", entity, sentence[:160])
-                    continue
-                local_link = bool(
-                    re.search(
-                        r"\b(?:classical\s+approach|classical\s+management\s+theory|classical\s+method)\b.{0,80}\b(?:is|refers\s+to|defined\s+as|means|grew\s+out\s+of)\b",
-                        sentence_low,
-                    )
-                    or re.search(
-                        r"\b(?:is|refers\s+to|defined\s+as|means|grew\s+out\s+of)\b.{0,80}\b(?:classical\s+approach|classical\s+management\s+theory|classical\s+method)\b",
-                        sentence_low,
-                    )
-                )
-                if not local_link:
-                    logger.info("[DEF REJECT WEAK] entity=%s reason=not_local_definition sentence=%s", entity, sentence[:160])
-                    continue
             if defines_other_concept(sentence_low, e):
                 logger.info("[DEF REJECT WEAK] entity=%s reason=defines_other_concept sentence=%s", entity, sentence[:160])
                 continue
@@ -6154,29 +6648,6 @@ def _dedup_docs_exact_text(docs: list[dict]) -> list[dict]:
     return out
 
 
-def _definition_explanation_fallback(query: str, docs: list[dict], entity: str) -> str | None:
-    logger.info("[DEF FALLBACK DISABLED] entity=%s docs=%d", entity, len(docs or []))
-    return None
-
-
-def _is_ws_explain_query_mode(query: str) -> bool:
-    q = re.sub(r"\s+", " ", str(query or "").strip().lower())
-    if not q:
-        return False
-    if _is_compare_query(q):
-        return False
-    return bool(
-        re.match(r"^\s*(?:please\s+)?explain\s+.+", q)
-        or re.match(r"^\s*(?:please\s+)?(?:give\s+)?(?:an?\s+)?explanation\s+of\s+.+\s*\??\s*$", q)
-        or re.match(r"^\s*(?:please\s+)?explain\s+.+\s+(?:fully|in\s+detail)\s*\??\s*$", q)
-        or re.match(r"^\s*how\s+does\s+.+\s+(?:work|operate)\s*\??\s*$", q)
-        or re.match(r"^\s*how\s+does\s+.+\s+(?:work|operate)\s+in\s+detail\s*\??\s*$", q)
-        or re.match(r"^\s*what\s+is\s+the\s+(?:goal|purpose)\s+of\s+.+\s*\??\s*$", q)
-        or re.match(r"^\s*what\s+does\s+.+\s+focus\s+on\s*\??\s*$", q)
-        or re.match(r"^\s*what\s+is\s+the\s+idea\s+behind\s+.+\s*\??\s*$", q)
-    )
-
-
 def _is_ws_definition_query_mode(query: str) -> bool:
     q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if not q:
@@ -6185,7 +6656,52 @@ def _is_ws_definition_query_mode(query: str) -> bool:
         re.match(r"^\s*what\s+is\s+.+", q)
         or re.match(r"^\s*define\s+.+", q)
         or re.search(r"\bmeaning\s+of\b", q)
+        or re.match(r"^\s*what\s+does\s+.+\s+mean\s*\??\s*$", q)
     )
+
+
+def _is_ws_explain_query_mode(query: str) -> bool:
+    q = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if not q:
+        return False
+    return bool(
+        re.match(r"^\s*(?:explain|describe|clarify)\b\s+.+", q)
+        or re.match(r"^\s*tell\s+me\s+(?:about|more\s+about)\s+.+", q)
+        or re.match(r"^\s*how\s+does\s+.+\s+work\s*\??\s*$", q)
+        or re.match(r"^\s*why\s+.+\??\s*$", q)
+    )
+
+
+def _definition_explanation_fallback(query_text: str, docs: list[dict], entity: str = "") -> Optional[str]:
+    ent = re.sub(r"\s+", " ", str(entity or "").strip())
+    if not ent:
+        _has_ent, extracted = _extract_entity_from_definition_query(query_text)
+        ent = extracted if _has_ent else ""
+    if not ent or not docs:
+        return None
+
+    try:
+        recovered, _debug = _extract_structure_aware_definition(query_text, docs or [], ent)
+        recovered = _clean_definition_like_sentence(recovered or "")
+        if recovered and _passes_strict_definition_relevance_guard(query_text, recovered):
+            return recovered
+    except Exception:
+        logger.debug("[DEFINITION FALLBACK] structure recovery failed", exc_info=True)
+
+    for doc in docs or []:
+        text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+        if not text:
+            continue
+        chunk_topic = _chunk_entity_dominant_topic(text, ent)
+        for sent in _split_text_into_sentences(text)[:18]:
+            cleaned = _clean_definition_like_sentence(sent)
+            if not cleaned:
+                continue
+            if not _is_explanation_sentence_for_entity(cleaned, ent, chunk_is_topic=chunk_topic):
+                continue
+            if _passes_strict_definition_relevance_guard(query_text, cleaned):
+                return cleaned
+    return None
 
 
 # MP-C15 — Structure-aware definition recovery.
@@ -6226,7 +6742,7 @@ _MPC15_ALIAS_ONLY_RE = re.compile(
     re.IGNORECASE,
 )
 _MPC15_GENERIC_CONCEPT_SUFFIX = {
-    "theory", "management", "model", "approach", "system",
+    "theory", "model", "approach", "system",
     "method", "framework", "science", "process", "concept",
     "organization", "organisation",
 }
@@ -6241,7 +6757,7 @@ _MPC15_BAD_ANCHOR_PREFIX_RE = re.compile(
 _MPC15_NEXT_HEADING_RE = re.compile(
     r"\n\s*(?:[A-Z]\.\s+[A-Z][A-Za-z][^\n:]{2,80}:|"
     r"\d+\.\d+(?:\.\d+)?\s+[A-Z][^\n]{2,80}|"
-    r"[A-Z][A-Za-z][A-Za-z\s]{2,40}\s+(?:Approach|Theory|Model|Management|Method|System)\s*:)"
+    r"[A-Z][A-Za-z][A-Za-z\s]{2,40}\s+(?:Approach|Theory|Model|Method|System|Framework|Process)\s*:)"
 )
 
 # MP-C15 corpus cache — small lazy snapshot of every chunk in the active
@@ -6370,7 +6886,7 @@ def _extract_structure_aware_definition(
     stem_chunk = (
         rf"{re.escape(e_stem)}[a-z]*"
         + "".join(rf"(?:\s+{re.escape(t)}[a-z]*)?" for t in e_tokens[1:3])
-        + r"(?:\s+(?:model|theory|management|approach|system|method|organization|organisation))?"
+        + r"(?:\s+(?:model|theory|approach|system|method|framework|process|organization|organisation))?"
     )
     heading_patterns: list[tuple[str, str]] = [
         ("lettered_label", rf"(?:(?:^|\n)\s*|[\.!?•]\s+)(?:[A-Z]\.|\d+\.)\s*{stem_chunk}\s*[:\-–—]"),
@@ -6560,10 +7076,8 @@ def _extract_structure_aware_definition(
                                 debug["focused_window_preview"] = (debug.get("focused_window_preview") or "") + " [+adjacent]"
                     # Sub-list detection on the (extended) window.
                     for sm in re.finditer(
-                        r"(?:elements?|principles?|functions?|characteristics?|components?)\s+of\s+"
-                        r"(?:management|theory|administration|business|leadership|organi[sz]ation|"
-                        r"(?:the\s+)?(?:concept|approach|model|system|method))"
-                        r"(?:\s*[:\-\u2013\u2014]|(?=\s+\d+\s*\.))",
+                        rf"(?:elements?|principles?|functions?|characteristics?|components?)\s+of\s+"
+                        rf"(?:the\s+)?{stem_chunk}(?:\s*[:\-\u2013\u2014]|(?=\s+\d+\s*\.))",
                         extended,
                         flags=re.IGNORECASE,
                     ):
@@ -12319,9 +12833,9 @@ def _extract_fact_from_context(query: str, context_chunks: List[str]) -> Optiona
                 return f"{left} {right}"
             return f"{left}{right}"
 
-        # Join split name fragments like "Wil helm" -> "Wilhelm"
+        # Join OCR-split name fragments using capitalization shape only.
         s = re.sub(r"\b([A-Z][a-z]{1,4})\s+([a-z]{2,5})\b", _join_cap_split, s)
-        # Join split surname fragments like "W und t" -> "Wundt"
+        # Join OCR-split surname fragments using capitalization shape only.
         s = re.sub(r"\b([A-Z])\s+([a-z]{2,5})\s+([a-z])\b", lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}", s)
         s = re.sub(r"\s+", " ", s).strip()
         return s
@@ -14310,7 +14824,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
         if not ((is_person_attribution_query or (allow_concept_fallback and is_concept_query)) and has_entity and entity_l):
             return None
         ent_need = max(1, min(2, len(entity_tokens))) if entity_tokens else 1
-        banned_name_tokens = {"management", "theory", "ideas", "contributors", "table", "scientific", "administrative", "bureaucratic", "model", "classical", "approach", "school"}
+        banned_name_tokens = {"theory", "model", "approach", "school", "method", "system", "table", "figure", "chapter", "section", "contributors", "classification"}
         org_or_place_tokens = {"company", "corporation", "corp", "inc", "ltd", "limited", "university", "college", "states", "state", "industry", "industries", "steel"}
         role_tokens = {"chief", "engineer", "manager", "director", "officer", "president", "professor", "doctor", "dr", "mr", "ms", "mrs"}
         for d in (source_docs or [])[:5]:
@@ -14351,9 +14865,9 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
             # Same-line loose fallback: concept tokens and person name in one line/chunk only.
             person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3}\b")
             banned_name_tokens = {
-                "management", "ideas", "theory", "principles", "functions", "process", "business", "organization",
-                "organizing", "organising", "planning", "controlling", "reporting", "budgeting", "administrative",
-                "united", "states", "india", "france", "germany", "england", "china", "japan",
+                "theory", "principles", "functions", "process", "organization", "organisation", "method",
+                "system", "approach", "model", "table", "figure", "chapter", "section", "classification",
+                "united", "states",
             }
             for line in txt.splitlines():
                 line_norm = re.sub(r"\s+", " ", line or "").strip()
@@ -17756,7 +18270,7 @@ def _doc_ocr_noise_score(text: str) -> float:
     score = 0.0
     score += 0.4 * len(re.findall(r"\b[a-z]\s+[a-z]\b", low))
     score += 0.3 * len(re.findall(r"\b[a-z]{1,2}\s+[a-z]{1,2}\s+[a-z]{1,2}\b", low))
-    score += 0.5 * len(re.findall(r"\bwil\s+helm\b|\bw\s*und\s*t\b|\bcont\s+rolling\b|\bme\s+mory\b", low))
+    score += 0.5 * len(re.findall(r"\b[a-z]{2,5}\s+[a-z]{2,5}\b", low))
     score += 0.2 * len(re.findall(r"\b(?:vu|copyright|all rights reserved)\b", low))
     return score
 
@@ -19984,8 +20498,8 @@ def _extract_definition_sentence(text: str, query: str = "", mode: Optional[str]
 
         capital_tokens = re.findall(r"\b[A-Z][a-z]{2,}\b", s)
         forbidden = {
-            "Scientific", "Management", "Administrative", "Theory", "Model", "Bureaucracy",
-            "Principles", "Contributors", "Ideas", "Classification", "Approaches",
+            "Theory", "Model", "Principles", "Contributors", "Classification", "Approaches",
+            "Method", "System", "Framework", "Chapter", "Section", "Table", "Figure",
         }
 
         best_name = ""
@@ -20064,7 +20578,7 @@ def _is_answer_grounded_in_docs(answer: str, retrieved_docs: list[dict], query_t
     stop = {
         "the", "and", "for", "with", "that", "this", "from", "into", "about", "were", "have", "has",
         "what", "which", "who", "when", "where", "why", "how", "their", "there", "your", "than",
-        "management", "document", "according", "provided", "context", "based",
+        "document", "according", "provided", "context", "based",
     }
 
     def _tokens(s: str) -> list[str]:
@@ -22612,13 +23126,6 @@ def _shared_rag_final_answer_decision(
     is_who_identity_query = bool(re.match(r"^who\s+(is|was)\b", q_low))
     is_who_attribution_query = q_low.startswith("who introduced") or q_low.startswith("who developed")
 
-    broad_conditioning_q = False
-    broad_conditioning_types_q = False
-    if broad_conditioning_q or broad_conditioning_types_q:
-        cond_simple = _extract_primary_simple_answer_from_top_docs(query, routed_docs or doc_dicts or [], family_v2)
-        if cond_simple:
-            return _result(cond_simple, used_llm=False, answer_type="conditioning_broad_from_chunks", items_count=1)
-
     if family == "definition_entity" and is_who_identity_query and (not is_who_attribution_query):
         if not _has_exact_who_person_evidence(query, routed_docs or doc_dicts or []):
             answer_source_mode = "not_found_guard"
@@ -24307,6 +24814,9 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     
     history = conversation_history[connection_id]
     doc_dicts: List[Dict[str, Any]] = []
+    doc_router_mode = "single_source"
+    doc_router_reason = "not_run"
+    doc_router_selected_sources: List[str] = []
     focused_context = ""
     trace_extractor_used = False
     generation_prefilter_docs: List[Dict[str, Any]] = []
@@ -26225,6 +26735,7 @@ async def _tts_single_response(
     websocket: WebSocket,
     connection_id: str,
     language: str,
+    t_meta: Optional[dict] = None,
 ) -> None:
     """Synthesize a single short response via XTTS and stream it over WebSocket."""
     if not text or not text.strip():
@@ -26248,6 +26759,11 @@ async def _tts_single_response(
     if language == "ar" and text.strip() == ARABIC_OFF_TOPIC_RESPONSE and _arabic_offtopic_pcm:
         try:
             await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+            if t_meta is not None:
+                now = time.perf_counter()
+                t_meta.setdefault("xtts_send", now)
+                t_meta.setdefault("first_tts_chunk", now)
+                t_meta["xtts_last_chunk"] = now
             await _ws_send_bytes(_arabic_offtopic_pcm)
         finally:
             await _ws_send_json({"type": "ttsAudioEnd"})
@@ -26266,6 +26782,9 @@ async def _tts_single_response(
         _tts_sess = _local_tts_session
 
     try:
+        chunk_start = time.perf_counter()
+        if t_meta is not None:
+            t_meta.setdefault("xtts_send", chunk_start)
         await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
         resp = await _tts_sess.post(
             f"{XTTS_SERVICE_URL}/synthesize",
@@ -26300,9 +26819,13 @@ async def _tts_single_response(
                     data = data[:-1]
 
                 if data:
+                    if t_meta is not None and not t_meta.get("first_tts_chunk"):
+                        t_meta["first_tts_chunk"] = time.perf_counter()
                     await _ws_send_bytes(data)
                     emitted_audio = True
             resp.close()
+            if t_meta is not None and emitted_audio:
+                t_meta["xtts_last_chunk"] = time.perf_counter()
 
             # XTTS can occasionally return a valid WAV header but no PCM payload.
             # In that case, force browser speech fallback so user still hears audio.
@@ -26327,6 +26850,95 @@ async def _tts_single_response(
             pass
         if _local_tts_session is not None and not _local_tts_session.closed:
             await _local_tts_session.close()
+
+
+async def send_final_response(
+    connection_id: str,
+    text: str,
+    language: str,
+    tts_enabled: bool,
+    *,
+    websocket: Optional[WebSocket] = None,
+    sources: int = 0,
+    arabic_mode: bool = False,
+    t_meta: Optional[dict] = None,
+    branch: str = "unknown",
+    send_chunk: bool = True,
+    replace: bool = False,
+    extra_payload: Optional[dict] = None,
+) -> None:
+    """Send the final WS response and consistently attach TTS when enabled."""
+    response_text = str(text or "")
+    timing = t_meta if isinstance(t_meta, dict) else {}
+    ws = websocket or _active_ws_connections.get(connection_id)
+    if ws is None:
+        logger.warning(
+            "[TTS DECISION] branch=%s tts_enabled=%s triggered=False reason=no_websocket",
+            branch,
+            bool(tts_enabled),
+        )
+        return
+
+    clean_text = response_text.strip()
+    already_triggered = bool(timing.get("xtts_send"))
+    should_trigger = bool(tts_enabled and clean_text and not already_triggered)
+    if should_trigger:
+        reason = "enabled"
+    elif already_triggered:
+        reason = "already_triggered"
+    elif not tts_enabled:
+        reason = "disabled"
+    else:
+        reason = "empty_text"
+    logger.info(
+        "[TTS DECISION] branch=%s tts_enabled=%s triggered=%s reason=%s",
+        branch,
+        bool(tts_enabled),
+        should_trigger,
+        reason,
+    )
+
+    if send_chunk:
+        chunk_payload = {
+            "type": "aiResponseChunk",
+            "text": response_text,
+            "index": 0,
+            "done": True,
+            "timing": timing,
+        }
+        if replace:
+            chunk_payload["replace"] = True
+        await ws.send_json(chunk_payload)
+
+    if should_trigger:
+        timing.setdefault("xtts_send", time.perf_counter())
+        try:
+            await _tts_single_response(
+                response_text,
+                ws,
+                connection_id,
+                language=language,
+                t_meta=timing,
+            )
+        except Exception as tts_err:
+            logger.warning(
+                "[TTS DECISION] branch=%s tts_enabled=%s triggered=True reason=tts_error error=%s",
+                branch,
+                bool(tts_enabled),
+                tts_err,
+            )
+
+    done_payload = {
+        "type": "aiResponseDone",
+        "fullText": response_text,
+        "sources": sources,
+        "arabic_mode": arabic_mode,
+        "timing": timing,
+    }
+    if extra_payload:
+        done_payload.update(extra_payload)
+    logger.info("[WS FINAL ANSWER BEFORE SEND] %s", response_text[:320])
+    await ws.send_json(done_payload)
 
 
 def _emit_perf_report(t_meta: dict, perf_start: float, query_text: str, answer_text: str, connection_id: str = "") -> None:
@@ -26445,8 +27057,19 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             except Exception:
                 pass
             try:
-                await websocket.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True, "timing": t_meta or {}})
-                await websocket.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": False, "timing": t_meta or {}})
+                fu_t_meta = t_meta or {"request_start": fu_t0}
+                await send_final_response(
+                    connection_id,
+                    fu_text,
+                    "ar" if language == "ar" else XTTS_LANGUAGE,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=0,
+                    arabic_mode=(language == "ar"),
+                    t_meta=fu_t_meta,
+                    branch="followup_defensive",
+                )
+                _emit_perf_report(fu_t_meta, fu_t0, text, fu_text, connection_id)
             except Exception:
                 pass
             logger.info("[FOLLOWUP] WS follow-up answered (defensive) in %.0fms", (time.perf_counter() - fu_t0) * 1000.0)
@@ -26478,8 +27101,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     if _is_smalltalk(text):
         short_answer = _smalltalk_response(text)
         try:
-            await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-            await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": 0, "arabic_mode": False, "timing": t_meta})
+            await send_final_response(
+                connection_id,
+                short_answer,
+                XTTS_LANGUAGE,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=False,
+                t_meta=t_meta,
+                branch="smalltalk",
+            )
         except Exception:
             pass
         return
@@ -26629,27 +27261,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
                 try:
                     fallback_text = ARABIC_OFF_TOPIC_RESPONSE
-                    await websocket.send_json({
-                        "type": "aiResponseChunk", "text": fallback_text,
-                        "index": 0, "done": True
-                    })
-
-                    # TTS for the Arabic refusal (play fully before aiResponseDone)
-                    if _arabic_offtopic_pcm:
-                        async with _ack_lock:
-                            await websocket.send_json({"type": "ttsAudioStart", "sampleRate": 24000})
-                            await websocket.send_bytes(_arabic_offtopic_pcm)
-                            await websocket.send_json({"type": "ttsAudioEnd"})
-                    else:
-                        await _tts_single_response(fallback_text, websocket, connection_id, language="ar")
-
-                    await websocket.send_json({
-                        "type": "aiResponseDone",
-                        "fullText": fallback_text,
-                        "sources": 0,
-                        "arabic_mode": True,
-                        "timing": t_meta,
-                    })
+                    await send_final_response(
+                        connection_id,
+                        fallback_text,
+                        "ar",
+                        not EFFECTIVE_DISABLE_TTS,
+                        websocket=websocket,
+                        sources=0,
+                        arabic_mode=True,
+                        t_meta=t_meta,
+                        branch="arabic_offtopic",
+                    )
                 except Exception:
                     pass
                 return
@@ -26794,25 +27416,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         )
         fallback_text = ARABIC_OFF_TOPIC_RESPONSE if arabic_mode else _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
         try:
-            await websocket.send_json({
-                "type": "aiResponseChunk",
-                "text": fallback_text,
-                "index": 0,
-                "done": True,
-            })
-            await _tts_single_response(
-                fallback_text,
-                websocket,
+            await send_final_response(
                 connection_id,
-                language=("ar" if arabic_mode else xtts_lang),
+                fallback_text,
+                "ar" if arabic_mode else xtts_lang,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=arabic_mode,
+                t_meta=t_meta,
+                branch="not_found_no_docs",
             )
-            await websocket.send_json({
-                "type": "aiResponseDone",
-                "fullText": fallback_text,
-                "sources": 0,
-                "arabic_mode": arabic_mode,
-                "timing": t_meta,
-            })
         except Exception:
             pass
 
@@ -26850,11 +27464,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS early_identity)")
             try:
-                await websocket.send_json({"type": "aiResponseChunk", "text": early_identity, "index": 0, "done": True, "timing": t_meta})
-            except Exception:
-                pass
-            try:
-                await websocket.send_json({"type": "aiResponseDone", "fullText": early_identity, "sources": len(relevant_docs), "arabic_mode": arabic_mode, "timing": t_meta})
+                await send_final_response(
+                    connection_id,
+                    early_identity,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(relevant_docs),
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch="early_identity",
+                )
             except Exception:
                 pass
             response_time = int((time.time() - start_time) * 1000)
@@ -27154,8 +27774,57 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
         doc_dicts = sorted(doc_dicts, key=lambda x: x.get("score", 0), reverse=True)
         logger.info("[SORT CHECK] top scores: %s", [round(d.get("score",0),4) for d in doc_dicts[:5]])
+        doc_router_decision = _route_multi_document_evidence(text, doc_dicts)
+        doc_router_mode = str(doc_router_decision.get("mode") or "single_source")
+        doc_router_reason = str(doc_router_decision.get("reason") or "")
+        doc_router_selected_sources = list(doc_router_decision.get("selected_display_sources") or [])
+        doc_dicts = list(doc_router_decision.get("docs") or [])
+        if doc_router_mode == "clarification":
+            clarification_text = "I found relevant evidence in more than one active document. Please clarify which document or source you want me to use."
+            try:
+                last_answer_state.pop(connection_id, None)
+            except Exception:
+                pass
+            try:
+                history.append({"role": "user", "content": text.strip()})
+                history.append({"role": "assistant", "content": clarification_text})
+            except Exception:
+                pass
+            try:
+                await send_final_response(
+                    connection_id,
+                    clarification_text,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(doc_dicts),
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch="multi_doc_clarification",
+                )
+            except Exception:
+                pass
+            try:
+                response_time = int((time.time() - start_time) * 1000)
+                log_usage(
+                    user.get("username", "unknown"),
+                    user.get("role", "unknown"),
+                    text,
+                    "success",
+                    None,
+                    response_time,
+                    len(doc_dicts),
+                    len((text or "").strip()),
+                    len(clarification_text),
+                )
+            except Exception:
+                pass
+            _emit_perf_report(t_meta, perf_start, text, clarification_text, connection_id)
+            return
         is_fact_query = _classify_query_family_v2(text) == "fact_entity"
         keep_n = 5 if (is_definition_query or _is_compare_query(text) or is_fact_query or needs_early_section_rerank) else 3
+        if doc_router_mode == "multi_source_synthesis":
+            keep_n = max(keep_n, min(8, len(doc_dicts or [])))
         if family_legacy_current == "list_structure" or family_v2_current == "list_entity":
             logger.info("[LIST RECALL DEBUG][WS] stage=pre_shortlist family_v2=%s family=%s pool=%d keep_n=%d", family_v2_current, family_legacy_current, len(doc_dicts or []), keep_n)
         doc_dicts = doc_dicts[:keep_n]
@@ -27215,11 +27884,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS safe fallback)")
             try:
-                await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-            except Exception:
-                pass
-            try:
-                await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts) if isinstance(doc_dicts, list) else 0, "arabic_mode": arabic_mode, "timing": t_meta})
+                await send_final_response(
+                    connection_id,
+                    short_answer,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(doc_dicts) if isinstance(doc_dicts, list) else 0,
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch="safe_fallback_invalid_docs",
+                )
             except Exception:
                 pass
             response_time = int((time.time() - start_time) * 1000)
@@ -27267,17 +27942,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 except Exception:
                     logger.exception("[FOLLOWUP] save state failed (WS generation insufficient)")
                 try:
-                    await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-                except Exception:
-                    pass
-                try:
-                    if not EFFECTIVE_DISABLE_TTS:
-                        await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
-                except Exception:
-                    pass
-                try:
-                    logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
-                    await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+                    await send_final_response(
+                        connection_id,
+                        short_answer,
+                        "ar" if arabic_mode else xtts_lang,
+                        not EFFECTIVE_DISABLE_TTS,
+                        websocket=websocket,
+                        sources=len(doc_dicts),
+                        arabic_mode=arabic_mode,
+                        t_meta=t_meta,
+                        branch="generation_insufficient_context",
+                    )
                 except Exception:
                     pass
                 _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
@@ -27339,25 +28014,29 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS generation accept)")
             try:
-                await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-            except Exception:
-                pass
-            try:
-                if not EFFECTIVE_DISABLE_TTS:
-                    await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
-            except Exception:
-                pass
-            try:
-                logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
-                await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+                await send_final_response(
+                    connection_id,
+                    short_answer,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(doc_dicts),
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch="generation_accept",
+                )
             except Exception:
                 pass
             _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
         # Fast/simple early selector for definition/list/overview queries.
-        stream_pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
-        stream_pre_simple = _enforce_runtime_answer_acceptance(text, stream_pre_simple, doc_dicts)
+        stream_pre_simple = {"used_llm": True, "answer_type": "doc_router_multi_source"}
+        if doc_router_mode != "multi_source_synthesis":
+            stream_pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
+            stream_pre_simple = _enforce_runtime_answer_acceptance(text, stream_pre_simple, doc_dicts)
+        else:
+            logger.info("[DOC ROUTER] deterministic_bypass=pre_simple reason=multi_source_synthesis")
         if not stream_pre_simple.get("used_llm", True):
             short_answer = _apply_not_found_ux(text, str(stream_pre_simple.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
             short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
@@ -27367,12 +28046,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS pre_simple extractor)")
             try:
-                await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-            except Exception:
-                pass
-            try:
-                logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
-                await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+                await send_final_response(
+                    connection_id,
+                    short_answer,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(doc_dicts),
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch=str(stream_pre_simple.get("answer_type") or "deterministic_pre_simple"),
+                )
             except Exception:
                 pass
             response_time = int((time.time() - start_time) * 1000)
@@ -27947,6 +28631,17 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             toon_context = toon_context[:context_cap] + "\n...[Context truncated for length]..."
         if is_fact_query_for_llm:
             logger.info("[FACT CONTEXT] final_snippets=%s final_chars=%s", len(context_docs_for_llm or []), len(toon_context or ""))
+
+        doc_router_context_rules = ""
+        if doc_router_mode == "multi_source_synthesis":
+            doc_router_context_rules = (
+                "\nDOC ROUTER MODE: MULTI_SOURCE_SYNTHESIS\n"
+                "- Use only the selected active source documents in the context.\n"
+                "- Combine facts only when each fact is directly supported by the context.\n"
+                "- If a requested part is missing from the selected context, write exactly: Not found in the document.\n"
+            )
+        elif doc_router_mode == "single_source":
+            doc_router_context_rules = "\nDOC ROUTER MODE: SINGLE_SOURCE\n- Use only the selected active source document in the context.\n"
             
         context_block = f"""
 ===== KNOWLEDGE BASE CONTEXT =====
@@ -27960,6 +28655,7 @@ CORE RULES:
 4. NEVER use outside knowledge.
 5. NEVER guess.
 6. Keep answers clear and direct.
+{doc_router_context_rules}
 
 LIST HANDLING (VERY IMPORTANT):
 If the question expects a structured list response:
@@ -28028,6 +28724,7 @@ STRICT BEHAVIOR:
         and not arabic_mode
         and not _is_smalltalk(text)
         and not is_generation_query_requested
+        and doc_router_mode != "multi_source_synthesis"
     ):
         _mpc11_fam = _classify_query_family_v2(text)
         # --- Pre-compute entity-presence in retrieved docs (definition_entity
@@ -28115,34 +28812,17 @@ STRICT BEHAVIOR:
         )
         _mpc11_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
         try:
-            await websocket.send_json({
-                "type": "aiResponseChunk",
-                "text": _mpc11_answer,
-                "index": 0,
-                "done": True,
-                "timing": t_meta,
-            })
-        except Exception:
-            pass
-        try:
-            if not EFFECTIVE_DISABLE_TTS:
-                await _tts_single_response(
-                    _mpc11_answer,
-                    websocket,
-                    connection_id,
-                    language=("ar" if arabic_mode else xtts_lang),
-                )
-        except Exception:
-            pass
-        try:
-            logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(_mpc11_answer or "")[:320])
-            await websocket.send_json({
-                "type": "aiResponseDone",
-                "fullText": _mpc11_answer,
-                "sources": len(doc_dicts),
-                "arabic_mode": arabic_mode,
-                "timing": t_meta,
-            })
+            await send_final_response(
+                connection_id,
+                _mpc11_answer,
+                "ar" if arabic_mode else xtts_lang,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=len(doc_dicts),
+                arabic_mode=arabic_mode,
+                t_meta=t_meta,
+                branch="weak_context_fast_fail",
+            )
         except Exception:
             pass
         try:
@@ -28163,8 +28843,12 @@ STRICT BEHAVIOR:
         _emit_perf_report(t_meta, perf_start, text, _mpc11_answer, connection_id)
         return
 
-    stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
-    stream_pre_decision = _enforce_runtime_answer_acceptance(text, stream_pre_decision, doc_dicts)
+    if doc_router_mode == "multi_source_synthesis":
+        stream_pre_decision = {"used_llm": True, "answer_type": "doc_router_multi_source"}
+        logger.info("[DOC ROUTER] deterministic_bypass=stream_pre_decision reason=multi_source_synthesis")
+    else:
+        stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
+        stream_pre_decision = _enforce_runtime_answer_acceptance(text, stream_pre_decision, doc_dicts)
     stream_short_circuit_non_llm = not stream_pre_decision.get("used_llm", True)
     logger.info("[TRACE STREAM] short_circuit_non_llm=%s", stream_short_circuit_non_llm)
     logger.info("[TRACE STREAM] used_llm=%s", stream_pre_decision.get("used_llm", True))
@@ -28183,17 +28867,17 @@ STRICT BEHAVIOR:
         except Exception:
             logger.exception("[FOLLOWUP] save state failed (WS short_circuit_non_llm)")
         try:
-            await websocket.send_json({"type": "aiResponseChunk", "text": short_answer, "index": 0, "done": True, "timing": t_meta})
-        except Exception:
-            pass
-        try:
-            if not EFFECTIVE_DISABLE_TTS:
-                await _tts_single_response(short_answer, websocket, connection_id, language=("ar" if arabic_mode else xtts_lang))
-        except Exception:
-            pass
-        try:
-            logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(short_answer or "")[:320])
-            await websocket.send_json({"type": "aiResponseDone", "fullText": short_answer, "sources": len(doc_dicts), "arabic_mode": arabic_mode, "timing": t_meta})
+            await send_final_response(
+                connection_id,
+                short_answer,
+                "ar" if arabic_mode else xtts_lang,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=len(doc_dicts),
+                arabic_mode=arabic_mode,
+                t_meta=t_meta,
+                branch=str(stream_pre_decision.get("answer_type") or "stream_short_circuit"),
+            )
         except Exception:
             pass
         try:
@@ -28322,35 +29006,33 @@ STRICT BEHAVIOR:
         try:
             _log_answer_mode_markers(text, doc_dicts, deterministic_answer, source_mode="extractor")
             await websocket.send_json({"type": "thinking"})
-            await websocket.send_json({
-                "type": "aiResponseChunk",
-                "text": deterministic_answer,
-                "index": 0,
-                "done": True,
-                "replace": True,
-                "timing": t_meta,
-            })
-            await websocket.send_json({
-                "type": "aiResponseDone",
-                "fullText": deterministic_answer,
-                "sources": len(relevant_docs),
-                "arabic_mode": arabic_mode,
-                "timing": t_meta,
-                "latency": {
+            await send_final_response(
+                connection_id,
+                deterministic_answer,
+                "ar" if arabic_mode else xtts_lang,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=len(relevant_docs),
+                arabic_mode=arabic_mode,
+                t_meta=t_meta,
+                branch=str(deterministic_decision.get("answer_type") or "deterministic_fast_path"),
+                replace=True,
+                extra_payload={
+                    "latency": {
                     "first_token_ms": None,
                     "first_sentence_ms": None,
                     "first_opener_ms": None,
                     "first_tts_synthesis_ms": None,
                     "total_ms": int((time.perf_counter() - perf_start) * 1000),
-                },
-                "adaptive_chunk": {
+                    },
+                    "adaptive_chunk": {
                     "tier": adaptive_manager.get_stats().get("current_tier", "fast"),
                     "words_per_chunk": adaptive_manager.get_stats().get("words_per_chunk", 14),
                     "buffer_delay_s": adaptive_manager.get_stats().get("buffer_delay_s", 0.0),
                     "tts_chunks_processed": 0,
-                }
-            })
-            logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(deterministic_answer or "")[:320])
+                    },
+                },
+            )
         except Exception:
             return
 
@@ -29254,27 +29936,33 @@ STRICT BEHAVIOR:
             _final_text = _ws_fix_explanation_answer(text, _final_text, doc_dicts)
         _log_answer_mode_markers(text, doc_dicts, _final_text, source_mode=("llm" if stream_post_decision.get("used_llm", True) else "extractor"))
         try:
-            logger.info("[WS FINAL ANSWER BEFORE SEND] %s", str(_final_text or "")[:320])
-            await asyncio.wait_for(websocket.send_json({
-                "type": "aiResponseDone",
-                "fullText": _final_text,
-                "sources": len(relevant_docs),
-                "arabic_mode": arabic_mode,
-                "timing": t_meta,
-                "latency": {
+            await asyncio.wait_for(send_final_response(
+                connection_id,
+                _final_text,
+                "ar" if arabic_mode else xtts_lang,
+                tts_enabled_for_query,
+                websocket=websocket,
+                sources=len(relevant_docs),
+                arabic_mode=arabic_mode,
+                t_meta=t_meta,
+                branch="llm_streaming_final",
+                send_chunk=False,
+                extra_payload={
+                    "latency": {
                     "first_token_ms": round(first_token_ms) if first_token_ms else None,
                     "first_sentence_ms": round(first_sentence_ms) if first_sentence_ms else None,
                     "first_opener_ms": round(first_opener_ms) if first_opener_ms else None,
                     "first_tts_synthesis_ms": round(first_tts_ms) if first_tts_ms else None,
                     "total_ms": round(total_ms),
-                },
-                "adaptive_chunk": {
+                    },
+                    "adaptive_chunk": {
                     "tier": adaptive_stats['current_tier'],
                     "words_per_chunk": adaptive_stats['words_per_chunk'],
                     "buffer_delay_s": adaptive_stats['buffer_delay_s'],
                     "tts_chunks_processed": tts_chunk_count,
-                }
-            }), timeout=WS_FINALIZE_TIMEOUT_S)
+                    },
+                },
+            ), timeout=WS_FINALIZE_TIMEOUT_S)
             logger.info(
                 "%s aiResponseDone_sent | full_text_len=%s sources=%s",
                 connection_id,
@@ -29841,6 +30529,7 @@ async def _finalize_pdf_upload_background(
     file_size_mb: float,
     target_collection_name: str,
     old_single_mode_collection: str,
+    source_metadata: dict,
 ) -> None:
     """Run the heavy half of /upload_rag (text extract + chunk + embed +
     Chroma write + state activation) outside the request lifecycle so the
@@ -29853,6 +30542,8 @@ async def _finalize_pdf_upload_background(
     global _current_active_doc_id
     swap_t0 = time.time()
     logger.info("[SWAP START] filename=%s size=%.2fMB ext=%s", filename, file_size_mb, file_ext)
+    source_doc_id = str((source_metadata or {}).get("source_doc_id") or "").strip()
+    normalized_filename = str((source_metadata or {}).get("normalized_filename") or normalize_uploaded_filename(original_filename)).strip()
 
     try:
         # ---- Collection diagnostics (was previously logged inside upload_rag) ----
@@ -29875,6 +30566,7 @@ async def _finalize_pdf_upload_background(
             logger.warning("upload_rag(bg) collection mismatch | kb=%s retrieval=%s", kb_col_name, retrieval_col_name)
 
         # ---- 1) Read text from the saved asset ----
+        _set_kb_pipeline_stage("extracting", message="Extracting text", filename=filename)
         read_t0 = time.time()
         text = ""
         extracted_page_count = 0
@@ -29946,20 +30638,40 @@ async def _finalize_pdf_upload_background(
                 _set_kb_pipeline_state("failed", message=f"Could not parse PDF: {e}", filename=filename)
                 return
 
+        text_extract_ms = int((time.time() - read_t0) * 1000)
+        logger.info("[INGEST PERF] stage=text_extract ms=%s", text_extract_ms)
         logger.info("[PDF READ DONE] filename=%s elapsed=%.2fs chars=%d", filename, time.time() - read_t0, len(text))
         _record_kb_stage("pdf_read_done")
 
         # ---- 2) Chunk + embed + write to Chroma ----
-        doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
-        metadata = {"source": "upload", "filename": filename, "file_size_mb": file_size_mb}
+        doc_id = source_doc_id or canonical_source_doc_id(normalized_filename or original_filename)
+        metadata = dict(source_metadata or {})
+        metadata.update({"file_size_mb": file_size_mb, "file_ext": file_ext, "ingestion_owner": "rag_server_upload"})
 
         logger.info(f"  Starting chunking and embedding indexing (batch processing)...")
+        _set_kb_pipeline_stage("chunking", message="Chunking document", filename=filename)
         chunk_t0 = time.time()
         active_collection = ""
         gc_report: dict = {}
         indexing_details: dict = {}
         try:
             async with _collection_mutation_lock:
+                delete_report = delete_documents_by_source_identity(
+                    source_doc_id=str(metadata.get("source_doc_id") or doc_id),
+                    original_filename=str(metadata.get("original_filename") or original_filename),
+                    stored_filename=str(metadata.get("stored_filename") or filename),
+                    normalized_filename=str(metadata.get("normalized_filename") or normalized_filename),
+                    upload_id=str(metadata.get("upload_id") or ""),
+                    document_version=str(metadata.get("document_version") or ""),
+                    doc_prefix=doc_id,
+                    extra_keys=[filename, original_filename],
+                )
+                logger.info(
+                    "[INGEST DELETE VERIFY] upload_prewrite filename=%s deleted=%s remaining=%s",
+                    filename,
+                    delete_report.get("deleted_count", 0),
+                    delete_report.get("remaining_count", 0),
+                )
                 # Run the CPU/IO-heavy embedder off the event loop so /ws and
                 # other coroutines (including the KB-ready gate) stay responsive.
                 _raw_indexing = await asyncio.to_thread(
@@ -29970,6 +30682,7 @@ async def _finalize_pdf_upload_background(
                     _kb_global_version + 1,
                     True,
                     target_collection_name,
+                    lambda event: _on_ingest_progress(event, filename),
                 )
                 indexing_details = _raw_indexing if isinstance(_raw_indexing, dict) else {}
                 logger.info("[CHUNKING DONE] filename=%s generated=%s",
@@ -29986,6 +30699,7 @@ async def _finalize_pdf_upload_background(
                         message="Indexing completed; activating live retrieval",
                         filename=filename,
                     )
+                    _set_kb_pipeline_stage("activating", message="Activating live retrieval", filename=filename)
                     active_collection = _sync_live_retrieval_collection((indexing_details).get("collection"))
                     logger.info("[DB WRITE DONE] filename=%s collection=%s indexed=%s",
                                 filename, active_collection, chunks_indexed)
@@ -30026,8 +30740,8 @@ async def _finalize_pdf_upload_background(
 
         if chunks_indexed > 0:
             # Atomically activate the new doc as the single source of truth.
-            _register_active_source(filename)
-            _current_active_doc_id = _normalize_source_label(filename)
+            _register_active_source(normalized_filename or filename)
+            _current_active_doc_id = _normalize_source_label(normalized_filename or filename)
             logger.info(
                 "upload_rag(bg) post-index | filename=%s active_doc_id=%s active_collection=%s active_sources=%s",
                 filename,
@@ -30056,7 +30770,7 @@ async def _finalize_pdf_upload_background(
             # filename / source matches the upload we just indexed.
             probe_ok = False
             probe_reason = ""
-            target_source = _normalize_source_label(filename)
+            target_source = _normalize_source_label(normalized_filename or filename)
             try:
                 vs = getattr(live_rag, "vs", None)
                 col = getattr(vs, "collection", None) if vs is not None else None
@@ -30098,13 +30812,22 @@ async def _finalize_pdf_upload_background(
 async def upload_rag(request: Request, file: UploadFile = File(...), user=Depends(require_login("admin"))):
     verify_csrf(request)
 
-    filename = f"{uuid.uuid4().hex[:8]}_{Path(file.filename or 'upload').name}"
+    upload_id = uuid.uuid4().hex[:8]
+    filename = f"{upload_id}_{Path(file.filename or 'upload').name}"
     original_filename = Path(file.filename or "upload").name
+    source_metadata = build_canonical_source_metadata(
+        original_filename=original_filename,
+        stored_filename=filename,
+        upload_id=upload_id,
+        document_version=upload_id,
+    )
+    source_doc_id = str(source_metadata.get("source_doc_id") or "")
+    normalized_filename = str(source_metadata.get("normalized_filename") or normalize_uploaded_filename(original_filename))
     file_ext = filename.split('.')[-1].lower()
     if file_ext not in ["pdf", "txt"]:
         return {"message": "Unsupported file type. Use PDF or TXT."}
 
-    _set_kb_pipeline_state("uploading", message="Upload received; extracting and indexing document", filename=filename)
+    _set_kb_pipeline_stage("uploading", message="Upload received; extracting and indexing document", filename=filename)
     # Hard-reset all in-memory conversation state immediately so that no old
     # document content can leak into follow-up queries during indexing.
     clear_all_conversation_history()
@@ -30115,28 +30838,36 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
     dedup_deleted = 0
     dedup_removed_assets = []
 
-    if _active_doc_registry.get("mode", RAG_DOC_MODE) != "single":
-        target_norm = _normalize_source_label(original_filename)
-        if target_norm:
-            try:
-                existing_files = [f.get("filename") for f in list_uploaded_files() if f.get("filename")]
-                for existing in existing_files:
-                    if _normalize_source_label(existing) != target_norm:
-                        continue
-                    async with _collection_mutation_lock:
-                        dedup_deleted += delete_documents_by_filename(existing)
-                    asset_path = ASSETS_DIR / existing
-                    if asset_path.exists() and asset_path.is_file():
-                        try:
-                            asset_path.unlink()
-                            dedup_removed_assets.append(existing)
-                        except Exception as dedup_remove_err:
-                            logger.warning(f"Dedup mode: failed removing old asset {existing}: {dedup_remove_err}")
-                    current_sources = _get_active_sources()
-                    current_sources.discard(_normalize_source_label(existing))
-                    _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
-            except Exception as dedup_err:
-                logger.warning(f"Upload dedup pre-clean skipped for {original_filename}: {dedup_err}")
+    try:
+        async with _collection_mutation_lock:
+            delete_report = delete_documents_by_source_identity(
+                source_doc_id=source_doc_id,
+                original_filename=original_filename,
+                stored_filename=filename,
+                normalized_filename=normalized_filename,
+                upload_id=upload_id,
+                document_version=upload_id,
+                doc_prefix=source_doc_id,
+                extra_keys=[original_filename, filename],
+            )
+            dedup_deleted += int(delete_report.get("deleted_count") or 0)
+        target_norm = _normalize_source_label(normalized_filename or original_filename)
+        existing_files = [f.get("filename") for f in list_uploaded_files() if f.get("filename")]
+        for existing in existing_files:
+            if _normalize_source_label(existing) != target_norm:
+                continue
+            asset_path = ASSETS_DIR / existing
+            if asset_path.exists() and asset_path.is_file():
+                try:
+                    asset_path.unlink()
+                    dedup_removed_assets.append(existing)
+                except Exception as dedup_remove_err:
+                    logger.warning(f"Dedup mode: failed removing old asset {existing}: {dedup_remove_err}")
+            current_sources = _get_active_sources()
+            current_sources.discard(_normalize_source_label(existing))
+            _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
+    except Exception as dedup_err:
+        logger.warning(f"Upload dedup pre-clean skipped for {original_filename}: {dedup_err}")
 
     # BLUE/GREEN INDEXING: Generate a fresh collection name to avoid ChromaDB caching bugs
     # and allow zero-downtime updates in single-doc mode.
@@ -30172,6 +30903,7 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
     if file_size_mb > 10:
         logger.warning(f"Large file upload: {filename} ({file_size_mb:.1f}MB) - processing may take time")
 
+    _mark_upload_pipeline_owned(filename, original_filename, normalized_filename, source_doc_id, seconds=600.0)
     save_path.write_bytes(content)
     logger.info(f"✓ Received file: {filename} ({file_size_mb:.1f}MB)")
     _record_kb_stage("file_saved")
@@ -30192,6 +30924,7 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
                 file_size_mb=file_size_mb,
                 target_collection_name=_target_collection_name,
                 old_single_mode_collection=_old_single_mode_collection,
+                source_metadata=source_metadata,
             )
         )
         _pdf_indexing_tasks[filename] = _bg_task
@@ -30204,6 +30937,8 @@ async def upload_rag(request: Request, file: UploadFile = File(...), user=Depend
         "message": "File received. Indexing in background.",
         "filename": filename,
         "original_filename": original_filename,
+        "source_doc_id": source_doc_id,
+        "normalized_filename": normalized_filename,
         "file_size_mb": file_size_mb,
         "doc_mode": _active_doc_registry.get("mode", RAG_DOC_MODE),
         "deleted_for_overwrite": deleted_for_overwrite,
@@ -30278,19 +31013,23 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
 
     # ---- 1. Remove all ChromaDB chunks across every collection --------------
     gc_report: dict = {}
+    delete_report: dict = {}
     deleted = 0
     async with _collection_mutation_lock:
         try:
-            deleted = int(delete_documents_with_prefix(doc_prefix) or 0)
+            normalized_target = normalize_uploaded_filename(_bare or doc_prefix)
+            source_doc_id = canonical_source_doc_id(normalized_target) if normalized_target else ""
+            delete_report = delete_documents_by_source_identity(
+                source_doc_id=source_doc_id,
+                original_filename=original_filename_from_stored(_bare or doc_prefix),
+                stored_filename=doc_prefix,
+                normalized_filename=normalized_target,
+                doc_prefix=doc_prefix,
+                extra_keys=sorted(asset_candidates),
+            )
+            deleted = int(delete_report.get("deleted_count") or 0)
         except Exception as e:
-            logger.warning("rag_delete: delete_documents_with_prefix failed: %s", e)
-        # Match every candidate filename — covers UUID-prefixed and bare forms
-        # plus whatever real on-disk name we discovered above.
-        for cand in sorted(asset_candidates):
-            try:
-                deleted += int(delete_documents_by_filename(cand) or 0)
-            except Exception as e:
-                logger.warning("rag_delete: delete_documents_by_filename(%s) failed: %s", cand, e)
+            logger.warning("rag_delete: canonical delete failed: %s", e)
 
         # Garbage-collect now-empty stale support_docs_v3_* collections so
         # _sync_live_retrieval_collection's "scan for non-empty alternatives"
@@ -30347,6 +31086,13 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
     # ---- 3. Reset active state if the deleted doc was the live target ------
     current_sources = _get_active_sources()
     removed_labels = {_normalize_source_label(x) for x in list(asset_candidates) + [doc_prefix] if x}
+    try:
+        normalized_delete_target = normalize_uploaded_filename(_bare or doc_prefix)
+        if normalized_delete_target:
+            removed_labels.add(_normalize_source_label(normalized_delete_target))
+            removed_labels.add(_normalize_source_label(canonical_source_doc_id(normalized_delete_target)))
+    except Exception:
+        pass
     for label in removed_labels:
         current_sources.discard(label)
     _set_active_sources(sorted(current_sources), mode=_active_doc_registry.get("mode", RAG_DOC_MODE))
@@ -30391,10 +31137,13 @@ async def rag_delete(doc_prefix: str, user=Depends(require_login("admin"))):
                                  chunks_deleted=deleted, triggered_by="admin")
 
     # ---- 5. Truthful response ----------------------------------------------
-    success = (not failed_unlinks)
+    target_remaining = int(delete_report.get("remaining_count") or 0) if delete_report else 0
+    success = (not failed_unlinks) and target_remaining == 0
     payload = {
         "success": success,
         "deleted": deleted,
+        "delete_verification": delete_report,
+        "target_remaining_chunks": target_remaining,
         "files_removed": deleted_files,
         "files_failed": failed_unlinks,
         "cancelled_tasks": cancelled_tasks,
@@ -30435,6 +31184,99 @@ async def rag_update(req: dict, user=Depends(require_login("admin"))):
         raise HTTPException(status_code=500, detail="Update failed")
 
 
+@app.put("/rag/files/{filename}")
+async def rag_update_asset_file(filename: str, request: Request, user=Depends(require_login("admin"))):
+    """Update a text asset and reindex it inside the RAG server only."""
+    verify_csrf(request)
+    if not filename:
+        raise HTTPException(status_code=400, detail="filename is required")
+
+    save_path = ASSETS_DIR / Path(filename).name
+    try:
+        resolved_path = save_path.resolve()
+        if not str(resolved_path).startswith(str(ASSETS_DIR.resolve())):
+            raise HTTPException(status_code=403, detail="Access denied")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if not save_path.exists() or not save_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+
+    if save_path.suffix.lower() != ".txt":
+        raise HTTPException(status_code=400, detail="Can only edit text files")
+
+    data = await request.json()
+    content = data.get("content", "")
+    if not isinstance(content, str):
+        raise HTTPException(status_code=400, detail="content must be a string")
+
+    original_filename = original_filename_from_stored(save_path.name)
+    metadata = build_canonical_source_metadata(
+        original_filename=original_filename,
+        stored_filename=save_path.name,
+        upload_id="rag_text_update",
+        document_version=str(int(time.time())),
+    )
+    metadata.update({"ingestion_owner": "rag_server_update", "file_ext": save_path.suffix.lower()})
+    doc_id = str(metadata.get("source_doc_id") or canonical_source_doc_id(metadata.get("normalized_filename") or original_filename))
+
+    try:
+        _set_kb_pipeline_stage("writing", message="Writing updated text file", filename=save_path.name)
+        _mark_upload_pipeline_owned(save_path.name, original_filename, str(metadata.get("normalized_filename") or ""), doc_id, seconds=300.0)
+        save_path.write_text(content, encoding="utf-8")
+        _mark_assets_recently_indexed(save_path.name, seconds=15.0)
+        _set_kb_pipeline_stage("chunking", message="Chunking updated text", filename=save_path.name)
+        async with _collection_mutation_lock:
+            delete_report = delete_documents_by_source_identity(
+                source_doc_id=str(metadata.get("source_doc_id") or ""),
+                original_filename=str(metadata.get("original_filename") or ""),
+                stored_filename=str(metadata.get("stored_filename") or save_path.name),
+                normalized_filename=str(metadata.get("normalized_filename") or ""),
+                doc_prefix=doc_id,
+            )
+            _raw_chunks = await asyncio.to_thread(
+                chunk_and_add_document,
+                doc_id,
+                content,
+                metadata,
+                _kb_global_version + 1,
+                False,
+                "",
+                lambda event: _on_ingest_progress(event, save_path.name),
+            )
+        chunks = int(_raw_chunks) if isinstance(_raw_chunks, int) else 0
+        if chunks <= 0:
+            _set_kb_pipeline_state("failed", message="Update produced no chunks", filename=save_path.name)
+            raise HTTPException(status_code=500, detail="Update produced no chunks")
+        _set_kb_pipeline_stage("activating", message="Activating updated text", filename=save_path.name)
+        active_collection = _sync_live_retrieval_collection()
+        _register_active_source(str(metadata.get("normalized_filename") or save_path.name))
+        await invalidate_all_caches(
+            action="update",
+            filename=save_path.name,
+            chunks_added=chunks,
+            chunks_deleted=int(delete_report.get("deleted_count") or 0),
+            triggered_by="admin",
+        )
+        _set_kb_pipeline_state("ready", message="Text file updated and active", filename=save_path.name)
+        return {
+            "status": "updated",
+            "filename": save_path.name,
+            "chunks_indexed": chunks,
+            "delete_verification": delete_report,
+            "active_collection": active_collection,
+            "ready_state": dict(_kb_pipeline_state),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("rag_update_asset_file failed for %s: %s", save_path.name, e)
+        _set_kb_pipeline_state("failed", message=f"Update failed: {e}", filename=save_path.name)
+        raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+
+
 @app.post("/rag/reindex-file")
 async def rag_reindex_file(filename: str, user=Depends(require_login("admin"))):
     """Reindex an uploaded file by filename (uploads are saved to assets dir).
@@ -30449,32 +31291,43 @@ async def rag_reindex_file(filename: str, user=Depends(require_login("admin"))):
         raise HTTPException(status_code=404, detail="file not found")
 
     try:
-        _set_kb_pipeline_state("processing", message="Reindexing file", filename=filename)
+        _set_kb_pipeline_stage("extracting", message="Reindexing file", filename=filename)
         text = _extract_text_from_asset(save_path)
         if not text.strip():
             _set_kb_pipeline_state("failed", message="Extraction produced no usable text", filename=filename)
             raise HTTPException(status_code=500, detail="Extraction produced no usable text")
 
-        # Wipe ALL old chunks for this filename regardless of doc_id prefix
-        deleted = delete_documents_by_filename(filename)
-
-        # Deterministic doc_id based on filename (stable across restarts)
-        import re as _re
-        bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
-        safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
-        doc_id = f"upload_{safe}"
-        metadata = {"source": "upload", "filename": filename}
+        original_filename = original_filename_from_stored(filename)
+        metadata = build_canonical_source_metadata(
+            original_filename=original_filename,
+            stored_filename=filename,
+            upload_id="manual_reindex",
+            document_version=str(int(save_path.stat().st_mtime)),
+        )
+        metadata.update({"ingestion_owner": "rag_server_reindex", "file_ext": save_path.suffix.lower()})
+        doc_id = str(metadata.get("source_doc_id") or canonical_source_doc_id(metadata.get("normalized_filename") or original_filename))
+        delete_report = delete_documents_by_source_identity(
+            source_doc_id=str(metadata.get("source_doc_id") or ""),
+            original_filename=str(metadata.get("original_filename") or ""),
+            stored_filename=str(metadata.get("stored_filename") or filename),
+            normalized_filename=str(metadata.get("normalized_filename") or ""),
+            doc_prefix=doc_id,
+        )
+        deleted = int(delete_report.get("deleted_count") or 0)
+        _set_kb_pipeline_stage("chunking", message="Chunking document", filename=filename)
         _raw_chunks_ri = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
-                                        kb_version=_kb_global_version + 1)
+                                        kb_version=_kb_global_version + 1,
+                                        progress_callback=lambda event: _on_ingest_progress(event, filename))
         chunks = int(_raw_chunks_ri) if isinstance(_raw_chunks_ri, int) else 0
         if chunks:
+            _set_kb_pipeline_stage("activating", message="Activating live retrieval", filename=filename)
             active_collection = _sync_live_retrieval_collection()
-            _register_active_source(filename)
+            _register_active_source(str(metadata.get("normalized_filename") or filename))
             await invalidate_all_caches(action="reindex", filename=filename,
                                          chunks_added=chunks, chunks_deleted=deleted,
                                          triggered_by="admin")
             _set_kb_pipeline_state("ready", message="Reindex complete and active", filename=filename)
-            return {"reindexed_chunks": chunks, "deleted_old": deleted, "active_collection": active_collection, "ready_state": dict(_kb_pipeline_state)}
+            return {"reindexed_chunks": chunks, "deleted_old": deleted, "delete_verification": delete_report, "active_collection": active_collection, "ready_state": dict(_kb_pipeline_state)}
         else:
             _set_kb_pipeline_state("failed", message="Reindex produced no chunks", filename=filename)
             raise HTTPException(status_code=500, detail="Reindex produced no chunks")
@@ -30506,19 +31359,29 @@ async def rag_reindex_all(user=Depends(require_login("admin"))):
             text = _extract_text_from_asset(p)
             if not text.strip():
                 raise RuntimeError("Extraction produced no usable text")
-            deleted = delete_documents_by_filename(filename)
-            # Deterministic doc_id based on filename
-            import re as _re
-            bare = _re.sub(r'^[0-9a-fA-F]{8}_', '', filename)
-            safe = _re.sub(r'[^A-Za-z0-9._-]', '_', bare)
-            doc_id = f"upload_{safe}"
-            metadata = {"source": "upload", "filename": filename}
+            original_filename = original_filename_from_stored(filename)
+            metadata = build_canonical_source_metadata(
+                original_filename=original_filename,
+                stored_filename=filename,
+                upload_id="manual_reindex_all",
+                document_version=str(int(p.stat().st_mtime)),
+            )
+            metadata.update({"ingestion_owner": "rag_server_reindex_all", "file_ext": p.suffix.lower()})
+            doc_id = str(metadata.get("source_doc_id") or canonical_source_doc_id(metadata.get("normalized_filename") or original_filename))
+            delete_report = delete_documents_by_source_identity(
+                source_doc_id=str(metadata.get("source_doc_id") or ""),
+                original_filename=str(metadata.get("original_filename") or ""),
+                stored_filename=str(metadata.get("stored_filename") or filename),
+                normalized_filename=str(metadata.get("normalized_filename") or ""),
+                doc_prefix=doc_id,
+            )
+            deleted = int(delete_report.get("deleted_count") or 0)
             _raw_cad = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata,
                                             kb_version=_kb_global_version + 1)
             chunks: int = _raw_cad if isinstance(_raw_cad, int) else 0
             if chunks > 0:
-                _register_active_source(filename)
-            results.append({"filename": filename, "chunks": chunks, "deleted_old": deleted, "status": "ok"})
+                _register_active_source(str(metadata.get("normalized_filename") or filename))
+            results.append({"filename": filename, "chunks": chunks, "deleted_old": deleted, "delete_verification": delete_report, "status": "ok"})
         except Exception as e:
             results.append({"filename": filename, "status": "error", "error": str(e)})
     total_added = sum(r.get("chunks", 0) for r in results if r.get("status") == "ok")
@@ -30852,7 +31715,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
     # ========== STABILIZED auto_transcribe ==========
     # Defined here (not inside the conditional) so it is always in scope when
     # stop_recording or any other handler calls it.
-    async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None, lang="en"):
+    async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None, lang="en") -> None:
         nonlocal user
         global _active_voice_task, _active_voice_conn_id
         global _pipeline_run_count, _last_gpu_reserved_mb
@@ -31046,8 +31909,19 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         except Exception:
                             pass
                         try:
-                            await ws.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True, "timing": t_meta})
-                            await ws.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": (lang == "ar"), "timing": t_meta})
+                            fu_t_meta = t_meta or {"request_start": time.perf_counter()}
+                            await send_final_response(
+                                conn_id,
+                                fu_text,
+                                "ar" if lang == "ar" else XTTS_LANGUAGE,
+                                not EFFECTIVE_DISABLE_TTS,
+                                websocket=ws,
+                                sources=0,
+                                arabic_mode=(lang == "ar"),
+                                t_meta=fu_t_meta,
+                                branch="followup_voice",
+                            )
+                            _emit_perf_report(fu_t_meta, fu_t_meta.get("request_start", time.perf_counter()), full_text, fu_text, conn_id)
                         except Exception:
                             pass
                         logger.info("[FOLLOWUP ROUTE] complete for query=%s", full_text)
@@ -31116,6 +31990,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
             _active_voice_task = None
             _active_voice_conn_id = None
 
+    _auto_transcribe: Callable[..., Awaitable[None]] = auto_transcribe
+
     try:
         while True:
             msg = await websocket.receive()
@@ -31183,7 +32059,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         speech_start_time = None
 
                         logger.info(f"{connection_id} ✓ TRANSCRIBE TRIGGERED: {len(chunk)} bytes ({audio_duration_sec:.2f}s audio) after {triggered_after} silent chunks")
-                        task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, timing_meta, lang=session_language))
+                        task = asyncio.create_task(_auto_transcribe(chunk, websocket, connection_id, timing_meta, lang=session_language))
                         _active_voice_task = task
                     elif silence_counter >= silence_chunks_needed and len(audio_buffer) <= 48000 and speech_start_time is not None:
                         # Buffer too small to be a real utterance — drain it
@@ -31221,7 +32097,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     audio_buffer.clear()
                                     silence_counter = 0
                                     logger.info(f"{connection_id} ⏹ MANUAL STOP: transcribing {len(chunk)} bytes ({audio_duration_sec:.2f}s audio)")
-                                    task = asyncio.create_task(auto_transcribe(chunk, websocket, connection_id, lang=session_language))
+                                    task = asyncio.create_task(_auto_transcribe(chunk, websocket, connection_id, lang=session_language))
                                     _active_voice_task = task
                             elif action == "clear_audio_buffer":
                                 # User muted - clear the buffer without transcribing
@@ -31283,8 +32159,17 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                         text[:80],
                                     )
                                     try:
-                                        await websocket.send_json({"type": "aiResponseChunk", "text": _loading_msg, "index": 0, "done": True})
-                                        await websocket.send_json({"type": "aiResponseDone", "fullText": _loading_msg, "sources": 0, "arabic_mode": False})
+                                        await send_final_response(
+                                            connection_id,
+                                            _loading_msg,
+                                            XTTS_LANGUAGE,
+                                            not EFFECTIVE_DISABLE_TTS,
+                                            websocket=websocket,
+                                            sources=0,
+                                            arabic_mode=False,
+                                            t_meta={"request_start": time.perf_counter()},
+                                            branch="kb_loading_gate",
+                                        )
                                     except Exception:
                                         pass
                                     continue
@@ -31317,8 +32202,19 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     except Exception:
                                         pass
                                     try:
-                                        await websocket.send_json({"type": "aiResponseChunk", "text": fu_text, "index": 0, "done": True})
-                                        await websocket.send_json({"type": "aiResponseDone", "fullText": fu_text, "sources": 0, "arabic_mode": False})
+                                        fu_t_meta = {"request_start": time.perf_counter()}
+                                        await send_final_response(
+                                            connection_id,
+                                            fu_text,
+                                            "ar" if msg_lang == "ar" else XTTS_LANGUAGE,
+                                            not EFFECTIVE_DISABLE_TTS,
+                                            websocket=websocket,
+                                            sources=0,
+                                            arabic_mode=(msg_lang == "ar"),
+                                            t_meta=fu_t_meta,
+                                            branch="followup_text",
+                                        )
+                                        _emit_perf_report(fu_t_meta, fu_t_meta["request_start"], text, fu_text, connection_id)
                                     except Exception:
                                         pass
                                     logger.info("[FOLLOWUP ROUTE] complete for query=%s", text)

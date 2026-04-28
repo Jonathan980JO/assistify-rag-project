@@ -49,12 +49,6 @@ import json
 import base64
 from logging.handlers import RotatingFileHandler
 
-try:
-    from backend.knowledge_base import add_document, chunk_and_add_document
-except Exception:
-    # If running in isolation, delay import errors until endpoint is used
-    add_document = None
-    chunk_and_add_document = None
 from passlib.context import CryptContext
 from itsdangerous import URLSafeSerializer
 import sqlite3
@@ -277,6 +271,27 @@ oauth.register(
 # WebSocket proxy target (RAG server)
 RAG_WS_URL = "ws://127.0.0.1:7000/ws"
 RAG_HTTP_BASE = "http://127.0.0.1:7000"
+
+
+def _rag_proxy_headers(request: Request) -> dict:
+    headers = {}
+    cookie_header = request.headers.get("cookie")
+    if cookie_header:
+        headers["Cookie"] = cookie_header
+    csrf = request.headers.get("x-csrf-token") or request.cookies.get("csrf_token")
+    if csrf:
+        headers["x-csrf-token"] = csrf
+    return headers
+
+
+async def _rag_json_or_error(resp: aiohttp.ClientResponse):
+    try:
+        data = await resp.json(content_type=None)
+    except Exception:
+        data = {"detail": await resp.text()}
+    if resp.status >= 400:
+        raise HTTPException(status_code=resp.status, detail=data)
+    return data
 
 # Session management constants
 SESSION_ABSOLUTE_TIMEOUT = 86400  # 24 hours
@@ -2563,29 +2578,12 @@ async def tts_proxy(request: Request):
 
 @app.post("/proxy/upload_rag")
 async def proxy_upload_rag(request: Request, file: UploadFile = File(...), user=Depends(require_login("admin"))):
-    """Proxy upload endpoint on the auth server. Accepts a PDF/TXT, parses it,
-    and indexes it into the knowledge base by calling backend.knowledge_base.chunk_and_add_document.
-    This keeps uploads under the login server origin so cookies/CSRF work.
-    """
-    # Verify CSRF token (same as RAG server)
+    """Proxy uploads to the RAG server, which is the single ingestion owner."""
     verify_csrf(request)
-
-    if chunk_and_add_document is None:
-        # Try to import lazily
-        try:
-            from backend.knowledge_base import chunk_and_add_document as _cad
-            globals()['chunk_and_add_document'] = _cad
-        except Exception as e:
-            log_security_event("upload_error", {
-                "username": user.get("username"),
-                "reason": "kb_import_failed",
-                "error": str(e)
-            }, severity="ERROR")
-            raise HTTPException(status_code=500, detail=f"Knowledge base not available: {str(e)}")
 
     # Security: File upload validation
     MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB (increased for large PDFs)
-    ALLOWED_EXTENSIONS = {'.txt', '.pdf', '.md'}
+    ALLOWED_EXTENSIONS = {'.txt', '.pdf'}
     
     filename = Path(file.filename).name
     file_ext = '.' + filename.split('.')[-1].lower()
@@ -2598,7 +2596,7 @@ async def proxy_upload_rag(request: Request, file: UploadFile = File(...), user=
             "extension": file_ext,
             "reason": "invalid_extension"
         }, severity="WARNING")
-        return {"message": f"Unsupported file type. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"}
+        return {"message": f"Unsupported file type. Allowed: {', '.join(sorted(ALLOWED_EXTENSIONS))}"}
     
     # Read file content
     content = await file.read()
@@ -2624,94 +2622,47 @@ async def proxy_upload_rag(request: Request, file: UploadFile = File(...), user=
         "extension": file_ext
     })
 
-    assets_dir = Path(__file__).resolve().parent.parent / 'backend' / 'assets'
-    assets_dir.mkdir(parents=True, exist_ok=True)
-    safe_filename = f"{uuid.uuid4().hex[:8]}_{filename}"
-    save_path = assets_dir / safe_filename
-    save_path.write_bytes(content)
-
-    text = ""
-    if file_ext == ".txt" or file_ext == ".md":
-        try:
-            text = content.decode("utf-8")
-        except Exception:
-            text = content.decode(errors="ignore")
-        logger.info(f"Extracted text/markdown: {len(text)} chars")
-    elif file_ext == ".pdf":
-        # PDF EXTRACTION with better error handling
-        try:
-            from PyPDF2 import PdfReader
-            logger.info(f"Extracting PDF: {filename}...")
-            reader = PdfReader(save_path)
-            pages = []
-            num_pages = len(reader.pages)
-            
-            for page_num, p in enumerate(reader.pages):
-                try:
-                    page_text = p.extract_text() or ""
-                    pages.append(page_text)
-                except Exception as e:
-                    logger.warning(f"Could not extract page {page_num}: {e}")
-                    pages.append("")
-            
-            text = "\n\n".join(pages)
-            logger.info(f"Extracted PDF: {len(text)} chars from {num_pages} pages")
-        except ImportError:
-            log_security_event("upload_error", {
-                "username": user.get("username"),
-                "filename": filename,
-                "reason": "pypdf2_missing"
-            }, severity="WARNING")
-            return {"message": "PyPDF2 not installed. Install with: pip install PyPDF2"}
-        except Exception as e:
-            log_security_event("upload_error", {
-                "username": user.get("username"),
-                "filename": filename,
-                "reason": "pdf_extraction_failed",
-                "error": str(e)
-            }, severity="ERROR")
-            return {"message": f"Could not parse PDF: {str(e)}. File may be corrupted or encrypted."}
-
-    doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
-    metadata = {"source": "upload_proxy", "filename": filename, "file_size_mb": file_size_mb}
-    
     try:
-        # Use chunk_and_add_document instead of add_document for proper handling of large files
-        chunks_indexed = chunk_and_add_document(doc_id=doc_id, text=text, metadata=metadata)
-        
-        if chunks_indexed > 0:
-            log_security_event("file_upload_success", {
-                "username": user.get("username"),
-                "filename": filename,
-                "chunks_indexed": chunks_indexed,
-                "file_size_mb": f"{file_size_mb:.1f}"
-            })
-            return {
-                "message": f"✓ File {filename} uploaded and indexed as {chunks_indexed} chunk(s).",
-                "filename": filename,
-                "chunks_indexed": chunks_indexed,
-                "file_size_mb": file_size_mb
-            }
-        else:
-            log_security_event("file_upload_warning", {
-                "username": user.get("username"),
-                "filename": filename,
-                "reason": "no_content_extracted"
-            }, severity="WARNING")
-            return {
-                "message": f"⚠ File {filename} uploaded but no useful content found (may be blank or only images).",
-                "filename": filename,
-                "chunks_indexed": 0,
-                "file_size_mb": file_size_mb
-            }
+        form = aiohttp.FormData()
+        form.add_field(
+            "file",
+            content,
+            filename=filename,
+            content_type=file.content_type or "application/octet-stream",
+        )
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.post(
+                f"{RAG_HTTP_BASE}/upload_rag",
+                data=form,
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                data = await _rag_json_or_error(resp)
+                log_security_event("file_upload_forwarded", {
+                    "username": user.get("username"),
+                    "filename": filename,
+                    "file_size_mb": f"{file_size_mb:.1f}",
+                    "rag_status": data.get("status"),
+                    "source_doc_id": data.get("source_doc_id"),
+                })
+                return data
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        log_security_event("upload_error", {
+            "username": user.get("username"),
+            "filename": filename,
+            "reason": "rag_proxy_failed",
+            "error": str(e)
+        }, severity="ERROR")
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
     except Exception as e:
         log_security_event("upload_error", {
             "username": user.get("username"),
             "filename": filename,
-            "reason": "indexing_failed",
+            "reason": "rag_proxy_failed",
             "error": str(e)
         }, severity="ERROR")
-        raise HTTPException(status_code=500, detail=f"Failed to index uploaded document: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to forward uploaded document: {str(e)}")
 
 
 @app.get("/api/knowledge/files")
@@ -2735,6 +2686,22 @@ def list_knowledge_files(request: Request, user=Depends(require_api_role("admin"
             })
     
     return sorted(files, key=lambda x: x['modified'], reverse=True)
+
+
+@app.get("/api/knowledge/kb_status")
+async def proxy_kb_status(request: Request, user=Depends(require_api_role("admin", "employee"))):
+    """Proxy the RAG ingestion status for the admin knowledge page."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(
+                f"{RAG_HTTP_BASE}/kb_status",
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
 
 
 @app.get("/api/knowledge/files/{filename}")
@@ -2864,7 +2831,7 @@ def get_knowledge_pdf_data(request: Request, filename: str, user=Depends(require
 
 @app.put("/api/knowledge/files/{filename}")
 async def update_knowledge_file(request: Request, filename: str, user=Depends(require_login("admin"))):
-    """Update the content of a knowledge base file (text files only)."""
+    """Proxy text-file updates to the RAG server, the ingestion owner."""
     verify_csrf(request)
     
     assets_dir = Path(__file__).resolve().parent.parent / 'backend' / 'assets'
@@ -2885,24 +2852,26 @@ async def update_knowledge_file(request: Request, filename: str, user=Depends(re
     content = data.get("content", "")
     
     try:
-        file_path.write_text(content, encoding='utf-8')
-        _PDF_TEXT_CACHE.pop(str(file_path), None)
-        
-        # Re-index the document in the knowledge base
-        if add_document:
-            doc_id = f"upload_{uuid.uuid4().hex[:8]}_{filename}"
-            metadata = {"source": "edited", "filename": filename}
-            add_document(doc_id=doc_id, text=content, metadata=metadata)
-        
-        return {"status": "updated", "filename": filename}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as session:
+            async with session.put(
+                f"{RAG_HTTP_BASE}/rag/files/{filename}",
+                json={"content": content},
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                data = await _rag_json_or_error(resp)
+                _PDF_TEXT_CACHE.pop(str(file_path), None)
+                return data
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
 
 
 @app.delete("/api/knowledge/files/{filename}")
 async def delete_knowledge_file(request: Request, filename: str, user=Depends(require_login("admin"))):
-    """Delete a knowledge base file: remove the physical file AND purge all
-    ChromaDB chunks so the content is gone from the entire system immediately."""
+    """Proxy deletion to the RAG server, which owns assets and Chroma cleanup."""
     verify_csrf(request)
 
     assets_dir = Path(__file__).resolve().parent.parent / 'backend' / 'assets'
@@ -2916,47 +2885,22 @@ async def delete_knowledge_file(request: Request, filename: str, user=Depends(re
     except Exception:
         raise HTTPException(status_code=404, detail="File not found")
 
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="File not found")
-
-    # ---- 1. Delete the physical file ----
     try:
-        file_path.unlink()
-        _PDF_TEXT_CACHE.pop(str(file_path), None)
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
+            async with session.post(
+                f"{RAG_HTTP_BASE}/rag/delete",
+                params={"doc_prefix": filename},
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                data = await _rag_json_or_error(resp)
+                _PDF_TEXT_CACHE.pop(str(file_path), None)
+                return data
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
-
-    # ---- 2. Purge all ChromaDB chunks directly (no auth issues) ----
-    chunks_deleted = 0
-    try:
-        import sys as _sys
-        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        from backend.knowledge_base import delete_documents_with_prefix, delete_documents_by_filename
-        chunks_deleted += delete_documents_with_prefix(filename)
-        chunks_deleted += delete_documents_by_filename(filename)
-        # Also try with upload_ prefix variants
-        chunks_deleted += delete_documents_with_prefix(f"upload_{filename}")
-        chunks_deleted += delete_documents_by_filename(f"upload_{filename}")
-    except Exception as e:
-        import logging as _logging
-        _logging.getLogger(__name__).warning(
-            f"delete_knowledge_file: ChromaDB purge failed for '{filename}': {e}"
-        )
-
-    # ---- 3. Flush Ollama KV cache so stale answers are evicted ----
-    try:
-        import aiohttp as _aiohttp
-        async with _aiohttp.ClientSession() as _sess:
-            async with _sess.post(
-                "http://127.0.0.1:11434/api/generate",
-                json={"model": "qwen2.5:3b", "keep_alive": 0},
-                timeout=_aiohttp.ClientTimeout(total=10)
-            ) as _r:
-                pass
-    except Exception:
-        pass  # Ollama may not be running; non-fatal
-
-    return {"status": "deleted", "filename": filename, "chunks_deleted": chunks_deleted}
 
 
 @app.post("/api/knowledge/clear-cache")
@@ -2972,10 +2916,10 @@ async def proxy_clear_cache(request: Request, user=Depends(require_login("admin"
         async with _aiohttp.ClientSession() as sess:
             async with sess.post(
                 f"{RAG_HTTP_BASE}/rag/clear-cache",
+                headers=_rag_proxy_headers(request),
                 timeout=_aiohttp.ClientTimeout(total=15)
             ) as resp:
-                data = await resp.json()
-                return data
+                return await _rag_json_or_error(resp)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Cache clear failed: {str(e)}")
 

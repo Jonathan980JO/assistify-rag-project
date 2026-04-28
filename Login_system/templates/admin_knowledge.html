@@ -144,6 +144,18 @@
             border-radius: 12px;
             margin-bottom: 32px;
         }
+        .upload-status {
+            margin-top: 12px;
+            min-height: 22px;
+            color: var(--muted);
+            font-size: 0.95em;
+        }
+        .upload-status.ready {
+            color: var(--accent);
+        }
+        .upload-status.failed {
+            color: var(--danger);
+        }
         input[type="file"] {
             background: #171717;
             color: var(--light);
@@ -473,6 +485,7 @@
                 <br>
                 <button type="submit">Upload Document</button>
             </form>
+            <div id="uploadStatus" class="upload-status" aria-live="polite"></div>
         </div>
         
         <h2>Existing Documents</h2>
@@ -911,6 +924,62 @@
             return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
         }
 
+        const uploadStatusEl = document.getElementById('uploadStatus');
+        let uploadStatusTimer = null;
+
+        function setUploadStatus(status, kind = '') {
+            uploadStatusEl.className = `upload-status ${kind}`.trim();
+            uploadStatusEl.textContent = status || '';
+        }
+
+        function describeKbStatus(data) {
+            const stage = data.stage || data.state || 'processing';
+            const filename = data.filename || '';
+            const percent = Number.isFinite(Number(data.percent)) && Number(data.percent) > 0
+                ? ` ${Math.round(Number(data.percent))}%`
+                : '';
+            const chunkInfo = data.total_chunks ? ` (${data.indexed_chunks || 0}/${data.total_chunks} chunks)` : '';
+            return `${stage}${percent}${chunkInfo}${filename ? ` - ${filename}` : ''}`;
+        }
+
+        async function pollKbStatus() {
+            const response = await fetch('/api/knowledge/kb_status', {
+                credentials: 'same-origin'
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.detail || 'Could not read KB status');
+            }
+            const stage = data.stage || data.state || '';
+            if (stage === 'ready') {
+                setUploadStatus(describeKbStatus(data), 'ready');
+                clearInterval(uploadStatusTimer);
+                uploadStatusTimer = null;
+                loadDocuments();
+                return;
+            }
+            if (stage === 'failed') {
+                setUploadStatus(describeKbStatus(data), 'failed');
+                clearInterval(uploadStatusTimer);
+                uploadStatusTimer = null;
+                return;
+            }
+            setUploadStatus(describeKbStatus(data));
+        }
+
+        function startKbStatusPolling(initialState) {
+            if (uploadStatusTimer) clearInterval(uploadStatusTimer);
+            if (initialState) setUploadStatus(describeKbStatus(initialState));
+            uploadStatusTimer = setInterval(() => {
+                pollKbStatus().catch(error => {
+                    setUploadStatus(error.message, 'failed');
+                    clearInterval(uploadStatusTimer);
+                    uploadStatusTimer = null;
+                });
+            }, 1200);
+            pollKbStatus().catch(() => {});
+        }
+
         // Upload document
         document.getElementById('uploadForm').onsubmit = async (e) => {
             e.preventDefault();
@@ -925,6 +994,7 @@
             
             const formData = new FormData();
             formData.append('file', file);
+            setUploadStatus('uploading');
             
             try {
                 const response = await fetch('/proxy/upload_rag', {
@@ -937,13 +1007,14 @@
                 const result = await response.json();
                 
                 if (response.ok) {
-                    alert('Document uploaded successfully!');
                     fileInput.value = '';
-                    loadDocuments();
+                    startKbStatusPolling(result.ready_state || result);
                 } else {
+                    setUploadStatus('', '');
                     alert('Error: ' + (result.detail || result.message || 'Upload failed'));
                 }
             } catch (error) {
+                setUploadStatus('', '');
                 alert('Error uploading document: ' + error.message);
             }
         };
