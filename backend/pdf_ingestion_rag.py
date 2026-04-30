@@ -963,8 +963,31 @@ class VectorStore:
         # would empty the pool, keep the original candidates so downstream
         # stages still get something to work with.
         _t_semfilter0 = _time_vs.perf_counter()
-        _semantic_threshold = 0.0
+        _query_low_for_semantic = re.sub(r"\s+", " ", str(normalized_query or "").strip().lower())
+        _comparison_keyword_query = bool(
+            re.search(r"\b(?:difference|differences|compare|comparison|contrast|between|versus|vs\.?)\b", _query_low_for_semantic)
+        )
+        _comparison_stopwords = {
+            "what", "which", "who", "whom", "whose", "when", "where", "why", "how",
+            "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
+            "the", "a", "an", "of", "to", "in", "on", "for", "with", "by", "from",
+            "about", "tell", "explain", "define", "meaning", "difference", "differences",
+            "compare", "comparison", "contrast", "between", "versus", "vs", "and", "or",
+        }
+        _concept_segments = [seg.strip(" ,;:.!?()[]{}\"'") for seg in re.split(r"\b(?:and|or|versus|vs\.?)\b|[,/]", _query_low_for_semantic)]
+        _concept_segment_count = 0
+        for _seg in _concept_segments:
+            _seg_tokens = [tok for tok in re.findall(r"[a-z0-9]{3,}", _seg) if tok not in _comparison_stopwords]
+            if _seg_tokens:
+                _concept_segment_count += 1
+        _comparison_query = bool(_comparison_keyword_query or _concept_segment_count >= 2)
+        _semantic_threshold = -0.5 if _comparison_query else 0.0
         _pre_semantic_count = len(candidates)
+        if _comparison_query:
+            logger.info(
+                "[COMPARE MODE] relaxed semantic filtering active threshold=%.2f min_survivors=%d concepts=%d keyword=%s",
+                _semantic_threshold, min(8, _pre_semantic_count), _concept_segment_count, _comparison_keyword_query,
+            )
         if candidates:
             def _semantic_signal(c: Dict[str, Any]) -> float:
                 if c.get("rerank_score") is not None:
@@ -973,6 +996,23 @@ class VectorStore:
                     return float(c.get("reranker_score") or 0.0)
                 return float(c.get("similarity", 0.0) or 0.0)
             _semantic_kept = [c for c in candidates if _semantic_signal(c) > _semantic_threshold]
+            if _comparison_query:
+                _min_compare_survivors = min(8, len(candidates))
+                if len(_semantic_kept) < _min_compare_survivors:
+                    _seen_kept = {id(c) for c in _semantic_kept}
+                    _restored = 0
+                    for _cand in sorted(candidates, key=_semantic_signal, reverse=True):
+                        if id(_cand) in _seen_kept:
+                            continue
+                        _semantic_kept.append(_cand)
+                        _seen_kept.add(id(_cand))
+                        _restored += 1
+                        if len(_semantic_kept) >= _min_compare_survivors:
+                            break
+                    logger.info(
+                        "[RAG SEMANTIC FILTER] compare_min_survivors=%d restored=%d after_restore=%d",
+                        _min_compare_survivors, _restored, len(_semantic_kept),
+                    )
             if _semantic_kept:
                 _dropped_semantic = _pre_semantic_count - len(_semantic_kept)
                 logger.info(

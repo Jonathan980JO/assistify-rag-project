@@ -52,12 +52,6 @@ def print_banner() -> None:
     print("  Assistify Main Server Launcher")
     print("  (RAG + Login only)")
     print("====================================")
-    print(
-        "Safe Mode Flags: "
-        "SAFE_MODE=0 TTS=on RERANKER=on WHISPER=on "
-        "WARMUP=on COLLECTION=auto DOC_MODE=single "
-        "DOMAIN_HEURISTICS=off EMBED_DEVICE=cuda"
-    )
 
 
 def is_windows() -> bool:
@@ -93,7 +87,7 @@ def build_env(root: Path) -> dict[str, str]:
     env["ASSISTIFY_DISABLE_WHISPER"] = "0"
     env["ASSISTIFY_DISABLE_WARMUP"] = "0"
     # ASSISTIFY_COLLECTION_NAME intentionally not set
-    env["ASSISTIFY_DOC_MODE"] = "single"
+    env["ASSISTIFY_DOC_MODE"] = "auto"
     env["ASSISTIFY_ENABLE_DOMAIN_SPECIFIC_HEURISTICS"] = "0"
     env["ASSISTIFY_EMBED_DEVICE"] = "cuda"
 

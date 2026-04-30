@@ -12,7 +12,6 @@ from collections import defaultdict, Counter
 
 print("RUNNING PATCHED VERSION")
 # Silence a known third-party warning (ctranslate2 imports pkg_resources).
-# This is non-fatal and otherwise spams logs on startup.
 warnings.filterwarnings(
     "ignore",
     message=r"pkg_resources is deprecated as an API\..*",
@@ -435,6 +434,8 @@ def cleanup_old_conversations():
     for conn_id in expired_ids:
         if conn_id in conversation_history:
             del conversation_history[conn_id]
+        if conn_id in recent_grounded_definition_concepts:
+            del recent_grounded_definition_concepts[conn_id]
         del conversation_timestamps[conn_id]
 
 
@@ -451,6 +452,10 @@ def clear_all_conversation_history():
         last_answer_state.clear()
     except Exception:
         pass
+    try:
+        recent_grounded_definition_concepts.clear()
+    except Exception:
+        pass
     if count:
         logger.info(f"Cleared {count} conversation(s) after KB reindex")
 
@@ -462,6 +467,7 @@ def clear_all_conversation_history():
 # retrieval. The system stays strictly grounded in the previously
 # retrieved chunks + the previous answer text — no open-domain leakage.
 last_answer_state: dict = {}
+recent_grounded_definition_concepts = defaultdict(list)
 _FOLLOWUP_STATE_TTL = 1800  # seconds (30 min)
 _FOLLOWUP_MAX_QUERY_LEN = 140
 _FOLLOWUP_CHUNK_CHAR_BUDGET = 1800
@@ -555,6 +561,89 @@ _FOLLOWUP_NEW_QUESTION_PATTERNS = [
 ]
 
 _FOLLOWUP_SHORT_WORD_LIMIT = 7
+
+
+_ARABIC_TRUE_FOLLOWUP_RE = _re_followup.compile(
+    r"^\s*(?:"
+    r"(?:اشرح|وضح|فسر|بيّن|بين)\s+(?:أكثر|اكثر|ذلك|هذا|هذه|الأمر|الامر|ما\s+سبق)|"
+    r"(?:كمل|تابع|استمر)|"
+    r"(?:ماذا\s+تقصد|ما\s+المقصود\s+(?:بذلك|بهذا|به|من\s+ذلك))|"
+    r"(?:أخبرني|اخبرني)\s+المزيد\s+(?:عنه|عنها|عن\s+ذلك|عن\s+هذا)|"
+    r"(?:المزيد|تفاصيل)\s+(?:عنه|عنها|عن\s+ذلك|عن\s+هذا|أكثر|اكثر)"
+    r")\s*[؟?!.،]*\s*$",
+    _re_followup.IGNORECASE,
+)
+
+_ARABIC_NEW_QUESTION_RE = _re_followup.compile(
+    r"^\s*(?:"
+    r"ما\s+(?:هو|هي|هى|هم|هن|الذي|التي|هية)|"
+    r"(?:من|متى|أين|اين|كيف|لماذا|لما|هل|كم|أي|اي|أية|اية)\b|"
+    r"(?:عرّف|عرف|اذكر|عدد|عدّد|اكتب|اعرض|لخص|اشرح)\b|"
+    r"(?:قارن|ما\s+الفرق\s+بين|ما\s+العلاقة\s+بين)\b"
+    r")",
+    _re_followup.IGNORECASE,
+)
+
+_ARABIC_ROUTE_EMPTY_TOPIC_TOKENS = {
+    "ما", "هو", "هي", "هى", "هم", "هن", "هذا", "هذه", "ذلك", "تلك", "هنا", "هناك",
+    "به", "بها", "بذلك", "بهذا", "عنه", "عنها", "عن", "فيه", "فيها", "من", "الى", "إلى",
+    "أي", "اي", "أية", "اية", "هل", "كيف", "لماذا", "متى", "أين", "اين", "كم",
+    "الذي", "التي", "اللذان", "اللتان", "الذين", "اللاتي", "اكثر", "أكثر",
+}
+
+
+def _has_arabic_chars(text: str) -> bool:
+    return any("\u0600" <= char <= "\u06FF" for char in str(text or ""))
+
+
+def _arabic_route_topic_tokens(text: str) -> list[str]:
+    normalized = _re_followup.sub(r"[؟?!.،,؛:()\[\]{}\"'`]+", " ", str(text or ""))
+    tokens = _re_followup.findall(r"[\u0600-\u06FFA-Za-z0-9]+", normalized)
+    meaningful: list[str] = []
+    for token in tokens:
+        token_clean = token.strip()
+        if not token_clean:
+            continue
+        if token_clean in _ARABIC_ROUTE_EMPTY_TOPIC_TOKENS:
+            continue
+        if len(token_clean) == 1 and not token_clean.isdigit():
+            continue
+        meaningful.append(token_clean)
+    return meaningful
+
+
+def _classify_arabic_route(query_text: str, connection_id=None) -> tuple[bool, bool, str]:
+    """Return (standalone, followup, reason) for Arabic routing.
+
+    The rules are structural and deictic only: they do not contain document
+    vocabulary or answers. Standalone means the query should enter normal RAG.
+    """
+    query = _re_followup.sub(r"\s+", " ", str(query_text or "").strip())
+    if not query or not _has_arabic_chars(query):
+        return False, False, "not_arabic"
+
+    if _ARABIC_TRUE_FOLLOWUP_RE.search(query):
+        return False, True, "arabic_deictic_followup"
+
+    if _is_bare_comparison_followup_query(query):
+        return False, False, "arabic_bare_comparison_guard"
+
+    topic_tokens = _arabic_route_topic_tokens(query)
+    has_explicit_pair = bool(_re_followup.search(r"\bبين\b.+\bو", query))
+    if (_ARABIC_NEW_QUESTION_RE.search(query) and topic_tokens) or (has_explicit_pair and len(topic_tokens) >= 2):
+        return True, False, "arabic_interrogative_with_topic"
+
+    if _has_recent_followup_state(connection_id) and len(topic_tokens) <= 2:
+        return False, True, "arabic_short_contextual_followup"
+
+    return True, False, "arabic_default_standalone"
+
+
+def _log_arabic_route(query_text: str, connection_id=None) -> tuple[bool, bool, str]:
+    standalone, followup, reason = _classify_arabic_route(query_text, connection_id)
+    if _has_arabic_chars(query_text):
+        logger.info("[ARABIC ROUTE] standalone=%s reason=%s", standalone, reason)
+    return standalone, followup, reason
 
 
 def _has_recent_followup_state(connection_id) -> bool:
@@ -651,6 +740,11 @@ def _is_followup_query(text: str, connection_id=None) -> bool:
     t = (text or "").strip()
     if not t or len(t) > _FOLLOWUP_MAX_QUERY_LEN:
         return False
+    if _has_arabic_chars(t):
+        standalone, followup, _reason = _log_arabic_route(t, connection_id)
+        if standalone:
+            return False
+        return followup
     for pat in _FOLLOWUP_PATTERNS:
         if pat.search(t):
             return True
@@ -747,6 +841,34 @@ def _infer_followup_answer_type(query: str, answer: str) -> str:
     return "text"
 
 
+def _extract_definition_concept_from_query_surface(query: str) -> str:
+    query_value = re.sub(r"\s+", " ", str(query or "").strip())
+    if not query_value:
+        return ""
+    match = re.match(
+        r"^(?:what|who)\s+(?:is|are|was|were)\s+(.+?)\??$",
+        query_value,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.match(
+            r"^(?:define|definition\s+of)\s+(.+?)\??$",
+            query_value,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        return ""
+    concept = re.sub(r"\b(?:the|a|an)\b", " ", match.group(1), flags=re.IGNORECASE)
+    concept = re.sub(r"\s+", " ", concept).strip(" \t\r\n.,;:!?()[]{}")
+    tokens = [
+        token for token in re.findall(r"[a-z0-9]{3,}", concept.lower())
+        if token not in _EVIDENCE_STOPWORDS
+    ]
+    if not tokens or len(tokens) > 6:
+        return ""
+    return concept
+
+
 def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
     """Persist the most recent grounded answer for follow-up explanations.
 
@@ -772,6 +894,7 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
                         "(latest answer was not-found)",
                         connection_id,
                     )
+                recent_grounded_definition_concepts.pop(connection_id, None)
                 return
         except Exception:
             pass
@@ -841,6 +964,19 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
             next_state["list_query"] = (query or "").strip()
             next_state["list_answer"] = ans
         last_answer_state[connection_id] = next_state
+        if answer_type == "definition" and kept:
+            concept = _extract_definition_concept_from_query_surface(query)
+            if concept:
+                recent_items = list(recent_grounded_definition_concepts.get(connection_id, []) or [])
+                concept_key = concept.lower()
+                recent_items = [item for item in recent_items if str((item or {}).get("concept") or "").lower() != concept_key]
+                recent_items.append({"concept": concept, "ts": time.time()})
+                recent_grounded_definition_concepts[connection_id] = recent_items[-4:]
+                logger.info(
+                    "[COMPARE FOLLOWUP STATE] connection_id=%s concepts=%s",
+                    connection_id,
+                    [str((item or {}).get("concept") or "") for item in recent_grounded_definition_concepts[connection_id]],
+                )
     except Exception:
         logger.exception("[FOLLOWUP] failed to save last answer state")
 
@@ -856,6 +992,96 @@ def _get_last_answer_state(connection_id):
     except Exception:
         return None
     return state
+
+
+def _is_bare_comparison_followup_query(query_text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+    has_comparison_intent = bool(
+        re.search(r"\b(?:difference|differences|distinction)\b", q)
+        or re.search(r"\b(?:different)\b", q)
+        or re.search(r"\b(?:compare|comparison|contrast|contrasts)\b", q)
+        or re.search(r"\b(?:differentiate|distinguish)\b", q)
+        or re.search(r"\b(?:relationship|relation|relate|relates|related)\b", q)
+        or re.search(r"\b(?:versus|vs\.?)\b", q)
+        or re.search(r"(?:\b|[\u0600-\u06FF])(فرق|الفرق|اختلاف|الاختلاف|الفروقات|قارن|مقارنة|علاقة|العلاقة|ارتباط|الارتباط|مقابل)(?:\b|[\u0600-\u06FF])", q)
+    )
+    if not has_comparison_intent:
+        return False
+    explicit_pair = bool(
+        re.search(r"\bbetween\b.+\band\b", q)
+        or re.search(r"\bcompare\b.+\band\b", q)
+        or re.search(r"\b(?:relationship|relation)\b.+\bbetween\b.+\band\b", q)
+        or re.search(r"\brelat(?:e|es|ed)\b.+\b(?:to|with)\b", q)
+        or re.search(r"\b(?:versus|vs\.?)\b", q)
+        or re.search(r"\bبين\b.+\bو", q)
+        or re.search(r"\bقارن\b.+\bو", q)
+        or re.search(r"\bمقارنة\b.+\bبين\b.+\bو", q)
+        or re.search(r"\b(?:مقابل|ضد)\b", q)
+    )
+    return not explicit_pair
+
+
+def _extract_recent_definition_concepts_from_history(history: list[dict], max_turns: int = 6) -> list[str]:
+    concepts: list[str] = []
+    seen: set[str] = set()
+    if not history:
+        return concepts
+    for index in range(len(history) - 1, -1, -1):
+        entry = history[index] if isinstance(history[index], dict) else {}
+        if entry.get("role") != "user":
+            continue
+        next_entry = history[index + 1] if index + 1 < len(history) and isinstance(history[index + 1], dict) else {}
+        if next_entry.get("role") == "assistant":
+            assistant_text = str(next_entry.get("content") or "").strip()
+            if not assistant_text or assistant_text.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                continue
+        concept = _extract_definition_concept_from_query_surface(entry.get("content") or "")
+        if not concept:
+            continue
+        concept_key = concept.lower()
+        if concept_key in seen:
+            continue
+        seen.add(concept_key)
+        concepts.append(concept)
+        if len(concepts) >= max_turns:
+            break
+    return list(reversed(concepts))
+
+
+def _rewrite_bare_comparison_query_from_history(query_text: str, history: list[dict], connection_id: str | None = None) -> str:
+    if not _is_bare_comparison_followup_query(query_text):
+        return str(query_text or "")
+    concepts = _extract_recent_definition_concepts_from_history(history)[-2:]
+    if len(concepts) != 2 and connection_id:
+        recent_items = list(recent_grounded_definition_concepts.get(connection_id, []) or [])
+        concepts = [
+            str((item or {}).get("concept") or "").strip()
+            for item in recent_items[-2:]
+            if str((item or {}).get("concept") or "").strip()
+        ]
+    if len(concepts) != 2:
+        logger.info(
+            "[COMPARE FOLLOWUP REWRITE] skipped history_len=%d concepts=%s",
+            len(history or []),
+            concepts,
+        )
+        return str(query_text or "")
+    left, right = concepts
+    if not left or not right or left.lower() == right.lower():
+        return str(query_text or "")
+    logger.info("[COMPARE ENTITIES] left=%s right=%s source=history", left, right)
+    return f"What is the difference between {left} and {right}?"
+
+
+def _append_conversation_turn(connection_id: str, user_text: str, assistant_text: str) -> None:
+    try:
+        history = conversation_history[connection_id]
+        history.append({"role": "user", "content": str(user_text or "").strip()})
+        history.append({"role": "assistant", "content": str(assistant_text or "").strip()})
+    except Exception:
+        pass
 
 
 # --------------- weak-evidence anti-inference guard helper ---------------
@@ -874,7 +1100,7 @@ _EXPLAIN_VERB_RE = _re_followup.compile(
     r")\b"
 )
 _FOLLOWUP_EXPLANATORY_CUE_RE = _re_followup.compile(
-    r"\b(?:is|are|was|were|means?|refers?\s+to|defined\s+as)\b",
+    r"\b(?:is|are|was|were|means?|refers?\s+to|defined\s+as|involv(?:e[sd]?|ing))\b",
     _re_followup.IGNORECASE,
 )
 _EVIDENCE_STOPWORDS = frozenset({
@@ -1107,8 +1333,37 @@ def _followup_content_tokens(value: str) -> list[str]:
     ]
 
 
+def _followup_query_surface_focus_phrase(item: str, user_text: str) -> str:
+    item_tokens = set(_followup_content_tokens(_followup_item_head(item)))
+    if not item_tokens:
+        return ""
+    text_value = str(user_text or "")
+    token_matches = list(_re_followup.finditer(r"[a-z0-9]{3,}", text_value.lower()))
+    matching_indexes = [
+        index for index, match in enumerate(token_matches)
+        if match.group(0) in item_tokens
+    ]
+    if not matching_indexes:
+        return ""
+    first_index = matching_indexes[0]
+    last_index = matching_indexes[-1]
+    if last_index - first_index > 7:
+        return ""
+    start = token_matches[first_index].start()
+    end = token_matches[last_index].end()
+    phrase = re.sub(r"\s+", " ", text_value[start:end]).strip(" \t\r\n.,;:!?()[]{}")
+    if len(_followup_content_tokens(phrase)) < 1:
+        return ""
+    if len(phrase) > 90:
+        return ""
+    return phrase
+
+
 def _followup_query_focus_phrase(item: str, user_text: str) -> str:
     item_head = _followup_item_head(item)
+    surface_phrase = _followup_query_surface_focus_phrase(item_head, user_text)
+    if surface_phrase:
+        return surface_phrase
     item_tokens = _followup_content_tokens(item_head)
     query_tokens = set(_followup_content_tokens(user_text))
     overlap = [token for token in item_tokens if token in query_tokens]
@@ -1299,7 +1554,16 @@ _FOLLOWUP_LEADING_CONJUNCTION_RE = _re_followup.compile(
 )
 _FOLLOWUP_OCR_SPLIT_WORD_RE = _re_followup.compile(
     r"\b([a-z]{4,})\s+"
-    r"(eved|ieved|tion|sion|ment|ments|ness|able|ible|ally|ance|ence|ive|ous|ful|less|ing|ed)\b"
+    r"(eved|ieved|tion|sion|ment|ments|ness|able|ible|ally|ance|ence|ive|ous|ful|less|ing|ed|ine)\b",
+    _re_followup.IGNORECASE,
+)
+_OCR_MERGED_PREFIX_WORD_RE = _re_followup.compile(
+    r"\b(the|and|for|from|with|into|onto|about|after|before)([a-z]{5,18})\b",
+    _re_followup.IGNORECASE,
+)
+_OCR_PREFIX_REMAINDER_SUFFIX_RE = _re_followup.compile(
+    r"(?:tion|sion|ment|ments|ness|ities|ity|ance|ence|ure|ures|ism|isms|ist|ists|ship|ships|logy|ology|graphy|ess)$",
+    _re_followup.IGNORECASE,
 )
 
 
@@ -1333,7 +1597,7 @@ def _followup_merge_safe_ocr_split_words(value: str) -> tuple[str, bool]:
         nonlocal changed
         left = match.group(1)
         right = match.group(2)
-        if left in _EVIDENCE_STOPWORDS or right in _EVIDENCE_STOPWORDS:
+        if left.lower() in _EVIDENCE_STOPWORDS or right.lower() in _EVIDENCE_STOPWORDS:
             return match.group(0)
         combined = left + right
         if not (6 <= len(combined) <= 20):
@@ -1346,6 +1610,29 @@ def _followup_merge_safe_ocr_split_words(value: str) -> tuple[str, bool]:
         return combined
 
     cleaned = _FOLLOWUP_OCR_SPLIT_WORD_RE.sub(_merge, str(value or ""))
+    return cleaned, changed
+
+
+def _split_safe_ocr_merged_prefix_words(value: str) -> tuple[str, bool]:
+    changed = False
+
+    def _split(match: re.Match) -> str:
+        nonlocal changed
+        prefix = match.group(1)
+        remainder = match.group(2)
+        combined = prefix + remainder
+        if not (8 <= len(combined) <= 24):
+            return match.group(0)
+        if remainder.lower() in _EVIDENCE_STOPWORDS:
+            return match.group(0)
+        if not re.search(r"[aeiou]", remainder, flags=re.IGNORECASE):
+            return match.group(0)
+        if not _OCR_PREFIX_REMAINDER_SUFFIX_RE.search(remainder):
+            return match.group(0)
+        changed = True
+        return f"{prefix} {remainder}"
+
+    cleaned = _OCR_MERGED_PREFIX_WORD_RE.sub(_split, str(value or ""))
     return cleaned, changed
 
 
@@ -1371,6 +1658,7 @@ def _cleanup_followup_extracted_answer(
 
     cleaned, header_removed = _followup_strip_header_prefix(original)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-*\u2022")
+    cleaned, prefix_changed = _split_safe_ocr_merged_prefix_words(cleaned)
     cleaned, ocr_changed = _followup_merge_safe_ocr_split_words(cleaned)
     cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n,;:-\u2013\u2014")
@@ -1381,26 +1669,26 @@ def _cleanup_followup_extracted_answer(
         if fragment_changed:
             cleaned = salvaged
         elif not _followup_text_has_item_head_anchor(cleaned, target_item):
-            return "", (cleaned != original or ocr_changed), "fragment_after_header"
+            return "", (cleaned != original or prefix_changed or ocr_changed), "fragment_after_header"
 
     if _FOLLOWUP_FRAGMENT_START_RE.match(cleaned):
         before = cleaned
         cleaned = _FOLLOWUP_LEADING_CONJUNCTION_RE.sub("", cleaned).strip()
         if cleaned == before:
-            return "", (cleaned != original or ocr_changed), "fragment_start"
+            return "", (cleaned != original or prefix_changed or ocr_changed), "fragment_start"
         fragment_changed = True
 
     cleaned = _followup_capitalize_sentence_start(cleaned.strip())
     if target_item and not _followup_text_has_item_head_anchor(cleaned, target_item):
-        return "", (cleaned != original or ocr_changed or fragment_changed), "target_removed"
+        return "", (cleaned != original or prefix_changed or ocr_changed or fragment_changed), "target_removed"
     if not cleaned:
-        return "", (cleaned != original or ocr_changed or fragment_changed), "empty_after_cleanup"
+        return "", (cleaned != original or prefix_changed or ocr_changed or fragment_changed), "empty_after_cleanup"
     if not re.search(r"[.!?]$", cleaned):
         cleaned += "."
-    return cleaned[:700].strip(), (cleaned != original or ocr_changed or fragment_changed), ""
+    return cleaned[:1000].strip(), (cleaned != original or prefix_changed or ocr_changed or fragment_changed), ""
 
 
-def _extract_followup_context_window(text: str, target_item: str, char_budget: int = 1200) -> str:
+def _extract_followup_context_window(text: str, target_item: str, char_budget: int = 1800) -> str:
     """Return nearby sentences/paragraph text around a targeted list item."""
     if not text or not target_item:
         return ""
@@ -1420,8 +1708,8 @@ def _extract_followup_context_window(text: str, target_item: str, char_budget: i
         for index, sentence in enumerate(sentences):
             if not _followup_text_mentions_item(sentence, target_item):
                 continue
-            start_index = max(0, index - 1)
-            end_index = min(len(sentences), index + 2)
+            start_index = max(0, index - 2)
+            end_index = min(len(sentences), index + 4)
             selected.append(" ".join(sentences[start_index:end_index]))
     if not selected:
         return ""
@@ -1468,82 +1756,208 @@ def _extract_followup_strong_explanation(
     emit_cleanup_logs: bool = True,
     apply_cleanup: bool = True,
 ) -> str:
-    """Extract a direct explanatory sentence for a targeted item, if present."""
+    """Extract a coherent explanatory block for a targeted item, if present."""
     if not target_item or not excerpts_block:
         return ""
-    best_sentence = ""
-    best_raw_sentence = ""
+    best_block = ""
+    best_raw_block = ""
     best_cleanup_changed = False
     best_score = -1
-    for sentence in _split_followup_explanation_sentences(excerpts_block):
-        if not _followup_text_has_item_head_anchor(sentence, target_item):
-            continue
-        separators = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", sentence))
-        sentence_words = _re_followup.findall(r"[a-z]{3,}", sentence.lower())
-        if (
-            _sentence_mentions_many_followup_items(sentence, previous_items)
-            and separators >= 2
-            and len(sentence_words) < separators * 7
-        ):
-            continue
-        if separators >= 3 and len(sentence_words) < separators * 5:
-            continue
-        has_verb = bool(_EXPLAIN_VERB_RE.search(sentence.lower()))
-        content_words = [
-            word for word in _re_followup.findall(r"[a-z]{4,}", sentence.lower())
+    sections = [
+        re.sub(r"\s+", " ", section).strip()
+        for section in _re_followup.split(r"\n\s*(?:---+|={3,}|\*{3,})\s*\n|\n\s*\n", excerpts_block)
+        if section and section.strip()
+    ] or [re.sub(r"\s+", " ", excerpts_block).strip()]
+
+    def _sentence_content_tokens(sentence_value: str) -> list[str]:
+        return [
+            word for word in _re_followup.findall(r"[a-z0-9]{4,}", sentence_value.lower())
             if word not in _EVIDENCE_STOPWORDS
         ]
-        content_count = len(content_words)
-        if not ((has_verb and content_count >= 3) or content_count >= 7):
-            continue
-        has_explanatory_cue = bool(_FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence))
-        complete_statement = bool(
-            has_explanatory_cue
-            and len(_re_followup.findall(r"[a-z0-9]{3,}", sentence.lower())) >= 8
-        )
-        list_fragment_penalty = 3 if separators >= 2 else 0
-        score = (
-            content_count
-            + (4 if has_verb else 0)
-            + (6 if has_explanatory_cue else 0)
-            + (2 if complete_statement else 0)
-            - list_fragment_penalty
-        )
-        cleanup_changed = False
-        clean_sentence = sentence
-        if apply_cleanup:
-            clean_sentence, cleanup_changed, reject_reason = _cleanup_followup_extracted_answer(
-                sentence, target_item
+
+    def _sentence_is_noisy_list_fragment(sentence_value: str) -> bool:
+        separators_local = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", sentence_value))
+        words_local = _re_followup.findall(r"[a-z]{3,}", sentence_value.lower())
+        if (
+            _sentence_mentions_many_followup_items(sentence_value, previous_items)
+            and separators_local >= 2
+            and len(words_local) < separators_local * 7
+        ):
+            return True
+        return bool(separators_local >= 3 and len(words_local) < separators_local * 5)
+
+    def _sentence_is_ocr_fragment(sentence_value: str) -> bool:
+        sentence_clean = re.sub(r"\s+", " ", str(sentence_value or "")).strip()
+        if not sentence_clean:
+            return True
+        words_local = _re_followup.findall(r"[A-Za-z0-9][A-Za-z0-9'-]*", sentence_clean)
+        if len(words_local) < 4:
+            return True
+        if _re_followup.search(r"(?:\b[A-Za-z]\s+){4,}[A-Za-z]\b", sentence_clean):
+            return True
+        if not _EXPLAIN_VERB_RE.search(sentence_clean.lower()) and len(words_local) < 7:
+            return True
+        return False
+
+    def _sentence_content_count(sentence_value: str) -> int:
+        return len(_sentence_content_tokens(sentence_value))
+
+    def _definition_style_score(sentence_value: str) -> float:
+        sentence_low = sentence_value.lower()
+        score_local = 0.0
+        if _FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence_value):
+            score_local += 6.0
+        if _EXPLAIN_VERB_RE.search(sentence_low):
+            score_local += 3.0
+        if _re_followup.search(r"\b(?:because|therefore|thus|so|so that|in order to)\b", sentence_low):
+            score_local += 1.5
+        if _followup_text_has_item_head_anchor(sentence_value, target_item):
+            score_local += 2.0
+        if _sentence_content_count(sentence_value) >= 8:
+            score_local += 1.0
+        return score_local
+
+    def _continuity_score(sentence_value: str, running_tokens: set[str], anchor_tokens: set[str]) -> float:
+        sentence_tokens = set(_sentence_content_tokens(sentence_value))
+        if not sentence_tokens:
+            return -1.0
+        overlap_running = len(sentence_tokens & running_tokens)
+        overlap_anchor = len(sentence_tokens & anchor_tokens)
+        connector = bool(
+            _re_followup.match(
+                r"^\s*(?:this|that|these|those|it|they|such|another|also|therefore|thus|because)\b",
+                sentence_value,
+                _re_followup.IGNORECASE,
             )
-            if reject_reason:
-                if emit_cleanup_logs:
-                    logger.info(
-                        "[FOLLOWUP NOISY SENTENCE REJECTED] reason=%s sentence=%r",
-                        reject_reason,
-                        sentence[:180],
-                    )
+        )
+        cue = bool(_FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence_value) or _EXPLAIN_VERB_RE.search(sentence_value.lower()))
+        score_local = 0.0
+        score_local += min(3.0, float(overlap_running) * 1.25)
+        score_local += min(2.0, float(overlap_anchor))
+        if connector:
+            score_local += 2.0
+        if cue:
+            score_local += 1.5
+        return score_local
+
+    for section in sections:
+        sentences = _split_followup_explanation_sentences(section)
+        for index, sentence in enumerate(sentences):
+            if not _followup_text_has_item_head_anchor(sentence, target_item):
                 continue
-            if not cleanup_changed:
-                score += 2
-        if score > best_score:
-            best_score = score
-            best_sentence = clean_sentence
-            best_raw_sentence = sentence
-            best_cleanup_changed = cleanup_changed
-    if not best_sentence:
+            if _sentence_is_noisy_list_fragment(sentence) or _sentence_is_ocr_fragment(sentence):
+                continue
+            has_verb = bool(_EXPLAIN_VERB_RE.search(sentence.lower()))
+            content_count = _sentence_content_count(sentence)
+            if not ((has_verb and content_count >= 3) or content_count >= 7):
+                continue
+            has_explanatory_cue = bool(_FOLLOWUP_EXPLANATORY_CUE_RE.search(sentence))
+            complete_statement = bool(
+                has_explanatory_cue
+                and len(_re_followup.findall(r"[a-z0-9]{3,}", sentence.lower())) >= 8
+            )
+
+            anchor_tokens = set(_sentence_content_tokens(sentence))
+            target_tokens = set(_followup_content_tokens(target_item))
+            block_sentences = [sentence]
+
+            if index > 0:
+                previous_sentence = sentences[index - 1]
+                if (
+                    not _sentence_is_noisy_list_fragment(previous_sentence)
+                    and not _sentence_is_ocr_fragment(previous_sentence)
+                    and _sentence_content_count(previous_sentence) >= 4
+                ):
+                    previous_tokens = set(_sentence_content_tokens(previous_sentence))
+                    previous_connected = bool(
+                        (previous_tokens & (anchor_tokens | target_tokens))
+                        or _FOLLOWUP_EXPLANATORY_CUE_RE.search(previous_sentence)
+                        or _EXPLAIN_VERB_RE.search(previous_sentence.lower())
+                    )
+                    if previous_connected:
+                        block_sentences.insert(0, previous_sentence)
+
+            running_tokens = set()
+            for block_sentence in block_sentences:
+                running_tokens.update(_sentence_content_tokens(block_sentence))
+            running_tokens.update(target_tokens)
+
+            continuity_total = 0.0
+            for next_sentence in sentences[index + 1:index + 4]:
+                if len(block_sentences) >= 4:
+                    break
+                if _sentence_is_noisy_list_fragment(next_sentence) or _sentence_is_ocr_fragment(next_sentence):
+                    break
+                next_content_count = _sentence_content_count(next_sentence)
+                if next_content_count < 4:
+                    break
+                continuation_score = _continuity_score(next_sentence, running_tokens, anchor_tokens | target_tokens)
+                if continuation_score < 2.0:
+                    break
+                continuity_total += continuation_score
+                block_sentences.append(next_sentence)
+                running_tokens.update(_sentence_content_tokens(next_sentence))
+
+            unique_sentence_count = len([s for s in dict.fromkeys(block_sentences) if s])
+            if unique_sentence_count < 2:
+                continue
+
+            raw_block = " ".join(block_sentences)
+            separators = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", raw_block))
+            topic_consistency = 0.0
+            for block_sentence in block_sentences:
+                sentence_tokens = set(_sentence_content_tokens(block_sentence))
+                if sentence_tokens:
+                    topic_consistency += len(sentence_tokens & (anchor_tokens | target_tokens)) / max(1.0, float(len(sentence_tokens)))
+            score = (
+                content_count
+                + (4 if has_verb else 0)
+                + (6 if has_explanatory_cue else 0)
+                + (2 if complete_statement else 0)
+                + _definition_style_score(sentence)
+                + continuity_total
+                + (3 * (unique_sentence_count - 1))
+                + (4.0 * topic_consistency)
+                - (3 if separators >= 2 else 0)
+            )
+            cleanup_changed = False
+            clean_block = raw_block
+            if apply_cleanup:
+                clean_block, cleanup_changed, reject_reason = _cleanup_followup_extracted_answer(
+                    raw_block, target_item
+                )
+                if reject_reason:
+                    if emit_cleanup_logs:
+                        logger.info(
+                            "[FOLLOWUP NOISY SENTENCE REJECTED] reason=%s sentence=%r",
+                            reject_reason,
+                            raw_block[:180],
+                        )
+                    continue
+                clean_sentence_count = len(_split_followup_explanation_sentences(clean_block))
+                if clean_sentence_count < 2 or clean_sentence_count > 4:
+                    continue
+                if not cleanup_changed:
+                    score += 2
+            if score > best_score:
+                best_score = score
+                best_block = clean_block
+                best_raw_block = raw_block
+                best_cleanup_changed = cleanup_changed
+    if not best_block:
         return ""
-    best_sentence = re.sub(r"\s+", " ", best_sentence).strip(" \t\r\n-*")
-    if not re.search(r"[.!?]$", best_sentence):
-        best_sentence += "."
+    best_block = re.sub(r"\s+", " ", best_block).strip(" \t\r\n-*")
+    if not re.search(r"[.!?]$", best_block):
+        best_block += "."
     if emit_cleanup_logs and best_cleanup_changed:
         logger.info(
             "[FOLLOWUP CLEANUP APPLIED] before=%r after=%r",
-            best_raw_sentence[:180],
-            best_sentence[:180],
+            best_raw_block[:180],
+            best_block[:180],
         )
     if emit_cleanup_logs:
-        logger.info("[FOLLOWUP CLEAN ANSWER] %s", best_sentence[:240])
-    return best_sentence[:700].strip()
+        logger.info("[FOLLOWUP CLEAN ANSWER] %s", best_block[:240])
+    return best_block[:1000].strip()
 
 
 def _followup_explanation_candidate_score(
@@ -1672,7 +2086,7 @@ def _followup_fetch_adjacent_chunk(
         or source_name
         or ""
     ).strip()
-    if allowed_sources and adjacent_source and adjacent_source not in allowed_sources:
+    if allowed_sources and adjacent_source not in allowed_sources:
         return None
     if not adjacent_text or not _followup_text_mentions_item(adjacent_text, target_item):
         return None
@@ -1771,7 +2185,7 @@ def _followup_lexical_explanation_rescue(
                 or metadata.get("file")
                 or ""
             ).strip()
-            if allowed_sources and source_value and source_value not in allowed_sources:
+            if allowed_sources and source_value not in allowed_sources:
                 continue
             candidate_doc = {
                 "text": text_value[:600],
@@ -1844,7 +2258,10 @@ def _build_grounded_explanation(query, item, context_docs):
 
     strong_sentence = _extract_followup_strong_explanation(item_text, context_text, [])
     if strong_sentence:
-        logger.info("[FOLLOWUP EXPLANATION SOURCE] sentences_used=1")
+        logger.info(
+            "[FOLLOWUP EXPLANATION SOURCE] sentences_used=%d",
+            max(1, len(_split_followup_explanation_sentences(strong_sentence))),
+        )
         logger.info("[FOLLOWUP EXPLANATION LEVEL] weak_interpreted")
         return strong_sentence
 
@@ -2216,29 +2633,37 @@ async def _handle_followup_query(text: str, connection_id: str):
                     for c in (last_chunks or [])
                     if isinstance(c, dict) and c.get("source")
                 }
-                _seed_adjacent_rescue = _followup_expand_adjacent_chunks(
-                    last_chunks,
-                    _query_focus_item,
-                    _allowed_sources,
-                    previous_list_items_all,
-                )
-                _rescue_query = f"{_query_focus_item} explanation".strip()
-                print(f"[FOLLOWUP QUERY] {_rescue_query}")
-                logger.info("[FOLLOWUP QUERY] %s", _rescue_query)
-                try:
-                    _raw_rescue = live_rag.search(
-                        query=_rescue_query,
-                        top_k=3,
-                        return_dicts=True,
-                        enable_rerank=False,
-                    ) or []
-                except Exception:
-                    logger.exception("[FOLLOWUP MICRO-RETRIEVAL] search failed")
+                if not _allowed_sources:
+                    logger.info(
+                        "[FOLLOWUP MICRO-RETRIEVAL] skipped item=%r reason=no_prior_source_scope",
+                        targeted_item,
+                    )
                     _raw_rescue = []
-                logger.info(
-                    "[FOLLOWUP CONTEXT QUERY] query=%r",
-                    _rescue_query[:180],
-                )
+                    _seed_adjacent_rescue = []
+                else:
+                    _seed_adjacent_rescue = _followup_expand_adjacent_chunks(
+                        last_chunks,
+                        _query_focus_item,
+                        _allowed_sources,
+                        previous_list_items_all,
+                    )
+                    _rescue_query = f"{_query_focus_item} explanation".strip()
+                    print(f"[FOLLOWUP QUERY] {_rescue_query}")
+                    logger.info("[FOLLOWUP QUERY] %s", _rescue_query)
+                    try:
+                        _raw_rescue = live_rag.search(
+                            query=_rescue_query,
+                            top_k=3,
+                            return_dicts=True,
+                            enable_rerank=False,
+                        ) or []
+                    except Exception:
+                        logger.exception("[FOLLOWUP MICRO-RETRIEVAL] search failed")
+                        _raw_rescue = []
+                    logger.info(
+                        "[FOLLOWUP CONTEXT QUERY] query=%r",
+                        _rescue_query[:180],
+                    )
                 _rescue_candidates: list[tuple[float, int, dict]] = []
                 for _candidate_order, _candidate_doc in enumerate(_raw_rescue):
                     if not isinstance(_candidate_doc, dict):
@@ -2258,10 +2683,7 @@ async def _handle_followup_query(text: str, connection_id: str):
                     _src = (_src or "").strip()
                     # Same-document gate: only keep chunks from a source
                     # that was already part of the prior answer's chunks.
-                    # If we have no allowed-source whitelist (older state
-                    # without source metadata), fall back to keeping a
-                    # single best-effort chunk to avoid a hard miss.
-                    if _allowed_sources and _src and _src not in _allowed_sources:
+                    if _allowed_sources and _src not in _allowed_sources:
                         continue
                     # Require the targeted item name to actually appear in
                     # the rescue chunk; otherwise it is not a real rescue.
@@ -2270,6 +2692,8 @@ async def _handle_followup_query(text: str, connection_id: str):
                     _candidate_score = _followup_explanation_candidate_score(
                         targeted_item, _txt, previous_list_items_all
                     )
+                    if _candidate_score < 1.0:
+                        continue
                     _focused_txt = (
                         _extract_followup_context_window(_txt, _query_focus_item)
                         or _extract_followup_context_window(_txt, targeted_item)
@@ -2286,18 +2710,21 @@ async def _handle_followup_query(text: str, connection_id: str):
                     ))
                 _rescue_candidates.sort(key=lambda row: (-row[0], row[1]))
                 _kept_rescue = [row[2] for row in _rescue_candidates[:2]]
-                _adjacent_rescue = _followup_expand_adjacent_chunks(
-                    _kept_rescue,
-                    _query_focus_item,
-                    _allowed_sources,
-                    previous_list_items_all,
-                )
-                _lexical_rescue = _followup_lexical_explanation_rescue(
-                    _query_focus_item,
-                    targeted_item,
-                    _allowed_sources,
-                    previous_list_items_all,
-                )
+                _adjacent_rescue = []
+                _lexical_rescue = []
+                if _allowed_sources:
+                    _adjacent_rescue = _followup_expand_adjacent_chunks(
+                        _kept_rescue,
+                        _query_focus_item,
+                        _allowed_sources,
+                        previous_list_items_all,
+                    )
+                    _lexical_rescue = _followup_lexical_explanation_rescue(
+                        _query_focus_item,
+                        targeted_item,
+                        _allowed_sources,
+                        previous_list_items_all,
+                    )
                 if _seed_adjacent_rescue or _adjacent_rescue or _lexical_rescue:
                     _last_chunk_indexes_by_source: dict[str, list[int]] = {}
                     for _last_doc in last_chunks or []:
@@ -2361,7 +2788,41 @@ async def _handle_followup_query(text: str, connection_id: str):
                         _rescue_doc for _rescue_doc in _merged_rescue
                         if (_followup_rescue_distance(_rescue_doc) or 9999) <= 12
                     ]
-                    _kept_rescue = (_nearby_rescue or _merged_rescue)[:4]
+                    _strong_rescue = [
+                        _rescue_doc for _rescue_doc in _merged_rescue
+                        if _followup_explanation_candidate_score(
+                            targeted_item,
+                            _followup_doc_text(_rescue_doc),
+                            previous_list_items_all,
+                        ) >= 12.0
+                    ]
+                    _candidate_rescue_pool = list(_nearby_rescue or _merged_rescue)
+                    _candidate_pool_has_strong = any(
+                        _followup_explanation_candidate_score(
+                            targeted_item,
+                            _followup_doc_text(_rescue_doc),
+                            previous_list_items_all,
+                        ) >= 12.0
+                        for _rescue_doc in _candidate_rescue_pool
+                    )
+                    if not _candidate_pool_has_strong:
+                        _candidate_keys = {
+                            (
+                                _followup_doc_source(_rescue_doc),
+                                str(_followup_doc_chunk_index(_rescue_doc)),
+                            )
+                            for _rescue_doc in _candidate_rescue_pool
+                        }
+                        for _rescue_doc in _strong_rescue:
+                            _key = (
+                                _followup_doc_source(_rescue_doc),
+                                str(_followup_doc_chunk_index(_rescue_doc)),
+                            )
+                            if _key not in _candidate_keys:
+                                _candidate_rescue_pool.append(_rescue_doc)
+                                _candidate_keys.add(_key)
+                    _candidate_rescue_pool.sort(key=_followup_rescue_sort_score, reverse=True)
+                    _kept_rescue = _candidate_rescue_pool[:4]
                 if _kept_rescue:
                     logger.info(
                         "[FOLLOWUP MICRO-RETRIEVAL] item=%r rescued=%d sources=%r",
@@ -3259,6 +3720,12 @@ _DOC_ROUTER_VAGUE_TERMS: Set[str] = {
     "information", "document", "source", "file", "item", "items", "thing", "things",
 }
 
+_DOC_ROUTER_COMPARISON_OPERATORS: Set[str] = {
+    "difference", "differences", "different", "differentiate", "distinguish",
+    "compare", "compared", "comparison", "contrast", "contrasts", "distinction",
+    "versus", "vs",
+}
+
 
 def _doc_router_text(doc: Dict[str, Any]) -> str:
     return str(
@@ -3336,6 +3803,1353 @@ def _filter_doc_dicts_to_active_sources(doc_dicts: List[Dict[str, Any]]) -> List
     return kept
 
 
+_SYMBOLIC_LIST_CARDINALS: Dict[str, int] = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+_SYMBOLIC_LIST_NUMBER_WORDS: Dict[int, str] = {value: key for key, value in _SYMBOLIC_LIST_CARDINALS.items()}
+_SYMBOLIC_LIST_CATEGORY_WORDS: Set[str] = {
+    "step", "steps", "type", "types", "kind", "kinds", "form", "forms", "element", "elements",
+    "principle", "principles", "function", "functions", "stage", "stages", "part", "parts",
+    "component", "components", "factor", "factors", "feature", "features", "characteristic",
+    "characteristics", "category", "categories", "branch", "branches", "method", "methods",
+}
+_SYMBOLIC_LIST_QUERY_STOPWORDS: Set[str] = {
+    "what", "which", "name", "give", "mention", "identify", "list", "show", "tell", "me", "are", "is",
+    "was", "were", "the", "a", "an", "of", "for", "in", "on", "to", "from", "by", "with", "and", "or",
+    "about", "document", "chapter", "section", "main", "major", "important", "different", "various",
+}
+
+
+def _normalize_symbolic_list_surface(value: str) -> str:
+    normalized = str(value or "").replace("’", "'").lower()
+    normalized = re.sub(r"[^a-z0-9']+", " ", normalized)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _symbolic_list_count_value(token: str) -> int | None:
+    raw = str(token or "").strip().lower()
+    if not raw:
+        return None
+    if raw.isdigit():
+        try:
+            value = int(raw)
+        except Exception:
+            return None
+        return value if 1 <= value <= 20 else None
+    return _SYMBOLIC_LIST_CARDINALS.get(raw)
+
+
+def _symbolic_list_label_variants(label_text: str) -> Set[str]:
+    raw = str(label_text or "").strip().replace("’", "'")
+    compact = re.sub(r"[^A-Za-z0-9']+", "", raw).lower()
+    if not compact:
+        return set()
+    variants: Set[str] = {compact, compact.replace("'", "")}
+    letter_match = re.fullmatch(r"([a-z])(?:'?s)?", compact)
+    if letter_match:
+        letter = letter_match.group(1)
+        variants.update({letter, f"{letter}s", f"{letter}'s", f"{letter} s"})
+        return variants
+    if compact.endswith("s") and len(compact) > 3:
+        variants.add(compact[:-1])
+    elif compact.isalpha() and len(compact) > 2:
+        variants.add(f"{compact}s")
+    return {re.sub(r"\s+", " ", variant).strip() for variant in variants if variant.strip()}
+
+
+def _detect_short_symbolic_list_query(query_text: str) -> dict[str, Any] | None:
+    raw_query = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not raw_query:
+        return None
+    query_norm = _normalize_symbolic_list_surface(raw_query.strip(" ?.!,;:"))
+    if not query_norm:
+        return None
+    query_tokens = re.findall(r"[a-z0-9']+", query_norm)
+    if len(query_tokens) > 18:
+        return None
+
+    count_pattern = "|".join([re.escape(word) for word in _SYMBOLIC_LIST_CARDINALS] + [r"\d{1,2}"])
+    category_pattern = "|".join(re.escape(word) for word in sorted(_SYMBOLIC_LIST_CATEGORY_WORDS, key=len, reverse=True))
+    counted_category_match = re.search(
+        rf"\b(?:(?P<qualifier>basic|main|major|key|primary|principal)\s+)?"
+        rf"(?:(?P<count>{count_pattern})\s+)?"
+        rf"(?P<head>{category_pattern})\s+(?:of|for|in|to)\s+(?:the\s+)?(?P<object>[a-z0-9][a-z0-9'\- ]{{1,80}})",
+        query_norm,
+        flags=re.IGNORECASE,
+    )
+    if counted_category_match:
+        object_text = re.sub(
+            r"\b(?:from|on|with|document|chapter|section)\b.*$",
+            "",
+            str(counted_category_match.group("object") or "").strip(),
+        ).strip()
+        object_tokens = [
+            token for token in re.findall(r"[a-z0-9']+", object_text)
+            if token not in _SYMBOLIC_LIST_QUERY_STOPWORDS and token not in _SYMBOLIC_LIST_CATEGORY_WORDS
+        ]
+        head_text = str(counted_category_match.group("head") or "").strip()
+        category_variants = _symbolic_list_label_variants(head_text) or {head_text.lower()}
+        count_value = _symbolic_list_count_value(str(counted_category_match.group("count") or ""))
+        qualifier = str(counted_category_match.group("qualifier") or "").strip().lower()
+        if head_text and object_tokens and (count_value is None or count_value >= 2):
+            object_phrase = " ".join(object_tokens[:6])
+            count_terms: Set[str] = set()
+            if count_value is not None:
+                count_terms.add(str(count_value))
+                if count_value in _SYMBOLIC_LIST_NUMBER_WORDS:
+                    count_terms.add(_SYMBOLIC_LIST_NUMBER_WORDS[count_value])
+
+            phrase_variants: Set[str] = set()
+            for category_variant in category_variants:
+                if not category_variant:
+                    continue
+                phrase_variants.update({
+                    _normalize_symbolic_list_surface(f"{category_variant} of {object_phrase}"),
+                    _normalize_symbolic_list_surface(f"{category_variant} for {object_phrase}"),
+                    _normalize_symbolic_list_surface(f"{object_phrase} {category_variant}"),
+                    _normalize_symbolic_list_surface(f"basic {category_variant} of {object_phrase}"),
+                    _normalize_symbolic_list_surface(f"basic {object_phrase} {category_variant}"),
+                })
+                for count_term in count_terms:
+                    phrase_variants.update({
+                        _normalize_symbolic_list_surface(f"{count_term} {category_variant}"),
+                        _normalize_symbolic_list_surface(f"{count_term} {category_variant} of {object_phrase}"),
+                        _normalize_symbolic_list_surface(f"{count_term} {object_phrase} {category_variant}"),
+                        _normalize_symbolic_list_surface(f"{count_term} basic {category_variant}"),
+                        _normalize_symbolic_list_surface(f"{count_term} basic {category_variant} of {object_phrase}"),
+                        _normalize_symbolic_list_surface(f"these {count_term} basic {category_variant}"),
+                    })
+            if qualifier:
+                for category_variant in category_variants:
+                    phrase_variants.add(_normalize_symbolic_list_surface(f"{qualifier} {category_variant} of {object_phrase}"))
+
+            return {
+                "kind": "counted_category" if count_value is not None else "category",
+                "count": count_value,
+                "phrase": f"{head_text} of {object_phrase}",
+                "phrase_variants": sorted({variant for variant in phrase_variants if variant}),
+                "label_variants": sorted(category_variants),
+                "category_terms": sorted(category_variants),
+                "object_terms": object_tokens,
+                "focus_terms": list(dict.fromkeys([head_text] + sorted(category_variants) + object_tokens)),
+                "qualifier": qualifier,
+                "counted_list_rescue": True,
+            }
+
+    counted_match = re.search(
+        rf"\b(?P<count>{count_pattern})\s+(?P<label>[a-z](?:'?s)?|[a-z0-9][a-z0-9'\-]{{1,30}}s)\b",
+        query_norm,
+        flags=re.IGNORECASE,
+    )
+    if counted_match:
+        count_value = _symbolic_list_count_value(counted_match.group("count"))
+        label_text = str(counted_match.group("label") or "").strip()
+        if count_value is not None and count_value >= 2 and label_text:
+            label_variants = _symbolic_list_label_variants(label_text)
+            count_terms = {str(count_value)}
+            if count_value in _SYMBOLIC_LIST_NUMBER_WORDS:
+                count_terms.add(_SYMBOLIC_LIST_NUMBER_WORDS[count_value])
+            phrase_variants: Set[str] = set()
+            for count_term in count_terms:
+                for label_variant in label_variants or {label_text.lower()}:
+                    phrase_variants.add(_normalize_symbolic_list_surface(f"{count_term} {label_variant}"))
+            focus_terms = [
+                token for token in query_tokens
+                if token not in _SYMBOLIC_LIST_QUERY_STOPWORDS
+                and token not in _SYMBOLIC_LIST_CARDINALS
+                and not token.isdigit()
+            ]
+            focus_terms.extend(sorted(label_variants))
+            return {
+                "kind": "counted",
+                "count": count_value,
+                "phrase": re.sub(r"\s+", " ", counted_match.group(0)).strip(),
+                "phrase_variants": sorted({variant for variant in phrase_variants if variant}),
+                "label_variants": sorted(label_variants),
+                "focus_terms": list(dict.fromkeys([term for term in focus_terms if term])),
+            }
+
+    category_match = re.search(
+        rf"\b(?P<head>{category_pattern})\s+(?:of|for|in|to)\s+(?:the\s+)?(?P<object>[a-z0-9][a-z0-9'\- ]{{1,80}})",
+        query_norm,
+        flags=re.IGNORECASE,
+    )
+    if category_match:
+        object_text = re.sub(
+            r"\b(?:from|in|on|for|with|document|chapter|section)\b.*$",
+            "",
+            str(category_match.group("object") or "").strip(),
+        ).strip()
+        object_tokens = [
+            token for token in re.findall(r"[a-z0-9']+", object_text)
+            if token not in _SYMBOLIC_LIST_QUERY_STOPWORDS and token not in _SYMBOLIC_LIST_CATEGORY_WORDS
+        ]
+        if object_tokens:
+            head_text = str(category_match.group("head") or "").strip()
+            phrase = f"{head_text} of {' '.join(object_tokens[:6])}"
+            phrase_variants = {
+                _normalize_symbolic_list_surface(phrase),
+                _normalize_symbolic_list_surface(f"{head_text} for {' '.join(object_tokens[:6])}"),
+                _normalize_symbolic_list_surface(f"{' '.join(object_tokens[:6])} {head_text}"),
+            }
+            return {
+                "kind": "category",
+                "count": None,
+                "phrase": phrase,
+                "phrase_variants": sorted({variant for variant in phrase_variants if variant}),
+                "label_variants": [head_text],
+                "focus_terms": list(dict.fromkeys([head_text] + object_tokens)),
+            }
+    return None
+
+
+def _arabic_symbolic_list_count_value(query_text: str) -> int | None:
+    raw = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not raw:
+        return None
+    arabic_count_words: dict[int, tuple[str, ...]] = {
+        2: ("اثنين", "اثنان", "الاثنين", "الاثنان"),
+        3: ("ثلاثة", "الثلاثة"),
+        4: ("اربعة", "أربعة", "الاربعة", "الأربعة"),
+        5: ("خمسة", "الخمسة", "الخمس"),
+        6: ("ستة", "الستة", "الست"),
+        7: ("سبعة", "السبعة"),
+        8: ("ثمانية", "الثمانية"),
+        9: ("تسعة", "التسعة"),
+        10: ("عشرة", "العشرة"),
+    }
+    for value, variants in arabic_count_words.items():
+        if any(variant and variant in raw for variant in variants):
+            return value
+    return None
+
+
+_MS_SYMBOLIC_LIST_ITEM_GROUPS: dict[str, tuple[str, ...]] = {
+    "people": ("people", "person", "الناس", "الأشخاص", "اشخاص"),
+    "money": ("money", "المال", "الأموال", "اموال"),
+    "machines": ("machines", "machine", "الآلات", "الالات", "آلات", "الات"),
+    "materials": ("materials", "material", "المواد", "مواد"),
+    "methods": ("methods", "method", "الأساليب", "الاساليب", "الطرق", "طرق"),
+    "markets": ("markets", "market", "الأسواق", "الاسواق", "أسواق", "اسواق"),
+}
+
+_MS_SYMBOLIC_LIST_HARD_REJECT_TERMS: tuple[str, ...] = (
+    "fayol",
+    "principle",
+    "principles",
+    "authority",
+    "discipline",
+    "centralization",
+    "centralisation",
+)
+
+
+def _is_ms_symbolic_list_query(query_text: str) -> bool:
+    raw = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not raw:
+        return False
+    raw_low = raw.lower()
+    norm = _normalize_symbolic_list_surface(raw)
+    if re.search(r"\b(?:6|six)\s+m'?s\b", norm, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\bm'?s\s+(?:in|of|for)\s+management\b", norm, flags=re.IGNORECASE):
+        return True
+    if re.search(r"(?:ستة|الستة|الست)\s*m'?s\b", raw_low, flags=re.IGNORECASE):
+        return True
+    return False
+
+
+def _is_ms_symbolic_precision_profile(profile: dict[str, Any] | None) -> bool:
+    return bool(
+        isinstance(profile, dict)
+        and str(profile.get("list_type") or "").lower() == "symbolic_list"
+        and str(profile.get("symbolic_label") or "").lower() == "ms"
+    )
+
+
+def _doc_chunk_label(doc: dict) -> str:
+    metadata = dict((doc or {}).get("metadata") or {})
+    chunk = metadata.get("chunk_index")
+    if chunk is None:
+        chunk = metadata.get("chunk_id") or metadata.get("id") or "?"
+    source = str(metadata.get("source") or metadata.get("file_name") or metadata.get("filename") or "").rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+    return f"{source}:{chunk}" if source else str(chunk)
+
+
+def _contains_latin_term(text_low: str, term: str) -> bool:
+    return bool(re.search(rf"(?<![a-z]){re.escape(term.lower())}(?![a-z])", text_low, flags=re.IGNORECASE))
+
+
+def _ms_symbolic_item_hits(text: str) -> list[str]:
+    raw = str(text or "")
+    raw_low = raw.lower()
+    hits: list[str] = []
+    for item_name, variants in _MS_SYMBOLIC_LIST_ITEM_GROUPS.items():
+        matched = False
+        for variant in variants:
+            variant_text = str(variant or "").strip()
+            if not variant_text:
+                continue
+            if re.fullmatch(r"[a-z]+", variant_text, flags=re.IGNORECASE):
+                matched = _contains_latin_term(raw_low, variant_text)
+            else:
+                matched = variant_text in raw
+            if matched:
+                hits.append(item_name)
+                break
+    return hits
+
+
+def _ms_symbolic_hard_reject_hits(text: str) -> list[str]:
+    raw_low = str(text or "").lower()
+    return [term for term in _MS_SYMBOLIC_LIST_HARD_REJECT_TERMS if _contains_latin_term(raw_low, term)]
+
+
+def _ms_symbolic_evidence_window(query_text: str, text: str, window: int = 900) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    raw_low = raw.lower()
+    anchor_match = re.search(r"\b(?:6|six)\s+m'?s\b|\bm'?s\s+(?:in|of|for)\s+management\b", raw_low, flags=re.IGNORECASE)
+    if anchor_match:
+        start = max(0, anchor_match.start() - 40)
+        end = min(len(raw), anchor_match.end() + max(240, int(window or 900)))
+        return raw[start:end]
+
+    anchor_positions: list[int] = []
+    for variants in _MS_SYMBOLIC_LIST_ITEM_GROUPS.values():
+        for variant in variants:
+            variant_text = str(variant or "").strip()
+            if not variant_text:
+                continue
+            if re.fullmatch(r"[a-z]+", variant_text, flags=re.IGNORECASE):
+                m = re.search(rf"(?<![a-z]){re.escape(variant_text.lower())}(?![a-z])", raw_low, flags=re.IGNORECASE)
+            else:
+                m = re.search(re.escape(variant_text), raw)
+            if m:
+                anchor_positions.append(m.start())
+                break
+    if anchor_positions:
+        start = max(0, min(anchor_positions) - 80)
+        end = min(len(raw), max(anchor_positions) + 220)
+        return raw[start:end]
+    return raw[: max(1200, int(window or 900))]
+
+
+def _extract_list_items_for_validation(answer_text: str) -> list[str]:
+    raw_lines = [ln.strip() for ln in str(answer_text or "").splitlines() if ln.strip()]
+    bullet_items = [re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", ln).strip(" .;:-") for ln in raw_lines if re.match(r"^\s*(?:[-•*]|\d+[.)])\s+", ln)]
+    items = [item for item in bullet_items if item]
+    if not items:
+        items = [re.sub(r"\s+", " ", ln).strip(" .;:-") for ln in raw_lines if ln.strip()]
+    if len(items) == 1 and re.search(r"[,;]|\band\b", items[0], flags=re.IGNORECASE):
+        split_items = [part.strip(" .;:-") for part in re.split(r"[,;]|\band\b", items[0], flags=re.IGNORECASE) if part.strip(" .;:-")]
+        if len(split_items) >= 2:
+            items = split_items
+    return items
+
+
+def _list_hard_validation_ok(query_text: str, answer_text: str, profile: dict[str, Any] | None, support_docs: list[dict] | None = None) -> bool:
+    if not _is_ms_symbolic_precision_profile(profile):
+        return True
+    items = _extract_list_items_for_validation(answer_text)
+    valid_item_names: set[str] = set()
+    for item in items:
+        valid_item_names.update(_ms_symbolic_item_hits(item))
+    if not valid_item_names:
+        valid_item_names.update(_ms_symbolic_item_hits(answer_text))
+    passed = len(valid_item_names) >= 3 or len(items) == 6
+    logger.info(
+        "[LIST VALIDATION] passed=%s items=%s valid_ms_items=%s chunks=%s query=%r",
+        passed,
+        items[:8],
+        sorted(valid_item_names),
+        [_doc_chunk_label(d) for d in (support_docs or [])[:5]],
+        str(query_text or "")[:160],
+    )
+    return passed
+
+
+def _list_precision_profile(query_text: str) -> dict[str, Any] | None:
+    raw_query = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not raw_query:
+        return None
+
+    query_info = _detect_short_symbolic_list_query(raw_query) or {}
+    query_norm = _normalize_symbolic_list_surface(raw_query)
+    query_tokens = re.findall(r"[a-z0-9']+", query_norm)
+    is_ms_symbolic = _is_ms_symbolic_list_query(raw_query)
+    expected_count = query_info.get("count") if isinstance(query_info, dict) else None
+    if not isinstance(expected_count, int):
+        expected_count = _arabic_symbolic_list_count_value(raw_query)
+    if is_ms_symbolic and not isinstance(expected_count, int):
+        expected_count = 6
+    if not isinstance(expected_count, int):
+        for token in query_tokens:
+            value = _symbolic_list_count_value(token)
+            if isinstance(value, int):
+                expected_count = value
+                break
+
+    label_variants = {
+        _normalize_symbolic_list_surface(str(v))
+        for v in (query_info.get("label_variants") or [])
+        if _normalize_symbolic_list_surface(str(v))
+    }
+    category_terms = {
+        _normalize_symbolic_list_surface(str(v))
+        for v in (query_info.get("category_terms") or [])
+        if _normalize_symbolic_list_surface(str(v))
+    }
+    object_terms = {
+        _normalize_symbolic_list_surface(str(v))
+        for v in (query_info.get("object_terms") or [])
+        if _normalize_symbolic_list_surface(str(v))
+    }
+    phrase_variants = {
+        _normalize_symbolic_list_surface(str(v))
+        for v in (query_info.get("phrase_variants") or [])
+        if _normalize_symbolic_list_surface(str(v))
+    }
+
+    # Mixed Arabic/Latin queries such as "ما هي الستة Ms؟" can reach helpers
+    # before translation in some paths. Recover the symbolic label directly
+    # from the surviving Latin token(s) without changing retrieval settings.
+    if is_ms_symbolic or (not label_variants and expected_count and any(tok in {"m", "ms", "m's"} for tok in query_tokens)):
+        label_variants.update(_symbolic_list_label_variants("Ms"))
+        ms_count_value = expected_count if isinstance(expected_count, int) else 6
+        count_terms = {str(ms_count_value)}
+        if ms_count_value in _SYMBOLIC_LIST_NUMBER_WORDS:
+            count_terms.add(_SYMBOLIC_LIST_NUMBER_WORDS[ms_count_value])
+        for count_term in count_terms:
+            phrase_variants.add(_normalize_symbolic_list_surface(f"{count_term} Ms"))
+        phrase_variants.add(_normalize_symbolic_list_surface("Ms in management"))
+        query_info = {
+            "kind": "counted",
+            "count": ms_count_value,
+            "phrase": f"{_SYMBOLIC_LIST_NUMBER_WORDS.get(ms_count_value, ms_count_value)} Ms",
+            "label_variants": sorted(label_variants),
+            "phrase_variants": sorted(phrase_variants),
+            "focus_terms": sorted(label_variants),
+        }
+
+    if not (query_info or is_ms_symbolic or (expected_count and label_variants)):
+        return None
+
+    count_terms: set[str] = set()
+    if isinstance(expected_count, int) and expected_count >= 2:
+        count_terms.add(str(expected_count))
+        if expected_count in _SYMBOLIC_LIST_NUMBER_WORDS:
+            count_terms.add(_SYMBOLIC_LIST_NUMBER_WORDS[expected_count])
+
+    kind = str(query_info.get("kind") or ("counted" if expected_count and label_variants else "")).strip().lower()
+    focus_terms = {
+        _normalize_symbolic_list_surface(str(v))
+        for v in (query_info.get("focus_terms") or [])
+        if _normalize_symbolic_list_surface(str(v))
+    }
+    focus_terms.update(label_variants)
+    focus_terms.update(category_terms)
+    focus_terms.update(object_terms)
+    focus_terms.update(count_terms)
+    focus_terms = {term for term in focus_terms if term and term not in _SYMBOLIC_LIST_QUERY_STOPWORDS}
+
+    if not (expected_count or label_variants or category_terms or is_ms_symbolic):
+        return None
+
+    keyword_pool = list(category_terms) or list(label_variants) or list(focus_terms)
+    keyword = ""
+    if keyword_pool:
+        keyword = sorted(keyword_pool, key=lambda v: (v.replace("'", "") != "ms", -len(v), v))[0]
+    if not keyword:
+        keyword = str(query_info.get("phrase") or "list").strip()[:40] or "list"
+    if is_ms_symbolic:
+        keyword = "Ms"
+
+    profile = {
+        "raw_query": raw_query,
+        "kind": kind,
+        "expected_count": expected_count,
+        "keyword": keyword,
+        "label_variants": sorted(label_variants),
+        "category_terms": sorted(category_terms),
+        "object_terms": sorted(object_terms),
+        "phrase_variants": sorted(phrase_variants),
+        "count_terms": sorted(count_terms),
+        "focus_terms": sorted(focus_terms),
+    }
+    if is_ms_symbolic:
+        profile.update(
+            {
+                "list_type": "symbolic_list",
+                "symbolic_label": "ms",
+                "valid_item_terms": sorted(_MS_SYMBOLIC_LIST_ITEM_GROUPS.keys()),
+                "hard_reject_terms": list(_MS_SYMBOLIC_LIST_HARD_REJECT_TERMS),
+            }
+        )
+    return profile
+
+
+def _list_precision_contains_phrase(text_norm: str, phrase_norm: str) -> bool:
+    phrase = _normalize_symbolic_list_surface(phrase_norm)
+    if not phrase:
+        return False
+    words = re.findall(r"[a-z0-9']+", phrase)
+    if not words:
+        return False
+    pattern = r"\b" + r"\s+".join(re.escape(word) for word in words) + r"\b"
+    return bool(re.search(pattern, text_norm, flags=re.IGNORECASE))
+
+
+def _list_precision_term_hit(text_norm: str, term: str) -> bool:
+    norm = _normalize_symbolic_list_surface(term)
+    if not norm:
+        return False
+    if len(norm.replace("'", "")) <= 1:
+        return False
+    return _list_precision_contains_phrase(text_norm, norm)
+
+
+def _list_precision_doc_keep(profile: dict[str, Any] | None, doc: dict) -> tuple[bool, str, dict[str, Any]]:
+    if not isinstance(profile, dict):
+        return True, "inactive", {}
+    raw_text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+    metadata = dict((doc or {}).get("metadata") or {})
+    metadata_blob = " ".join(str(metadata.get(k) or "") for k in ("heading", "section", "title", "chapter", "role"))
+    text_norm = _normalize_symbolic_list_surface(f"{metadata_blob} {raw_text[:2600]}")
+    if not text_norm:
+        return False, "empty", {"phrase": 0, "label": 0, "count": 0, "category": 0, "object": 0, "competitor": 0}
+
+    phrase_hits = sum(1 for phrase in (profile.get("phrase_variants") or []) if _list_precision_contains_phrase(text_norm, str(phrase)))
+    label_hits = sum(1 for label in (profile.get("label_variants") or []) if _list_precision_term_hit(text_norm, str(label)))
+    count_hits = sum(1 for term in (profile.get("count_terms") or []) if _list_precision_term_hit(text_norm, str(term)))
+    category_hits = sum(1 for term in (profile.get("category_terms") or []) if _list_precision_term_hit(text_norm, str(term)))
+    object_hits = sum(1 for term in (profile.get("object_terms") or []) if _list_precision_term_hit(text_norm, str(term)))
+
+    focus_terms = set(str(t or "") for t in (profile.get("focus_terms") or []) if str(t or ""))
+    competitor_terms = {
+        "principle", "principles", "function", "functions", "step", "steps", "stage", "stages",
+        "type", "types", "branch", "branches", "category", "categories", "model", "models",
+        "approach", "approaches", "perspective", "perspectives",
+    } - focus_terms
+    # Avoid treating Methods as a competitor for short symbolic label queries.
+    competitor_terms.discard("method")
+    competitor_terms.discard("methods")
+    competitor_hits = sum(1 for term in competitor_terms if _list_precision_term_hit(text_norm, term))
+
+    signals: dict[str, Any] = {
+        "phrase": phrase_hits,
+        "label": label_hits,
+        "count": count_hits,
+        "category": category_hits,
+        "object": object_hits,
+        "competitor": competitor_hits,
+    }
+
+    if _is_ms_symbolic_precision_profile(profile):
+        hard_filter_blob = " ".join(str(metadata.get(k) or "") for k in ("heading", "section", "role")) + " " + raw_text[:2600]
+        evidence_window = _ms_symbolic_evidence_window(str(profile.get("raw_query") or ""), hard_filter_blob)
+        ms_item_hits = _ms_symbolic_item_hits(evidence_window)
+        hard_reject_hits = _ms_symbolic_hard_reject_hits(evidence_window)
+        context_hard_reject_hits = _ms_symbolic_hard_reject_hits(hard_filter_blob)
+        signals.update(
+            {
+                "ms_item_anchor": len(ms_item_hits),
+                "ms_items": ",".join(ms_item_hits),
+                "hard_reject": len(hard_reject_hits),
+                "hard_reject_terms": ",".join(hard_reject_hits),
+                "context_hard_reject": len(context_hard_reject_hits),
+                "context_hard_reject_terms": ",".join(context_hard_reject_hits),
+            }
+        )
+        if hard_reject_hits:
+            return False, f"ms_competing_concept:{','.join(hard_reject_hits[:4])}", signals
+        if not ms_item_hits:
+            return False, "missing_ms_item_anchor", signals
+        return True, "ms_item_anchor", signals
+
+    kind = str(profile.get("kind") or "")
+    expected_count = profile.get("expected_count")
+
+    if kind == "counted" and profile.get("label_variants"):
+        if phrase_hits > 0 or (label_hits > 0 and (count_hits > 0 or not expected_count)):
+            return True, "symbolic_anchor", signals
+        if competitor_hits > 0:
+            return False, "competing_list_topic", signals
+        return False, "missing_symbolic_anchor", signals
+
+    if profile.get("category_terms") or profile.get("object_terms"):
+        if profile.get("object_terms") and object_hits <= 0:
+            return False, "missing_object_anchor", signals
+        if profile.get("category_terms") and (category_hits <= 0 and phrase_hits <= 0):
+            return False, "missing_category_anchor", signals
+        return True, "category_anchor", signals
+
+    return True, "generic", signals
+
+
+def _list_precision_item_count(answer_text: str) -> int:
+    lines = [ln for ln in str(answer_text or "").splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
+    if lines:
+        return len(lines)
+    return len([ln for ln in str(answer_text or "").splitlines() if ln.strip()])
+
+
+def _list_precision_count_ok(query_text: str, answer_text: str, profile: dict[str, Any] | None = None) -> bool:
+    profile = profile or _list_precision_profile(query_text)
+    if not isinstance(profile, dict):
+        return True
+    expected_count = profile.get("expected_count")
+    if not isinstance(expected_count, int) or expected_count < 2:
+        return True
+    actual_count = _list_precision_item_count(answer_text)
+    if actual_count == expected_count:
+        return True
+    logger.info(
+        "[LIST PRECISION COUNT] query=%r keyword=%s expected=%s actual=%s accepted=False",
+        str(query_text or "")[:160],
+        profile.get("keyword") or "list",
+        expected_count,
+        actual_count,
+    )
+    return False
+
+
+def _symbolic_list_active_allowed_sources(seed_docs: list[dict] | None = None) -> Set[str]:
+    allowed_sources = set(_get_active_sources())
+    if allowed_sources:
+        return allowed_sources
+    for seed_doc in seed_docs or []:
+        metadata = dict((seed_doc or {}).get("metadata") or {})
+        allowed_sources.update(_metadata_source_keys(metadata))
+    return allowed_sources
+
+
+def _is_counted_category_list_query_info(query_info: dict[str, Any] | None) -> bool:
+    if not isinstance(query_info, dict):
+        return False
+    if query_info.get("counted_list_rescue") and query_info.get("category_terms") and query_info.get("object_terms"):
+        return True
+    count_value = query_info.get("count")
+    return bool(
+        query_info.get("kind") == "counted"
+        and isinstance(count_value, int)
+        and count_value >= 2
+        and (query_info.get("label_variants") or query_info.get("phrase_variants"))
+    )
+
+
+def _prepare_counted_list_rescue_text(text: str) -> str:
+    cleaned = str(text or "").replace("•", " ")
+    cleaned = cleaned.replace("–", "-").replace("—", "-").replace("’", "'")
+    # Generic OCR repair for linearized diagrams/tables: insert boundaries before
+    # glued all-caps headings and before numbered markers that touch words.
+    cleaned = re.sub(r"([a-z])([A-Z]{2,})(?=\s|$)", r"\1 \2", cleaned)
+    cleaned = re.sub(r"([A-Za-z])(?=\d{1,2}\s*[.)])", r"\1 ", cleaned)
+    cleaned = re.sub(r"(\d{1,2})\s*([.)])\s*", r" \1\2 ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _clean_counted_list_label_item(raw_item: str) -> str:
+    item = re.sub(r"\s+", " ", str(raw_item or "")).strip(" \t\r\n,;:-\"'")
+    if not item:
+        return ""
+    item = re.sub(r"\b([A-Z][a-z])\s+([a-z]{4,})\b", r"\1\2", item)
+    # Stop at sentence/list-table boundaries; if a later all-caps heading is glued
+    # onto the final label, this keeps only the label text.
+    item = re.split(r"[.;:]\s*(?=[A-Z0-9])|[.;:]$|\s+(?=[A-Z]{2,}\b)", item, maxsplit=1)[0]
+    item = re.sub(r"\s+", " ", item).strip(" \t\r\n,;:-\"'")
+    item = re.sub(r"^\s*(?:and|or)\s+", "", item, flags=re.IGNORECASE).strip(" \t\r\n,;:-\"'")
+    if item and item[0].islower():
+        item = item[:1].upper() + item[1:]
+    return item
+
+
+def _is_clean_counted_label_item(item_text: str) -> bool:
+    item = re.sub(r"\s+", " ", str(item_text or "")).strip(" ,;:-")
+    if not item or len(item) > 80:
+        return False
+    if re.search(r"\d", item):
+        return False
+    if re.search(r"[.!?:;]", item):
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z'\-]*", item)
+    if not (1 <= len(words) <= 6):
+        return False
+    if not item[0].isupper():
+        return False
+    if re.search(
+        r"\b(?:is|are|was|were|be|been|being|has|have|had|include|includes|including|"
+        r"consist|consists|comprise|comprises|means|refers|describe|describes|explain|explains)\b",
+        item,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    if re.match(r"^(?:and|or|the|a|an)\b", item, flags=re.IGNORECASE):
+        return False
+    return True
+
+
+def _shape_counted_list_items(items: list[str]) -> str | None:
+    cleaned_items: list[str] = []
+    seen_norm: set[str] = set()
+    for raw_item in items:
+        item = _clean_counted_list_label_item(raw_item)
+        if not _is_clean_counted_label_item(item):
+            return None
+        norm = re.sub(r"[^a-z0-9]+", " ", item.lower()).strip()
+        if not norm or norm in seen_norm:
+            return None
+        seen_norm.add(norm)
+        cleaned_items.append(item)
+    if len(cleaned_items) < 2:
+        return None
+    return "\n".join(f"- {item}" for item in cleaned_items)
+
+
+def _split_counted_inline_clause_items(clause: str, count_target: int | None = None) -> list[list[str]]:
+    clean_clause = re.sub(r"\s+", " ", str(clause or "")).strip(" ,;:-")
+    if not clean_clause:
+        return []
+    clean_clause = re.split(
+        r"(?:\.\s+(?=[A-Z][a-z])|\b(?:These|This|The)\s+\w+\s+(?:basic|main|major|key|primary|principal)?\s*\w+\s+(?:which\s+are|are|include|includes)\b)",
+        clean_clause,
+        maxsplit=1,
+    )[0].strip(" ,;:-")
+    candidates: list[list[str]] = []
+    comma_items = [part.strip(" ,;:-") for part in re.split(r"\s*,\s*", clean_clause) if part.strip(" ,;:-")]
+    if len(comma_items) >= 2:
+        candidates.append(comma_items)
+        expanded: list[str] = []
+        for index, item in enumerate(comma_items):
+            if index == len(comma_items) - 1:
+                expanded.extend(part.strip(" ,;:-") for part in re.split(r"\s+and\s+|\s+or\s+", item) if part.strip(" ,;:-"))
+            else:
+                expanded.append(item)
+        if expanded != comma_items:
+            candidates.append(expanded)
+    connector_items = [part.strip(" ,;:-") for part in re.split(r"\s+and\s+|\s+or\s+", clean_clause) if part.strip(" ,;:-")]
+    if len(connector_items) >= 2:
+        candidates.append(connector_items)
+    if isinstance(count_target, int) and count_target >= 2:
+        exact = [items for items in candidates if len(items) == count_target]
+        if exact:
+            return exact
+    return candidates
+
+
+def _find_counted_list_anchor_spans(text: str, query_info: dict[str, Any]) -> list[tuple[int, int, str]]:
+    prepared = _prepare_counted_list_rescue_text(text)
+    spans: list[tuple[int, int, str]] = []
+    variants = sorted(
+        {str(v or "").strip() for v in (query_info.get("phrase_variants") or []) if str(v or "").strip()},
+        key=len,
+        reverse=True,
+    )
+    for variant in variants:
+        words = re.findall(r"[a-z0-9']+", _normalize_symbolic_list_surface(variant))
+        if len(words) < 2:
+            continue
+        pattern = r"\b" + r"\s+".join(re.escape(word) for word in words) + r"\b"
+        for match in re.finditer(pattern, prepared, flags=re.IGNORECASE):
+            spans.append((match.start(), match.end(), variant))
+    spans.sort(key=lambda row: (row[0], -(row[1] - row[0])))
+    deduped: list[tuple[int, int, str]] = []
+    occupied: set[int] = set()
+    for start, end, variant in spans:
+        bucket = start // 10
+        if bucket in occupied:
+            continue
+        occupied.add(bucket)
+        deduped.append((start, end, variant))
+    return deduped
+
+
+def _extract_counted_list_labels_from_context(
+    query_text: str,
+    source_text: str,
+    query_info: dict[str, Any] | None = None,
+) -> str | None:
+    query_info = query_info or _detect_short_symbolic_list_query(query_text) or {}
+    if not _is_counted_category_list_query_info(query_info):
+        return None
+    prepared = _prepare_counted_list_rescue_text(source_text)
+    if not prepared:
+        return None
+    count_target = query_info.get("count")
+    if not isinstance(count_target, int) or count_target < 2:
+        count_target = None
+
+    anchors = _find_counted_list_anchor_spans(prepared, query_info)
+    if not anchors:
+        return None
+
+    count_terms: set[str] = set()
+    if isinstance(count_target, int) and count_target >= 2:
+        count_terms.add(str(count_target))
+        if count_target in _SYMBOLIC_LIST_NUMBER_WORDS:
+            count_terms.add(_SYMBOLIC_LIST_NUMBER_WORDS[count_target])
+    object_terms = {
+        _normalize_symbolic_list_surface(str(term))
+        for term in (query_info.get("object_terms") or [])
+        if _normalize_symbolic_list_surface(str(term))
+    }
+    category_terms = {
+        _normalize_symbolic_list_surface(str(term))
+        for term in (query_info.get("category_terms") or [])
+        if _normalize_symbolic_list_surface(str(term))
+    }
+
+    def _anchor_priority(anchor: tuple[int, int, str]) -> tuple[float, int]:
+        start, _end, variant = anchor
+        variant_norm = _normalize_symbolic_list_surface(variant)
+        variant_tokens = set(re.findall(r"[a-z0-9']+", variant_norm))
+        priority = 0.0
+        if count_terms and (variant_tokens & count_terms):
+            priority += 6.0
+        if category_terms and (variant_tokens & category_terms):
+            priority += 1.0
+        if object_terms and (variant_tokens & object_terms):
+            priority += 1.0
+        if variant_tokens & {"basic", "main", "major", "key", "primary", "principal"}:
+            priority += 1.0
+        if "these" in variant_tokens:
+            priority += 0.5
+        return (-priority, start)
+
+    ordered_anchors = sorted(anchors, key=_anchor_priority)
+
+    best_items: list[str] = []
+    best_answer: str | None = None
+    for start, end, variant in ordered_anchors[:24]:
+        segment = prepared[max(0, start - 80): min(len(prepared), end + 1800)]
+        relative_end = min(len(segment), (end - max(0, start - 80)))
+        segment_after_anchor = segment[relative_end:]
+        direct_anchor_intro = re.match(
+            r"^\s*[:\-]\s*(.{8,360})",
+            segment_after_anchor,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if direct_anchor_intro:
+            inline_clause = direct_anchor_intro.group(1) or ""
+            for inline_items in _split_counted_inline_clause_items(inline_clause, count_target):
+                shaped_inline = _shape_counted_list_items(inline_items)
+                if shaped_inline is None:
+                    continue
+                if count_target is not None and len(inline_items) != count_target:
+                    continue
+                if count_target is None and len(inline_items) < 3:
+                    continue
+                if len(inline_items) > len(best_items):
+                    best_items = [_clean_counted_list_label_item(item) for item in inline_items]
+                    best_answer = shaped_inline
+        marker_patterns = (
+            (r"(?:^|\s)(\d{1,2})\s*[.)]\s*(.*?)(?=(?:\s+\d{1,2}\s*[.)]\s*)|$)", "number"),
+            (r"(?:^|\s)([A-Ea-e])\s*[.)]\s*(.*?)(?=(?:\s+[A-Ea-e]\s*[.)]\s*)|$)", "letter"),
+        )
+        for marker_pattern, marker_kind in marker_patterns:
+            marker_matches = list(re.finditer(marker_pattern, segment_after_anchor, flags=re.DOTALL))
+            if not marker_matches:
+                continue
+            items: list[str] = []
+            expected_number = 1
+            started = False
+            for marker in marker_matches:
+                try:
+                    marker_number = int(marker.group(1)) if marker_kind == "number" else (ord(marker.group(1).lower()) - ord("a") + 1)
+                except Exception:
+                    continue
+                if not started:
+                    if marker_number != 1:
+                        continue
+                    started = True
+                    expected_number = 1
+                if marker_number != expected_number:
+                    break
+                expected_number += 1
+                item = _clean_counted_list_label_item(marker.group(2) or "")
+                if not _is_clean_counted_label_item(item):
+                    break
+                items.append(item)
+                if count_target is not None and len(items) >= count_target:
+                    break
+            shaped_marker = _shape_counted_list_items(items)
+            if shaped_marker is None:
+                continue
+            if count_target is not None and len(items) != count_target:
+                continue
+            if count_target is None and len(items) < 3:
+                continue
+            if len(items) > len(best_items):
+                best_items = items
+                best_answer = shaped_marker
+
+        inline_intro = re.search(
+            r"\b(?:which\s+are|are|include|includes|included\s+are|consist\s+of|consists\s+of)\s*[:\-]?\s*(.{8,360})",
+            segment_after_anchor,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if inline_intro:
+            inline_clause = inline_intro.group(1) or ""
+            for inline_items in _split_counted_inline_clause_items(inline_clause, count_target):
+                shaped_inline = _shape_counted_list_items(inline_items)
+                if shaped_inline is None:
+                    continue
+                if count_target is not None and len(inline_items) != count_target:
+                    continue
+                if count_target is None and len(inline_items) < 3:
+                    continue
+                if len(inline_items) > len(best_items):
+                    best_items = [_clean_counted_list_label_item(item) for item in inline_items]
+                    best_answer = shaped_inline
+
+    if len(best_items) < 2 or not best_answer:
+        return None
+    return best_answer
+
+
+def _build_counted_list_rescue_context(
+    query_text: str,
+    query_info: dict[str, Any],
+    anchor_doc: dict,
+    all_chunks: list[dict],
+    allowed_sources: Set[str],
+) -> tuple[str, dict[str, Any]]:
+    raw_anchor_text = str((anchor_doc or {}).get("page_content") or (anchor_doc or {}).get("text") or "")
+    cleaned_anchor = _normalize_context_entities(query_text, _clean_ocr_artifacts(raw_anchor_text) or raw_anchor_text)
+    if not _is_counted_category_list_query_info(query_info):
+        focused_anchor = _focus_doc_to_query_window(query_text, cleaned_anchor, window=900) or cleaned_anchor
+        return focused_anchor, {"selected_chunk_indexes": [dict((anchor_doc or {}).get("metadata") or {}).get("chunk_index")], "merged_extra_chunks_count": 0}
+
+    anchor_md = dict((anchor_doc or {}).get("metadata") or {})
+    anchor_sources = _metadata_source_keys(anchor_md) & allowed_sources
+    try:
+        raw_anchor_idx = anchor_md.get("chunk_index")
+        if raw_anchor_idx is None:
+            raise ValueError("missing chunk_index")
+        anchor_idx = int(f"{raw_anchor_idx}")
+    except Exception:
+        anchor_idx = None
+    if not anchor_sources or anchor_idx is None:
+        focused_anchor = _focus_doc_to_query_window(query_text, cleaned_anchor, window=1600) or cleaned_anchor
+        return focused_anchor, {"selected_chunk_indexes": [anchor_md.get("chunk_index")], "merged_extra_chunks_count": 0}
+
+    focus_terms = [
+        _normalize_symbolic_list_surface(str(term))
+        for term in (query_info.get("focus_terms") or [])
+        if _normalize_symbolic_list_surface(str(term))
+    ]
+    phrase_variants = [
+        _normalize_symbolic_list_surface(str(variant))
+        for variant in (query_info.get("phrase_variants") or [])
+        if _normalize_symbolic_list_surface(str(variant))
+    ]
+
+    selected: list[tuple[int, dict]] = []
+    for chunk in all_chunks:
+        metadata = dict((chunk or {}).get("metadata") or {})
+        chunk_sources = _metadata_source_keys(metadata)
+        if not (chunk_sources & anchor_sources):
+            continue
+        try:
+            raw_chunk_idx = metadata.get("chunk_index")
+            if raw_chunk_idx is None:
+                raise ValueError("missing chunk_index")
+            chunk_idx = int(f"{raw_chunk_idx}")
+        except Exception:
+            continue
+        distance = abs(chunk_idx - anchor_idx)
+        if distance > 2:
+            continue
+        text = str((chunk or {}).get("page_content") or (chunk or {}).get("text") or "")
+        normalized = _normalize_symbolic_list_surface(text)
+        phrase_hit = any(re.search(rf"\b{re.escape(variant)}\b", normalized) for variant in phrase_variants if variant)
+        focus_hits = sum(1 for term in dict.fromkeys(focus_terms) if term and _token_match_light(normalized, term))
+        marker_hits = len(re.findall(r"(?:^|\s)\d{1,2}\s*[.)]\s*[A-Za-z]", _prepare_counted_list_rescue_text(text)))
+        include_chunk = bool(
+            distance == 0
+            or (distance == 1 and (phrase_hit or focus_hits >= 1 or marker_hits >= 2))
+            or (distance == 2 and phrase_hit and marker_hits >= 2)
+        )
+        if include_chunk:
+            selected.append((chunk_idx, chunk))
+
+    if not selected:
+        selected = [(anchor_idx, anchor_doc)]
+    selected = sorted(selected, key=lambda row: (abs(row[0] - anchor_idx), row[0]))[:3]
+    selected.sort(key=lambda row: row[0])
+    selected_indexes = [idx for idx, _ in selected]
+    merged_text_parts: list[str] = []
+    for _, chunk in selected:
+        raw_text = str((chunk or {}).get("page_content") or (chunk or {}).get("text") or "")
+        merged_text_parts.append(_normalize_context_entities(query_text, _clean_ocr_artifacts(raw_text) or raw_text))
+    merged_text = "\n".join(part for part in merged_text_parts if part.strip())
+    focused_text = merged_text if len(merged_text) <= 6500 else (_focus_doc_to_query_window(query_text, merged_text, window=3200) or merged_text)
+    return focused_text, {
+        "selected_chunk_indexes": selected_indexes,
+        "merged_extra_chunks_count": max(0, len(selected_indexes) - 1),
+        "strict_adjacent_merge_allowed": 1.0 if len(selected_indexes) <= 3 else 0.0,
+    }
+
+
+def _symbolic_list_candidate_item_count(query_text: str, source_text: str) -> int:
+    query_info = _detect_short_symbolic_list_query(query_text)
+    counted_candidate = _extract_counted_list_labels_from_context(query_text, source_text, query_info)
+    if counted_candidate:
+        lines = [line for line in counted_candidate.splitlines() if re.match(r"^\s*[-•*]\s+", line)]
+        if lines:
+            return len(lines)
+    candidates: list[str] = []
+    try:
+        context_candidate = _extract_list_from_context(query_text, source_text, max_candidate_blocks=2)
+        if context_candidate:
+            candidates.append(str(context_candidate))
+    except Exception:
+        pass
+    if not candidates:
+        try:
+            simple_candidate = _extract_simple_list_from_docs([{"page_content": source_text, "text": source_text, "metadata": {}}], query_text=query_text)
+            if simple_candidate:
+                candidates.append(str(simple_candidate))
+        except Exception:
+            pass
+    for candidate in candidates:
+        lines = [line for line in candidate.splitlines() if re.match(r"^\s*[-•*]\s+", line)]
+        if lines:
+            return len(lines)
+    return 0
+
+
+def _score_symbolic_list_candidate(query_text: str, query_info: dict[str, Any], doc: dict) -> tuple[float, dict[str, Any]] | None:
+    source_text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+    if not source_text.strip():
+        return None
+    normalized_text = _normalize_symbolic_list_surface(source_text)
+    phrase_variants = [variant for variant in (query_info.get("phrase_variants") or []) if str(variant or "").strip()]
+    phrase_hits: list[str] = []
+    phrase_positions: list[int] = []
+    for variant in phrase_variants:
+        normalized_variant = _normalize_symbolic_list_surface(str(variant))
+        if not normalized_variant:
+            continue
+        phrase_re = re.compile(rf"(?:^|\s){re.escape(normalized_variant)}(?:\s|$)", flags=re.IGNORECASE)
+        for match in phrase_re.finditer(normalized_text):
+            phrase_hits.append(normalized_variant)
+            phrase_positions.append(match.start())
+            break
+    focus_terms = [
+        _normalize_symbolic_list_surface(str(term)) for term in (query_info.get("focus_terms") or [])
+        if _normalize_symbolic_list_surface(str(term))
+    ]
+    focus_hits = 0
+    for term in dict.fromkeys(focus_terms):
+        if len(term) <= 2:
+            if re.search(rf"(?:^|\s){re.escape(term)}(?:\s|$)", normalized_text):
+                focus_hits += 1
+        elif re.search(rf"\b{re.escape(term)}[a-z0-9']*\b", normalized_text):
+            focus_hits += 1
+
+    if not phrase_hits and focus_hits < 2:
+        return None
+
+    anchor_pos = min(phrase_positions) if phrase_positions else 0
+    window_start = max(0, anchor_pos - 180)
+    window_end = min(len(normalized_text), anchor_pos + 520)
+    near_window = normalized_text[window_start:window_end]
+    raw_lower = source_text.lower()
+    raw_window = raw_lower[max(0, min(anchor_pos, len(raw_lower)) - 180): min(len(raw_lower), min(anchor_pos, len(raw_lower)) + 640)]
+
+    colon_near = bool(re.search(r"[:;]", raw_window))
+    introducer_near = bool(re.search(r"\b(?:include|includes|including|consists?\s+of|comprises?|classified\s+as|are|is)\b", near_window))
+    comma_count = min(8, raw_window.count(","))
+    bullet_count = min(8, len(re.findall(r"(?m)^\s*(?:[-•*]|\d+[.)]|[A-Za-z][.)])\s+", source_text)))
+    inline_list_density = min(1.0, (comma_count + bullet_count) / 6.0)
+    item_count = 0
+    count_value = query_info.get("count")
+    if phrase_hits:
+        item_count = _symbolic_list_candidate_item_count(query_text, source_text)
+
+    score = 0.0
+    score += 9.0 if phrase_hits else 0.0
+    score += min(3, len(set(phrase_hits))) * 1.5
+    score += min(5, focus_hits) * 0.75
+    score += 1.8 if colon_near else 0.0
+    score += 1.2 if introducer_near else 0.0
+    score += min(4, comma_count) * 0.65
+    score += min(4, bullet_count) * 0.55
+    score += inline_list_density * 1.5
+    if isinstance(count_value, int) and count_value >= 2 and item_count == count_value:
+        score += 4.0
+    elif isinstance(count_value, int) and count_value >= 2 and item_count >= 2:
+        score += 1.0
+
+    if not phrase_hits and score < 4.0:
+        return None
+    return score, {
+        "phrase_hits": float(len(set(phrase_hits))),
+        "focus_hits": float(focus_hits),
+        "colon_near": 1.0 if colon_near else 0.0,
+        "introducer_near": 1.0 if introducer_near else 0.0,
+        "comma_count": float(comma_count),
+        "bullet_count": float(bullet_count),
+        "item_count": float(item_count),
+    }
+
+
+def _lexical_rescue_symbolic_list_chunk(query_text: str, seed_docs: list[dict] | None = None) -> tuple[dict | None, dict[str, Any]]:
+    query_info = _detect_short_symbolic_list_query(query_text)
+    precision_profile = _list_precision_profile(query_text)
+    if not query_info and _is_ms_symbolic_precision_profile(precision_profile):
+        precision_profile_dict = precision_profile or {}
+        query_info = {
+            "kind": "counted",
+            "count": precision_profile_dict.get("expected_count") or 6,
+            "phrase": "six Ms",
+            "phrase_variants": list(precision_profile_dict.get("phrase_variants") or []),
+            "label_variants": list(precision_profile_dict.get("label_variants") or []),
+            "focus_terms": list(precision_profile_dict.get("focus_terms") or []),
+        }
+    if not query_info:
+        return None, {"detected": False, "reason": "not_symbolic_list_query"}
+    counted_category_mode = _is_counted_category_list_query_info(query_info)
+
+    logger.info(
+        "[SYMBOLIC LIST QUERY DETECTED] query=%s phrase=%s kind=%s count=%s",
+        str(query_text or "")[:180],
+        str(query_info.get("phrase") or "")[:120],
+        query_info.get("kind"),
+        query_info.get("count"),
+    )
+    if counted_category_mode:
+        logger.info(
+            "[COUNTED LIST QUERY DETECTED] query=%s phrase=%s kind=%s count=%s category=%s object=%s",
+            str(query_text or "")[:180],
+            str(query_info.get("phrase") or "")[:120],
+            query_info.get("kind"),
+            query_info.get("count"),
+            query_info.get("category_terms") or [],
+            query_info.get("object_terms") or [],
+        )
+    allowed_sources = _symbolic_list_active_allowed_sources(seed_docs)
+    if not allowed_sources:
+        logger.info(
+            "[LEXICAL RESCUE] query=%s phrase=%s candidates=0 chosen_chunk=None",
+            str(query_text or "")[:180],
+            str(query_info.get("phrase") or "")[:120],
+        )
+        if counted_category_mode:
+            logger.info(
+                "[COUNTED LIST RESCUE] query=%s phrase=%s candidates=0 chosen_chunk=None",
+                str(query_text or "")[:180],
+                str(query_info.get("phrase") or "")[:120],
+            )
+        return None, {"detected": True, "reason": "no_active_sources", "query_info": query_info, "candidates": 0}
+
+    chunks = _mpc15_load_full_corpus_chunks()
+    scored: list[tuple[float, dict, dict[str, Any]]] = []
+    for chunk in chunks:
+        metadata = dict((chunk or {}).get("metadata") or {})
+        source_keys = _metadata_source_keys(metadata)
+        if not (source_keys & allowed_sources):
+            continue
+        scored_candidate = _score_symbolic_list_candidate(query_text, query_info, chunk)
+        if scored_candidate is None:
+            continue
+        candidate_score, candidate_signals = scored_candidate
+        if candidate_score <= 0.0:
+            continue
+        scored.append((candidate_score, chunk, candidate_signals))
+
+    scored.sort(key=lambda row: row[0], reverse=True)
+    chosen_doc: dict | None = None
+    chosen_chunk: Any = None
+    chosen_score = 0.0
+    chosen_signals: dict[str, Any] = {}
+    if scored:
+        chosen_score, chosen_source_doc, chosen_signals = scored[0]
+        metadata = dict((chosen_source_doc or {}).get("metadata") or {})
+        focused_text, context_meta = _build_counted_list_rescue_context(
+            query_text,
+            query_info,
+            chosen_source_doc,
+            chunks,
+            allowed_sources,
+        )
+        chosen_doc = {
+            "page_content": focused_text,
+            "text": focused_text,
+            "content": focused_text,
+            "metadata": metadata,
+            "score": float(chosen_score),
+            "_lexical_rescue_score": float(chosen_score),
+            "_lexical_rescue_context_meta": context_meta,
+        }
+        chosen_signals = dict(chosen_signals or {})
+        chosen_signals.update({
+            "selected_chunks_count": float(len(context_meta.get("selected_chunk_indexes") or []) or 1),
+            "merged_extra_chunks_count": float(context_meta.get("merged_extra_chunks_count", 0) or 0),
+            "strict_adjacent_merge_allowed": float(context_meta.get("strict_adjacent_merge_allowed", 0.0) or 0.0),
+        })
+        chosen_chunk = metadata.get("chunk_index")
+
+    logger.info(
+        "[LEXICAL RESCUE] query=%s phrase=%s candidates=%s chosen_chunk=%s",
+        str(query_text or "")[:180],
+        str(query_info.get("phrase") or "")[:120],
+        len(scored),
+        chosen_chunk,
+    )
+    if counted_category_mode:
+        logger.info(
+            "[COUNTED LIST RESCUE] query=%s phrase=%s candidates=%s chosen_chunk=%s merged_extra=%s",
+            str(query_text or "")[:180],
+            str(query_info.get("phrase") or "")[:120],
+            len(scored),
+            chosen_chunk,
+            int(float((chosen_signals or {}).get("merged_extra_chunks_count", 0.0) or 0.0)),
+        )
+    if chosen_doc is None or chosen_score < 8.0:
+        return None, {
+            "detected": True,
+            "reason": "no_strong_lexical_candidate",
+            "query_info": query_info,
+            "candidates": len(scored),
+            "chosen_chunk": chosen_chunk,
+            "score": float(chosen_score),
+        }
+    return chosen_doc, {
+        "detected": True,
+        "reason": "candidate_selected",
+        "query_info": query_info,
+        "candidates": len(scored),
+        "chosen_chunk": chosen_chunk,
+        "score": float(chosen_score),
+        "signals": chosen_signals,
+    }
+
+
+def _extract_symbolic_list_lexical_rescue_answer(query_text: str, seed_docs: list[dict] | None = None) -> tuple[str | None, int, dict | None, dict[str, Any], str]:
+    rescued_doc, rescue_meta = _lexical_rescue_symbolic_list_chunk(query_text, seed_docs)
+    query_info = dict(rescue_meta.get("query_info") or {}) if isinstance(rescue_meta, dict) else {}
+    precision_profile = _list_precision_profile(query_text)
+    counted_category_mode = _is_counted_category_list_query_info(query_info)
+    if rescued_doc is None:
+        reason = str(rescue_meta.get("reason") or "no_candidate")
+        if rescue_meta.get("detected"):
+            logger.info("[LEXICAL RESCUE] accepted=False reason=%s", reason)
+            if counted_category_mode:
+                logger.info("[COUNTED LIST RESCUE] accepted=False reason=%s", reason)
+        return None, 0, None, {}, reason
+
+    rescue_text = str((rescued_doc or {}).get("page_content") or (rescued_doc or {}).get("text") or "")
+    if not rescue_text.strip():
+        logger.info("[LEXICAL RESCUE] accepted=False reason=empty_rescued_context")
+        if counted_category_mode:
+            logger.info("[COUNTED LIST RESCUE] accepted=False reason=empty_rescued_context")
+        return None, 0, None, {}, "empty_rescued_context"
+
+    rescue_support = _collect_local_window_support([rescued_doc])
+    rescue_context_meta = dict((rescued_doc or {}).get("_lexical_rescue_context_meta") or {})
+    rescue_selected_chunks = list(rescue_context_meta.get("selected_chunk_indexes") or [])
+    if _is_ms_symbolic_precision_profile(precision_profile):
+        logger.info(
+            "[LIST HARD FILTER] selected_chunks=%s rejected_chunks=[] query=%r keyword=%s rescue=true",
+            rescue_selected_chunks or [dict((rescued_doc or {}).get("metadata") or {}).get("chunk_index")],
+            str(query_text or "")[:160],
+            (precision_profile or {}).get("keyword") or "Ms",
+        )
+    rescue_support["selected_chunks_count"] = float(len(rescue_selected_chunks) or 1)
+    rescue_support["merged_extra_chunks_count"] = float(rescue_context_meta.get("merged_extra_chunks_count", 0) or 0)
+    rescue_support["strict_adjacent_merge_allowed"] = float(rescue_context_meta.get("strict_adjacent_merge_allowed", 0.0) or 0.0)
+    rescue_support["used_single_window"] = 1.0
+    rescue_support["validation_scope"] = "single_local_window"
+    rescue_support["single_local_window_text"] = rescue_text[:7000] if counted_category_mode else rescue_text[:2400]
+    rescue_support["lexical_rescue"] = 1.0
+    if counted_category_mode:
+        rescue_support["counted_list_rescue"] = 1.0
+    rescue_signals = dict(rescue_meta.get("signals") or {})
+    rescue_support["primary_phrase_hits"] = max(
+        float(rescue_support.get("primary_phrase_hits", 0.0) or 0.0),
+        float(rescue_signals.get("phrase_hits", 0.0) or 0.0),
+    )
+    rescue_support["primary_supp_list_evidence"] = max(
+        float(rescue_support.get("primary_supp_list_evidence", 0.0) or 0.0),
+        float(rescue_signals.get("colon_near", 0.0) or 0.0)
+        + min(2.0, float(rescue_signals.get("comma_count", 0.0) or 0.0) / 3.0)
+        + min(1.0, float(rescue_signals.get("bullet_count", 0.0) or 0.0) / 2.0),
+    )
+
+    rescue_candidates: list[str] = []
+    counted_candidate = _extract_counted_list_labels_from_context(query_text, rescue_text, query_info)
+    if counted_candidate:
+        rescue_candidates.append(counted_candidate)
+    for raw_candidate in (
+        _extract_list_from_context(query_text, rescue_text, max_candidate_blocks=3),
+        _extract_simple_list_from_docs([rescued_doc], query_text=query_text),
+    ):
+        candidate_text = str(raw_candidate or "").strip()
+        if candidate_text:
+            rescue_candidates.append(candidate_text)
+
+    if not rescue_candidates:
+        logger.info("[LEXICAL RESCUE] accepted=False reason=no_extractable_list")
+        if counted_category_mode:
+            logger.info("[COUNTED LIST RESCUE] accepted=False reason=no_extractable_list")
+        return None, 0, None, {}, "no_extractable_list"
+
+    last_reason = "coherence_failed"
+    for candidate_text in rescue_candidates:
+        if _is_ms_symbolic_precision_profile(precision_profile) and not _list_hard_validation_ok(query_text, candidate_text, precision_profile, [rescued_doc]):
+            last_reason = "hard_validation_failed"
+            logger.info("[LEXICAL RESCUE] accepted=False reason=%s", last_reason)
+            continue
+        rescue_ok, rescue_reason, rescue_shaped = _assess_list_coherence(
+            query_text,
+            _preclean_list_answer_for_assessment(candidate_text),
+            strict_fast=True,
+            local_support=rescue_support,
+        )
+        last_reason = str(rescue_reason or "coherence_failed")
+        if _is_ms_symbolic_precision_profile(precision_profile):
+            hard_shaped = rescue_shaped or _sanitize_list_answer_text(query_text, str(candidate_text or ""))
+            if hard_shaped and _list_hard_validation_ok(query_text, hard_shaped, precision_profile, [rescued_doc]):
+                rescue_count = len([line for line in str(hard_shaped or "").splitlines() if line.strip()])
+                logger.info("[LEXICAL RESCUE] accepted=True reason=hard_ms_validation")
+                return hard_shaped, rescue_count, rescued_doc, rescue_support, "hard_ms_validation"
+        rescue_count = len([line for line in str(rescue_shaped or "").splitlines() if line.strip()])
+        accepted = bool(rescue_ok and rescue_shaped and rescue_count >= 2)
+        logger.info("[LEXICAL RESCUE] accepted=%s reason=%s", accepted, last_reason)
+        if counted_category_mode:
+            logger.info("[COUNTED LIST RESCUE] accepted=%s reason=%s", accepted, last_reason)
+        if accepted:
+            return rescue_shaped, rescue_count, rescued_doc, rescue_support, last_reason
+
+    logger.info("[LEXICAL RESCUE] accepted=False reason=%s", last_reason)
+    if counted_category_mode:
+        logger.info("[COUNTED LIST RESCUE] accepted=False reason=%s", last_reason)
+    return None, 0, None, {}, last_reason
+
+
 def _doc_router_normalized_query_tokens(query_text: str) -> List[str]:
     q = re.sub(r"[^A-Za-z0-9\s'-]+", " ", str(query_text or "").lower())
     tokens: List[str] = []
@@ -3355,6 +5169,9 @@ def _doc_router_normalized_query_tokens(query_text: str) -> List[str]:
 def _extract_doc_router_query_concepts(query_text: str) -> Tuple[List[str], List[str]]:
     q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
     query_tokens = _doc_router_normalized_query_tokens(q)
+    comparison_intent = _doc_router_implies_comparison(q)
+    if comparison_intent:
+        query_tokens = [token for token in query_tokens if token not in _DOC_ROUTER_COMPARISON_OPERATORS]
     concepts: List[str] = []
     seen: Set[str] = set()
 
@@ -3365,6 +5182,8 @@ def _extract_doc_router_query_concepts(query_text: str) -> Tuple[List[str], List
     )
     for part in boundary_re.split(q):
         part_tokens = _doc_router_normalized_query_tokens(part)
+        if comparison_intent:
+            part_tokens = [token for token in part_tokens if token not in _DOC_ROUTER_COMPARISON_OPERATORS]
         if not part_tokens:
             continue
         phrase = " ".join(part_tokens[:5]).strip()
@@ -3415,6 +5234,40 @@ def _doc_router_explicit_multi_source_request(query_text: str) -> bool:
     )
 
 
+def _doc_router_implies_comparison(query_text: str) -> bool:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+
+    explicit_compare = re.search(
+        r"\b("
+        r"difference|differences|different|differentiate|distinguish|"
+        r"compare|compared|comparison|contrast|versus|vs\.?|"
+        r"similar|similarities|same|better|worse"
+        r")\b",
+        q,
+    )
+
+    relational_intent = re.search(
+        r"\b("
+        r"relationship|relation|relate|related|connect|connected|connection|"
+        r"affect|affects|influence|influences|impact|impacts|"
+        r"use|uses|using|apply|applies|applied|"
+        r"role|benefit|help|helps|depend|depends|work together|fit"
+        r")\b",
+        q,
+    )
+
+    multi_entity_shape = (
+        bool(re.search(r"\bbetween\b.+\band\b", q))
+        or bool(re.search(r"\b.+\band\b.+", q))
+        or bool(re.search(r"\b.+\bwith\b.+", q))
+        or bool(re.search(r"\b.+\bto\b.+", q))
+    )
+
+    return bool(explicit_compare or (relational_intent and multi_entity_shape))
+
+
 def _doc_router_query_is_ambiguous(query_text: str, concepts: List[str], query_tokens: List[str], explicit_multi: bool) -> bool:
     if explicit_multi:
         return False
@@ -3460,6 +5313,7 @@ def _route_multi_document_evidence(query_text: str, doc_dicts: List[Dict[str, An
     safe_docs = _filter_doc_dicts_to_active_sources(doc_dicts or [])
     concepts, query_tokens = _extract_doc_router_query_concepts(query_text)
     explicit_multi = _doc_router_explicit_multi_source_request(query_text)
+    comparison_intent = _doc_router_implies_comparison(query_text)
 
     groups: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
     source_display: Dict[str, str] = {}
@@ -3539,27 +5393,114 @@ def _route_multi_document_evidence(query_text: str, doc_dicts: List[Dict[str, An
         second_query_cov = float(second.get("query_coverage") or 0.0)
         top_router = float(top.get("router_score") or 0.0)
         second_router = float(second.get("router_score") or 0.0)
+        top_concept_hits = set(top.get("concept_hits") or [])
+        second_concept_hits = set(second.get("concept_hits") or [])
+        top_token_hits = set(top.get("token_hits") or [])
+        second_token_hits = set(second.get("token_hits") or [])
+
+        def _concept_source_score(row: Dict[str, Any], concept: str) -> float:
+            source_label = " ".join([
+                str(row.get("source") or ""),
+                str(row.get("display_source") or ""),
+            ]).lower()
+            label_bonus = 3.0 if _doc_router_concept_hit(concept, source_label) else 0.0
+            return (
+                label_bonus
+                + (0.35 * float(row.get("top_score") or 0.0))
+                + (0.75 * float(row.get("query_coverage") or 0.0))
+                + (0.75 * float(row.get("concept_coverage") or 0.0))
+                + (0.15 / (1.0 + float(row.get("top_rank") or 999)))
+            )
 
         concept_best_sources: Dict[str, str] = {}
         for concept in concepts:
             concept_candidates = [row for row in stats if concept in set(row.get("concept_hits") or [])]
             if concept_candidates:
+                concept_candidates = sorted(
+                    concept_candidates,
+                    key=lambda row: _concept_source_score(row, concept),
+                    reverse=True,
+                )
                 concept_best_sources[concept] = str(concept_candidates[0].get("source"))
         union_concept_coverage = float(len(concept_best_sources)) / max(1.0, float(len(concepts))) if concepts else 0.0
         best_sources_for_concepts = list(dict.fromkeys(concept_best_sources.values()))
+        second_has_meaningful_evidence = bool(
+            second_router > 0.0
+            and (
+                second_cov >= max(0.34, min(0.75, top_cov * 0.70))
+                or second_query_cov >= max(0.40, min(0.70, top_query_cov * 0.70))
+                or bool(second_concept_hits)
+            )
+        )
+        sources_overlap_query = bool(
+            (top_concept_hits & second_concept_hits)
+            or (top_token_hits & second_token_hits)
+            or (second_cov >= 0.50)
+            or (second_query_cov >= 0.50)
+        )
+        combined_top_two_concept_coverage = (
+            float(len(top_concept_hits | second_concept_hits)) / max(1.0, float(len(concepts)))
+            if concepts else 0.0
+        )
+        close_second_source = bool(
+            top_router > 0.0
+            and second_router >= (top_router * 0.82)
+            and second_has_meaningful_evidence
+            and sources_overlap_query
+        )
+        single_concept_competing_sources = bool(
+            close_second_source
+            and not explicit_multi
+            and not comparison_intent
+            and len(concepts or []) <= 1
+            and len(query_tokens or []) <= 2
+            and top_cov >= 0.50
+            and second_cov >= 0.50
+        )
+        comparison_sources_are_strong = bool(
+            comparison_intent
+            and not ambiguous
+            and len(stats) >= 2
+            and second_has_meaningful_evidence
+            and (
+                (
+                    len(best_sources_for_concepts) >= 2
+                    and union_concept_coverage >= 0.75
+                    and top_cov > 0.0
+                    and second_cov > 0.0
+                )
+                or (
+                    combined_top_two_concept_coverage >= 0.75
+                    and top_cov > 0.0
+                    and second_cov > 0.0
+                )
+                or (
+                    close_second_source
+                    and top_query_cov >= 0.34
+                    and second_query_cov >= 0.34
+                )
+            )
+        )
 
-        if explicit_multi:
-            selected_sources = [str(row.get("source")) for row in stats[: min(3, len(stats))]]
+        if comparison_sources_are_strong:
+            if len(best_sources_for_concepts) >= 2 and union_concept_coverage >= 0.75:
+                selected_sources = best_sources_for_concepts[:3]
+            else:
+                selected_sources = [str(row.get("source")) for row in stats[:2]]
             mode = "multi_source_synthesis" if len(selected_sources) > 1 else "single_source"
-            reason = "query explicitly asks to combine evidence across sources"
+            reason = "comparison query has two strong active sources with query evidence"
+        elif comparison_intent and len(stats) >= 2:
+            selected_sources = [str(row.get("source")) for row in stats[:2]]
+            mode = "clarification"
+            reason = "comparison query lacks two strong grounded source matches"
+        elif explicit_multi:
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "multi-source request is not a grounded comparison; preserving strongest single-source evidence"
         elif ambiguous and (top_cov <= 0.75 or abs(top_router - second_router) < 1.25) and (second_cov > 0.0 or second_query_cov > 0.0):
             selected_sources = [str(row.get("source")) for row in stats[: min(3, len(stats))]]
             mode = "clarification"
             reason = "ambiguous query with multiple plausible active sources"
-        elif len(best_sources_for_concepts) >= 2 and union_concept_coverage >= 0.75 and union_concept_coverage > (top_cov + 0.20):
-            selected_sources = best_sources_for_concepts[:3]
-            mode = "multi_source_synthesis"
-            reason = "different sources cover different query concepts"
         elif top_cov >= 0.75 and (top_cov - second_cov >= 0.34 or top_router >= (second_router * 1.25) or second_query_cov < 0.25):
             selected_sources = [str(top.get("source"))]
             mode = "single_source"
@@ -3568,10 +5509,18 @@ def _route_multi_document_evidence(query_text: str, doc_dicts: List[Dict[str, An
             selected_sources = [str(top.get("source"))]
             mode = "single_source"
             reason = "one source has the strongest query coverage"
-        elif second_cov > 0.0 and top_cov < 0.75 and union_concept_coverage > top_cov:
+        elif single_concept_competing_sources:
             selected_sources = [str(row.get("source")) for row in stats[:2]]
-            mode = "multi_source_synthesis"
-            reason = "combined source coverage is stronger than the top source alone"
+            mode = "clarification"
+            reason = "single-concept query has multiple close active sources"
+        elif close_second_source:
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "close second source found, but query is not a comparison"
+        elif second_cov > 0.0 and top_cov < 0.75 and union_concept_coverage > top_cov:
+            selected_sources = [str(top.get("source"))]
+            mode = "single_source"
+            reason = "multiple sources cover concepts, but query is not a comparison"
         else:
             selected_sources = [str(top.get("source"))]
             mode = "single_source"
@@ -3654,6 +5603,23 @@ _ARABIC_OPENER_PHRASE = _ARABIC_OPENER_PHRASES[0]  # backward-compat alias
 _arabic_opener_pcm: bytes = b""           # default PCM (first phrase)
 _arabic_opener_pool: dict[str, bytes] = {}  # phrase text → raw PCM bytes
 _arabic_opener_counter: int = 0            # round-robin index across queries
+
+
+def _normalize_language_mode(value: Any) -> str:
+    """Return the explicit manual language mode used by UI and WS control messages."""
+    language = str(value or "en").strip().lower()
+    if language in ("en", "ar"):
+        return language
+    logger.warning("[LANGUAGE MODE] invalid language value, defaulted to en | value=%r", value)
+    return "en"
+
+
+def _arabic_multilingual_model_on_disk() -> bool:
+    """Return True if faster-whisper-small exists in direct-folder or HF-cache form."""
+    if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
+        return True
+    _hf_snaps = _MULTILINGUAL_MODEL_PATH.parent / "models--Systran--faster-whisper-small" / "snapshots"
+    return _hf_snaps.exists() and any(_hf_snaps.iterdir())
 
 import chromadb
 from sentence_transformers import SentenceTransformer
@@ -4093,7 +6059,7 @@ async def startup_event():
             whisper_model_multilingual = WhisperModel(str(_ml_resolved), **_ml_kwargs)
             logger.info(f"✓ Multilingual faster-whisper loaded (Arabic STT ready, device={_ml_device}, compute={_ml_compute})")
         except Exception as _ml_e:
-            logger.warning(f"Multilingual model found but failed to load: {_ml_e} — Arabic STT will use English model as fallback")
+            logger.warning(f"Multilingual model found but failed to load: {_ml_e} — Arabic STT unavailable")
     else:
         logger.info(f"Multilingual faster-whisper not found at {_MULTILINGUAL_MODEL_PATH} — Arabic STT download available via /arabic/download")
 
@@ -4927,23 +6893,30 @@ def _translation_cache_put(ar_text: str, en_text: str) -> None:
 
 import re as _re_mod
 
-# Brand names / technical terms acceptable in Latin script inside Arabic text
-_ALLOWED_LATIN_BRANDS = frozenset([
-    "amazon", "assistify", "fba", "fbm", "prime", "kindle",
-    "alexa", "aws", "echo", "fire", "ring",
-    # Amazon-specific terms that should stay in English
-    "badge", "seller", "asin", "sku", "buy", "box",
-    "a+", "b2b", "api", "mws", "sp-api",
-])
+# Latin tokens inside Arabic text are kept only when they look like generic
+# acronyms or product/code identifiers. No brand or domain whitelist.
+_ALLOWED_LATIN_BRANDS = frozenset()
+
+
+def _allow_latin_token_in_arabic_text(token: str) -> bool:
+    stripped = str(token or "").strip(".,!?;:()\"'،؟؛")
+    if not stripped:
+        return False
+    if stripped.lower() in _ALLOWED_LATIN_BRANDS:
+        return True
+    if re.fullmatch(r"[A-Z]{2,8}", stripped):
+        return True
+    if any(ch.isdigit() for ch in stripped) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.-]{1,15}", stripped):
+        return True
+    return False
 
 
 def _sanitize_arabic_text(text: str) -> str:
-    """Strip English words from Arabic text, keeping brand names and numbers.
+    """Strip English words from Arabic text, keeping numbers and generic codes.
 
     Prevents the TTS engine from trying to pronounce stray English words
-    (e.g. "ت cost أقل") that the LLM sometimes leaks.  Brand names like
-    'Amazon' are kept.  Purely-English responses are returned as-is (the
-    caller handles that case separately).
+    (e.g. "ت cost أقل") that the LLM sometimes leaks. Purely-English responses
+    are returned as-is (the caller handles that case separately).
     """
     # Strip CJK characters FIRST — before the Arabic-check early return.
     # A chunk that is entirely Chinese (no Arabic at all) must be emptied here;
@@ -4980,8 +6953,8 @@ def _sanitize_arabic_text(text: str) -> str:
         if stripped.replace('.', '').replace(',', '').isdigit():
             cleaned.append(tok)
             continue
-        # Keep if it's an allowed brand name
-        if stripped.lower() in _ALLOWED_LATIN_BRANDS:
+        # Keep if it's a generic acronym/code-like token.
+        if _allow_latin_token_in_arabic_text(stripped):
             cleaned.append(tok)
             continue
         # Drop English word
@@ -5016,6 +6989,133 @@ def _sanitize_arabic_text(text: str) -> str:
     # Collapse any double-spaces left by stripping
     result = _re_mod.sub(r'  +', ' ', result).strip()
     return result if result else text  # fallback to original if everything was stripped
+
+
+def _language_letter_counts(text: str) -> tuple[int, int]:
+    latin_letters = sum(1 for char in str(text or "") if ("a" <= char.lower() <= "z"))
+    arabic_letters = sum(1 for char in str(text or "") if "\u0600" <= char <= "\u06FF")
+    return latin_letters, arabic_letters
+
+
+def _is_mostly_english_text(text: str) -> bool:
+    latin_letters, arabic_letters = _language_letter_counts(text)
+    if latin_letters < 3:
+        return False
+    if arabic_letters == 0:
+        return True
+    total_letters = max(1, latin_letters + arabic_letters)
+    return latin_letters >= max(12, int(arabic_letters * 1.35)) and (latin_letters / total_letters) >= 0.45
+
+
+def _has_latin_script_contamination(text: str) -> bool:
+    latin_letters, arabic_letters = _language_letter_counts(text)
+    if latin_letters < 2:
+        return False
+    if arabic_letters == 0:
+        return latin_letters >= 3
+    return bool(_re_mod.search(r"[A-Za-z]{2,}", str(text or "")))
+
+
+def _is_arabic_alpha(char: str) -> bool:
+    return (
+        "\u0600" <= char <= "\u06FF"
+        or "\u0750" <= char <= "\u077F"
+        or "\u08A0" <= char <= "\u08FF"
+        or "\uFB50" <= char <= "\uFDFF"
+        or "\uFE70" <= char <= "\uFEFF"
+    )
+
+
+def _has_non_arabic_letter_contamination(text: str) -> bool:
+    candidate = str(text or "")
+    if not _has_arabic_chars(candidate):
+        return False
+    return any(char.isalpha() and not _is_arabic_alpha(char) for char in candidate)
+
+
+def _needs_arabic_language_rewrite(text: str) -> bool:
+    return (
+        _is_mostly_english_text(text)
+        or _has_latin_script_contamination(text)
+        or _has_non_arabic_letter_contamination(text)
+    )
+
+
+async def _translate_to_arabic_external_fallback(text: str) -> str | None:
+    """Last-resort generic translator for clean Arabic text when the local LLM emits mixed scripts."""
+    try:
+        from deep_translator import GoogleTranslator  # type: ignore
+
+        def _translate() -> str:
+            return GoogleTranslator(source="en", target="ar").translate(str(text or ""))
+
+        translated = await asyncio.wait_for(asyncio.to_thread(_translate), timeout=12.0)
+    except Exception as exc:
+        logger.warning("[ARABIC TRANSLATION FALLBACK] provider=deep_translator success=False error=%s", exc)
+        return None
+
+    translated = str(translated or "").strip().strip('"\'`')
+    if translated and _has_arabic_chars(translated) and not _needs_arabic_language_rewrite(translated):
+        logger.info("[ARABIC TRANSLATION FALLBACK] provider=deep_translator success=True")
+        return _sanitize_arabic_text(translated)
+
+    logger.warning("[ARABIC TRANSLATION FALLBACK] provider=deep_translator success=False reason=not_clean_arabic")
+    return None
+
+
+async def _ensure_arabic_answer_language(answer_text: str, *, reason_context: str = "unknown") -> tuple[str, bool, str]:
+    """Convert final grounded text to Arabic for Arabic mode without changing fallback."""
+    answer = str(answer_text or "").strip()
+    if not answer:
+        logger.info("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", False, f"{reason_context}:empty")
+        return answer, False, "empty"
+    if answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        logger.info("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", False, f"{reason_context}:strict_fallback")
+        return RAG_NO_MATCH_RESPONSE, False, "strict_fallback"
+    needs_rewrite = _needs_arabic_language_rewrite(answer)
+    if not needs_rewrite:
+        logger.info("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", False, f"{reason_context}:already_arabic")
+        return _sanitize_arabic_text(answer), False, "already_arabic"
+
+    try:
+        translated = await asyncio.wait_for(translate_with_llm(answer, "en", "ar"), timeout=25.0)
+    except Exception as exc:
+        logger.warning("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s error=%s", False, f"{reason_context}:translation_error", exc)
+        return answer, False, "translation_error"
+
+    translated = str(translated or "").strip().strip('"\'`')
+    if translated.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        logger.info("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", False, f"{reason_context}:translated_strict_fallback")
+        return RAG_NO_MATCH_RESPONSE, False, "translated_strict_fallback"
+    if _has_arabic_chars(translated) and not _needs_arabic_language_rewrite(translated):
+        translated = _sanitize_arabic_text(translated)
+        logger.info("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", True, f"{reason_context}:translated_from_english")
+        return translated, True, "translated_from_english"
+
+    logger.warning("[ARABIC ANSWER LANGUAGE] converted=%s reason=%s", False, f"{reason_context}:translation_not_clean_arabic")
+    return answer, False, "translation_not_clean_arabic"
+
+
+async def _guard_arabic_tts_text(text: str, *, reason_context: str = "unknown") -> str | None:
+    """Ensure Arabic Piper never receives non-Arabic or Latin-contaminated text except strict fallback."""
+    candidate = str(text or "").strip()
+    if not candidate:
+        logger.info("[ARABIC TTS GUARD] passed=%s reason=%s", False, f"{reason_context}:empty")
+        return None
+    if candidate.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        logger.info("[ARABIC TTS GUARD] passed=%s reason=%s", True, f"{reason_context}:strict_fallback")
+        return RAG_NO_MATCH_RESPONSE
+    if not _needs_arabic_language_rewrite(candidate):
+        logger.info("[ARABIC TTS GUARD] passed=%s reason=%s", True, f"{reason_context}:arabic_clean")
+        return candidate
+
+    converted, did_convert, convert_reason = await _ensure_arabic_answer_language(candidate, reason_context=f"tts_guard:{reason_context}")
+    if converted and not _needs_arabic_language_rewrite(converted):
+        logger.info("[ARABIC TTS GUARD] passed=%s reason=%s", True, f"{reason_context}:converted={did_convert}:{convert_reason}")
+        return converted
+
+    logger.warning("[ARABIC TTS GUARD] passed=%s reason=%s", False, f"{reason_context}:non_arabic_after_conversion")
+    return None
 
 
 # ---- Arabic digit-to-word table for TTS normalization ----
@@ -5135,29 +7235,38 @@ async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> s
                 data = await resp.json()
                 translated = data["message"]["content"].strip()
 
-                # Validate: if translating to Arabic, result must contain Arabic characters
+                # Validate: if translating to Arabic, result must be clean Arabic text.
                 if target_lang == "ar":
                     arabic_char_count = sum(1 for c in translated if '\u0600' <= c <= '\u06FF')
-                    if arabic_char_count < 3:
+                    if arabic_char_count < 3 or _needs_arabic_language_rewrite(translated):
                         logger.warning(
-                            f"Translation to Arabic failed — model returned non-Arabic output: '{translated[:80]}'. Retrying with stricter prompt."
+                            f"Translation to Arabic failed — model returned non-Arabic or mixed-script output: '{translated[:80]}'. Retrying with stricter prompt."
                         )
                         # Retry once with an even simpler, purely Arabic system prompt
                         retry_messages = [
-                            {"role": "system", "content": "مترجم. أجب بالعربية فقط. لا إنجليزية إطلاقاً."},
-                            {"role": "user", "content": f"ترجم: {text}"},
+                            {"role": "system", "content": "مترجم ومحرر عربي. أجب بالعربية الفصحى فقط. لا تستخدم أي أحرف لاتينية أو كلمات إنجليزية إطلاقاً."},
+                            {"role": "user", "content": f"حوّل النص التالي إلى عربية واضحة فقط، واستبدل كل الكلمات الإنجليزية بمقابلها العربي:\n\n{text}"},
                         ]
                         payload["messages"] = retry_messages
+                        payload["options"] = {"num_ctx": 3072, "num_gpu": 99, "temperature": 0.0, "num_predict": 512}
                         logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=translate_retry", LLM_URL, OLLAMA_MODEL)
+                        retry_clean = False
                         async with _sess.post(LLM_URL, json=payload, timeout=timeout) as resp2:
                             logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp2.status, LLM_URL)
                             if resp2.status == 200:
                                 data2 = await resp2.json()
                                 translated = data2["message"]["content"].strip()
                                 arabic_char_count2 = sum(1 for c in translated if '\u0600' <= c <= '\u06FF')
-                                if arabic_char_count2 < 3:
-                                    logger.warning(f"Arabic translation retry also failed. Falling back to original.")
-                                    return text
+                                if arabic_char_count2 < 3 or _needs_arabic_language_rewrite(translated):
+                                    logger.warning("Arabic translation retry also failed clean-Arabic validation.")
+                                else:
+                                    retry_clean = True
+                        if not retry_clean:
+                            external_translation = await _translate_to_arabic_external_fallback(text)
+                            if external_translation:
+                                return external_translation
+                            logger.warning("Arabic translation fallback failed. Falling back to original.")
+                            return text
 
                 logger.info(f"Translation ({src}→{tgt}): '{text[:60]}' → '{translated[:60]}'")
                 return translated
@@ -5236,6 +7345,9 @@ def _select_list_context_docs(query_text: str, docs: list[dict], max_docs: int =
         return []
 
     q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    precision_profile = _list_precision_profile(query_text)
+    hard_filter_active = _is_ms_symbolic_precision_profile(precision_profile)
+    precision_keyword = (precision_profile or {}).get("keyword") or "list"
     stop = {
         "what", "which", "who", "when", "where", "why", "how", "the", "this", "that", "these", "those",
         "is", "are", "was", "were", "be", "to", "of", "in", "on", "for", "and", "or", "with", "from",
@@ -5262,10 +7374,41 @@ def _select_list_context_docs(query_text: str, docs: list[dict], max_docs: int =
         return (0.75 * bullet_lines) + (0.45 * short_lines) + (0.35 * repeated_sep_lines) + (0.35 * comma_lists) + (0.20 * title_lines) - paragraph_penalty
 
     scored: list[tuple[float, dict]] = []
+    precision_kept = 0
+    precision_dropped = 0
+    hard_rejected_chunks: list[dict[str, str]] = []
     for idx, d in enumerate(scan_docs):
         txt_raw = str((d or {}).get("page_content") or (d or {}).get("text") or "")
         if not txt_raw.strip():
             continue
+        if precision_profile:
+            keep_doc, precision_reason, precision_signals = _list_precision_doc_keep(precision_profile, d)
+            if not keep_doc:
+                precision_dropped += 1
+                try:
+                    md_drop = dict((d or {}).get("metadata") or {})
+                    if hard_filter_active:
+                        hard_rejected_chunks.append({"chunk": _doc_chunk_label(d), "reason": precision_reason})
+                        logger.info(
+                            "[LIST HARD FILTER] rejected_reason=%s query=%r keyword=%s chunk=%s selected=False signals=%s",
+                            precision_reason,
+                            str(query_text or "")[:160],
+                            precision_keyword,
+                            _doc_chunk_label(d),
+                            precision_signals,
+                        )
+                    logger.info(
+                        "[LIST PRECISION DROP] query=%r keyword=%s chunk=%s reason=%s signals=%s",
+                        str(query_text or "")[:160],
+                        precision_keyword,
+                        md_drop.get("chunk_index"),
+                        precision_reason,
+                        precision_signals,
+                    )
+                except Exception:
+                    pass
+                continue
+            precision_kept += 1
         txt = txt_raw.lower()
         md = dict((d or {}).get("metadata") or {})
         heading_blob = " ".join(str(md.get(k) or "") for k in ("heading", "section", "title", "chapter", "role")).lower()
@@ -5278,9 +7421,37 @@ def _select_list_context_docs(query_text: str, docs: list[dict], max_docs: int =
             score -= 0.20
         scored.append((score, d))
 
+    if precision_profile:
+        logger.info(
+            "[LIST PRECISION] query=%r keyword=%s kept=%d dropped=%d",
+            str(query_text or "")[:160],
+            precision_keyword,
+            precision_kept,
+            precision_dropped,
+        )
+
     if scored:
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [x[1] for x in scored[: max(1, int(max_docs or 4))]]
+        selected = [x[1] for x in scored[: max(1, int(max_docs or 4))]]
+        if hard_filter_active:
+            logger.info(
+                "[LIST HARD FILTER] selected_chunks=%s rejected_chunks=%s query=%r keyword=%s",
+                [_doc_chunk_label(d) for d in selected],
+                hard_rejected_chunks,
+                str(query_text or "")[:160],
+                precision_keyword,
+            )
+        return selected
+
+    if precision_profile:
+        if hard_filter_active:
+            logger.info(
+                "[LIST HARD FILTER] selected_chunks=[] rejected_chunks=%s query=%r keyword=%s",
+                hard_rejected_chunks,
+                str(query_text or "")[:160],
+                precision_keyword,
+            )
+        return []
 
     return list(scan_docs[: max(1, int(max_docs or 4))])
 
@@ -5437,6 +7608,8 @@ def _resolve_grounded_answer_route(query_text: str) -> str:
         return "generic"
     if _detect_fact_query_type(query_text):
         return "fact"
+    if _doc_router_implies_comparison(query_text):
+        return "generic"
     if _is_targeted_list_question(q) or re.match(r"^\s*(?:what|which)\s+are\b", q):
         return "list"
     if q.startswith(("what is", "define", "who is", "who was", "who introduced", "meaning of")):
@@ -5902,11 +8075,18 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
             pass
 
     q_norm = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    precision_profile = _list_precision_profile(query_text)
 
     def _list_relevance_ok(shaped_text: str, support_docs: list[dict]) -> bool:
         lines = [re.sub(r"^\s*[-•*]\s+", "", ln).strip() for ln in str(shaped_text or "").splitlines() if re.match(r"^\s*[-•*]\s+", ln)]
         if len(lines) < 2:
             return False
+        if precision_profile:
+            if _is_ms_symbolic_precision_profile(precision_profile):
+                if not _list_hard_validation_ok(query_text, shaped_text, precision_profile, support_docs):
+                    return False
+            elif not _list_precision_count_ok(query_text, shaped_text, precision_profile):
+                return False
 
         query_terms = [
             t for t in re.findall(r"[a-z0-9]{3,}", q_norm)
@@ -5965,6 +8145,14 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
         return True
 
     selected_docs = _select_list_context_docs(query_text, docs, max_docs=min(5, len(docs)), scan_limit=min(12, len(docs)))
+    if precision_profile and not selected_docs:
+        logger.info(
+            "[LIST PRECISION] query=%r keyword=%s kept=0 dropped=%d result=no_candidate_docs",
+            str(query_text or "")[:160],
+            precision_profile.get("keyword") or "list",
+            min(12, len(docs)),
+        )
+        return None
     candidate_docs = selected_docs or docs
 
     # MP-C6: prefer chunks whose body contains a structural subsection heading
@@ -5985,6 +8173,32 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
         for d in candidate_docs
         if str((d or {}).get("page_content") or (d or {}).get("text") or "").strip()
     )
+
+    if _is_ms_symbolic_precision_profile(precision_profile):
+        for d in candidate_docs[:8]:
+            dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
+            if not dtxt.strip():
+                continue
+            for extractor_name, raw_candidate in (
+                ("context", _extract_list_from_context(query_text, dtxt, max_candidate_blocks=3)),
+                ("simple", _extract_simple_list_from_docs([d], query_text=query_text)),
+            ):
+                shaped = _sanitize_list_answer_text(query_text, str(raw_candidate or ""))
+                if shaped and _list_relevance_ok(shaped, [d]):
+                    logger.info(
+                        "[LIST HARD FILTER] selected_chunk=%s extractor=%s query=%r accepted=True",
+                        _doc_chunk_label(d),
+                        extractor_name,
+                        str(query_text or "")[:160],
+                    )
+                    return shaped
+                if shaped:
+                    logger.info(
+                        "[LIST HARD FILTER] selected_chunk=%s extractor=%s query=%r accepted=False",
+                        _doc_chunk_label(d),
+                        extractor_name,
+                        str(query_text or "")[:160],
+                    )
 
     if _is_structure_query(query_text):
         logger.info("[STRUCTURE QUERY DETECTED] query=%s", str(query_text or "")[:160])
@@ -6116,9 +8330,10 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
             return shaped
 
     # Final list fallback: explicitly retry top 3-5 docs before returning None.
-    max_try = min(5, len(docs))
+    fallback_base_docs = candidate_docs if precision_profile else docs
+    max_try = min(5, len(fallback_base_docs))
     for top_n in range(3, max_try + 1):
-        local_docs = docs[:top_n]
+        local_docs = fallback_base_docs[:top_n]
         local_ctx = "\n\n".join(
             str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
             for d in local_docs
@@ -6134,7 +8349,8 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
     # Last fallback for category/area-type list queries: parse inline enumerations.
     if re.search(r"\b(?:area|areas|branch|branches|type|types|field|fields|category|categories|school|schools)\b", q_norm):
         parsed_items: list[str] = []
-        for d in docs[:5]:
+        inline_base_docs = candidate_docs if precision_profile else docs
+        for d in inline_base_docs[:5]:
             dtxt = str((d or {}).get("page_content") or (d or {}).get("text") or (d or {}).get("content") or "")
             if not dtxt.strip():
                 continue
@@ -6163,7 +8379,7 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
 
         if parsed_items:
             shaped = _sanitize_list_answer_text(query_text, "\n".join(f"- {x}" for x in parsed_items))
-            if shaped and _list_relevance_ok(shaped, docs[:5]):
+            if shaped and _list_relevance_ok(shaped, inline_base_docs[:5]):
                 return shaped
 
     return None
@@ -7262,11 +9478,22 @@ def _is_valid_definition_sentence(sentence: str, entity: str) -> bool:
 
 
 def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str:
+    if _doc_router_implies_comparison(query):
+        return _polish_final_answer_presentation(query, _cleanup_final_answer_text(str(answer or "").strip()))
+
+    q_for_layout = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    if (
+        _is_targeted_list_question(q_for_layout)
+        or re.match(r"^\s*(?:what|which)\s+are\b", q_for_layout)
+        or re.match(r"^\s*(?:list|name|give|mention|identify|enumerate)\b", q_for_layout)
+    ):
+        return _polish_final_answer_presentation(query, _cleanup_final_answer_text(str(answer or "").strip()))
+
     ans = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(answer or "").strip()))
     is_explain_mode = _is_ws_explain_query_mode(query)
     is_definition_mode = _is_ws_definition_query_mode(query)
     if not (is_explain_mode or is_definition_mode):
-        return ans
+        return _polish_final_answer_presentation(query, ans)
 
     not_found = "Not found in the document."
     has_entity, entity = _extract_entity_from_definition_query(query)
@@ -7842,7 +10069,404 @@ def _best_term_explanation_from_docs(term: str, docs: list[dict]) -> tuple[str, 
     return best[1], best[2]
 
 
+def _compare_answer_from_docs_strict(query: str, docs: list[dict]) -> str | None:
+    left, right = _compare_terms_from_query(query)
+    if not left or not right:
+        return None
+
+    query_low = re.sub(r"\s+", " ", str(query or "").strip().lower())
+    relation_query = bool(re.search(r"\b(?:relationship|relation|relat(?:e|es|ed)|connect(?:ion|ed)?)\b", query_low))
+
+    logger.info("[COMPARE ENTITIES] left=%s right=%s source=query", left, right)
+    logger.info("[SYNTHESIS MODE] active=True entities=(%s,%s)", left, right)
+
+    def _entity_tokens(entity: str) -> list[str]:
+        return [
+            token
+            for token in re.findall(r"[a-z0-9]{3,}", str(entity or "").lower())
+            if token not in {"the", "and", "of", "for", "with", "from"}
+        ]
+
+    def _has_entity_phrase(text_value: str, entity: str) -> bool:
+        entity_phrase = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+        if not entity_phrase:
+            return False
+        return bool(re.search(rf"\b{re.escape(entity_phrase)}\b", str(text_value or "").lower()))
+
+    def _token_hits(text_value: str, tokens: list[str]) -> int:
+        low_text = str(text_value or "").lower()
+        return sum(1 for token in tokens if re.search(rf"\b{re.escape(token)}\b", low_text))
+
+    def _doc_source_label(doc: dict | None) -> str:
+        metadata = dict((doc or {}).get("metadata") or {}) if isinstance(doc, dict) else {}
+        source = (
+            metadata.get("display_source")
+            or metadata.get("source_file")
+            or metadata.get("source")
+            or metadata.get("file_name")
+            or metadata.get("filename")
+            or "unknown"
+        )
+        page = metadata.get("page") or metadata.get("page_number")
+        chunk = metadata.get("chunk_index") or metadata.get("chunk_id")
+        pieces = [str(source)]
+        if page not in (None, ""):
+            pieces.append(f"p={page}")
+        if chunk not in (None, ""):
+            pieces.append(f"chunk={chunk}")
+        return " ".join(pieces)
+
+    def _dedupe_compare_docs(source_docs: list[dict]) -> list[dict]:
+        output: list[dict] = []
+        seen: set[str] = set()
+        for source_doc in source_docs or []:
+            text_value = str(
+                (source_doc or {}).get("page_content")
+                or (source_doc or {}).get("text")
+                or (source_doc or {}).get("content")
+                or ""
+            )
+            fingerprint = re.sub(r"\s+", " ", text_value).strip().lower()[:500]
+            if not fingerprint or fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            output.append(source_doc)
+        return output
+
+    def _score_entity_doc(doc: dict, entity: str, other_entity: str) -> float:
+        text_value = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+        entity_token_list = _entity_tokens(entity)
+        other_token_list = _entity_tokens(other_entity)
+        if not text_value.strip() or not entity_token_list:
+            return -1000.0
+        score = 0.0
+        entity_hits = _token_hits(text_value, entity_token_list)
+        other_hits = _token_hits(text_value, other_token_list)
+        if _has_entity_phrase(text_value, entity):
+            score += 4.0
+        if entity_token_list:
+            score += 2.4 * (entity_hits / max(1, len(entity_token_list)))
+        if _doc_has_explanation_for_entity(text_value, entity):
+            score += 4.0
+        try:
+            if _chunk_entity_dominant_topic(text_value, entity):
+                score += 1.5
+        except Exception:
+            pass
+        try:
+            if _is_wrong_concept_definition_chunk(text_value, entity):
+                score -= 8.0
+        except Exception:
+            pass
+        if other_hits > entity_hits and not _has_entity_phrase(text_value, entity):
+            score -= 3.0
+        return score
+
+    def _prepare_entity_compare_docs(entity: str, other_entity: str) -> list[dict]:
+        definition_query = f"what is {entity}"
+        retrieved_raw = _search_fast_definition_minimal(definition_query)
+        if not retrieved_raw:
+            retrieved_raw = _search_fast_minimal(definition_query, top_k=6)
+        retrieved_docs = _prepare_rag_doc_dicts_shared(retrieved_raw or [], definition_query)
+
+        entity_token_list = _entity_tokens(entity)
+        candidate_docs: list[dict] = []
+        for candidate_doc in (docs or [])[:8]:
+            candidate_text = str(
+                (candidate_doc or {}).get("page_content")
+                or (candidate_doc or {}).get("text")
+                or (candidate_doc or {}).get("content")
+                or ""
+            )
+            if _has_entity_phrase(candidate_text, entity) or _token_hits(candidate_text, entity_token_list) >= max(1, min(2, len(entity_token_list))):
+                candidate_docs.append(candidate_doc)
+
+        combined_docs = _dedupe_compare_docs(retrieved_docs + _prepare_rag_doc_dicts_shared(candidate_docs, definition_query))
+        filtered_docs = _apply_concept_filter_to_docs(combined_docs, entity)
+        guarded_docs = _enforce_definition_doc_contamination_guard(filtered_docs, entity)
+        ranked_docs = sorted(
+            guarded_docs or [],
+            key=lambda compare_doc: _score_entity_doc(compare_doc, entity, other_entity),
+            reverse=True,
+        )
+        best_doc = ranked_docs[0] if ranked_docs else None
+        best_score = _score_entity_doc(best_doc, entity, other_entity) if best_doc else -1000.0
+        accepted = bool(best_doc and best_score >= 2.0)
+        reason = "entity_supported" if accepted else ("no_docs" if not ranked_docs else "weak_entity_support")
+        logger.info(
+            "[COMPARE ENTITY RETRIEVAL] entity=%s docs=%d top_source=%s accepted=%s reason=%s",
+            entity,
+            len(ranked_docs or []),
+            _doc_source_label(best_doc),
+            accepted,
+            reason,
+        )
+        return ranked_docs[:6] if accepted else []
+
+    def _sentence_alignment_reason(sentence: str, entity: str, other_entity: str) -> tuple[bool, str, float]:
+        cleaned_sentence = re.sub(r"\s+", " ", str(sentence or "").strip())
+        normalized_sentence = cleaned_sentence.lower()
+        entity_token_list = _entity_tokens(entity)
+        other_token_list = _entity_tokens(other_entity)
+        if not cleaned_sentence:
+            return False, "empty_sentence", -1000.0
+        if len(re.findall(r"[a-z0-9]+", normalized_sentence)) < 5:
+            return False, "too_short", -1000.0
+        if len(re.findall(r"[a-z0-9]+", normalized_sentence)) > 48:
+            return False, "too_long", -1000.0
+        if _is_definition_boilerplate_sentence(cleaned_sentence):
+            return False, "boilerplate", -1000.0
+        if re.search(r"(?:copyright|virtual\s+university|\b[a-z]{2,5}\s*\d{3}\b)", cleaned_sentence, flags=re.IGNORECASE):
+            return False, "ocr_or_header_noise", -1000.0
+        other_phrase = re.sub(r"\s+", " ", str(other_entity or "").strip().lower())
+        if other_phrase and re.match(
+            rf"^\s*(?:the\s+)?{re.escape(other_phrase)}\b\s+(?:is|are|was|were|refers\s+to|means|can\s+be\s+defined\s+as|is\s+defined\s+as)\b",
+            normalized_sentence,
+        ):
+            return False, "other_entity_subject", -1000.0
+        try:
+            if defines_other_concept(normalized_sentence, entity):
+                return False, "defines_other_concept", -1000.0
+        except Exception:
+            pass
+
+        entity_hits = _token_hits(normalized_sentence, entity_token_list)
+        other_hits = _token_hits(normalized_sentence, other_token_list)
+        required_hits = max(1, min(2, len(entity_token_list)))
+        if entity_hits < required_hits and not _has_entity_phrase(normalized_sentence, entity):
+            return False, "entity_missing", -1000.0
+        unique_tokens = [token for token in entity_token_list if token not in set(other_token_list)]
+        if unique_tokens and not any(re.search(rf"\b{re.escape(token)}\b", normalized_sentence) for token in unique_tokens):
+            return False, "unique_entity_token_missing", -1000.0
+        if other_hits > entity_hits and not _has_entity_phrase(normalized_sentence, entity):
+            return False, "dominated_by_other_entity", -1000.0
+        has_core_explanation = bool(
+            re.search(
+                r"\b(?:is|are|was|were|refers\s+to|defined\s+as|means|involves|focuses\s+on|concerned\s+with|consists\s+of|includes|emphasizes|characterized\s+by|forms\s+an\s+association|associates)\b",
+                normalized_sentence,
+            )
+        )
+        if not has_core_explanation:
+            return False, "no_core_explanation_signal", -1000.0
+
+        score = float(entity_hits) + (3.0 if _has_entity_phrase(normalized_sentence, entity) else 0.0)
+        score += 2.0 if has_core_explanation else 0.0
+        entity_phrase = re.sub(r"\s+", " ", str(entity or "").strip().lower())
+        if entity_phrase and re.match(rf"^\s*(?:the\s+)?{re.escape(entity_phrase)}\b", normalized_sentence):
+            score += 2.0
+        if re.match(r"^\s*(?:it|this|these|they)\b", normalized_sentence):
+            score -= 1.5
+        return True, "aligned", score
+
+    def _extract_aligned_entity_sentence(entity: str, other_entity: str, entity_docs: list[dict]) -> tuple[str | None, dict | None, str]:
+        best: tuple[float, str, dict, str] | None = None
+        last_reason = "no_candidate_sentences"
+        for entity_doc in (entity_docs or [])[:6]:
+            doc_text = str((entity_doc or {}).get("page_content") or (entity_doc or {}).get("text") or (entity_doc or {}).get("content") or "")
+            if not doc_text.strip():
+                continue
+            for raw_sentence in _split_text_into_sentences(doc_text)[:18]:
+                sentence = _clean_definition_like_sentence(raw_sentence)
+                accepted, reason, score = _sentence_alignment_reason(sentence, entity, other_entity)
+                last_reason = reason
+                if not accepted:
+                    continue
+                if best is None or score > best[0]:
+                    best = (score, re.sub(r"\s+", " ", sentence).strip(), entity_doc, reason)
+        if best is not None:
+            logger.info("[COMPARE ALIGNMENT] entity=%s accepted=%s reason=%s", entity, True, best[3])
+            return best[1], best[2], best[3]
+
+        rescue_sentence, rescue_meta = _best_term_explanation_from_docs(entity, entity_docs)
+        if rescue_sentence:
+            accepted, reason, _score = _sentence_alignment_reason(rescue_sentence, entity, other_entity)
+            if accepted:
+                logger.info("[COMPARE ALIGNMENT] entity=%s accepted=%s reason=%s", entity, True, "rescue_aligned")
+                return re.sub(r"\s+", " ", str(rescue_sentence)).strip(), {"metadata": rescue_meta or {}}, "rescue_aligned"
+            last_reason = reason
+        logger.info("[COMPARE ALIGNMENT] entity=%s accepted=%s reason=%s", entity, False, last_reason)
+        return None, None, last_reason
+
+    def _display_entity(entity: str) -> str:
+        return " ".join(part.upper() if part.isupper() else part.capitalize() for part in str(entity or "").split())
+
+    def _ensure_sentence_period(sentence: str) -> str:
+        value = re.sub(r"[\ufffd\u2026\u00a6\u20ac\u00a2\u00a7\u00a4]+", "", str(sentence or ""))
+        value = re.sub(r"\s+", " ", value.strip()).rstrip(" ,;:-")
+        if value and not re.search(r"[.!?]$", value):
+            value += "."
+        return value
+
+    synthesis_fallback = "The documents define them separately and do not provide enough information for a direct comparison."
+
+    def _synthesis_content_tokens(text_value: str) -> set[str]:
+        stop_words = {
+            "about", "after", "also", "although", "and", "another", "any", "are", "because", "been", "being",
+            "between", "both", "but", "can", "could", "defined", "does", "each", "for", "from", "had", "has",
+            "have", "into", "its", "may", "more", "most", "not", "only", "other", "over", "same", "some", "such",
+            "that", "the", "their", "them", "then", "there", "these", "they", "this", "those", "through", "under",
+            "was", "were", "what", "when", "where", "which", "while", "with", "would",
+        }
+        return {
+            token
+            for token in re.findall(r"[a-z0-9]{4,}", str(text_value or "").lower())
+            if token not in stop_words
+        }
+
+    def _synthesis_clause(sentence: str) -> str:
+        clause = _ensure_sentence_period(sentence)
+        clause = re.sub(r"[\r\n]+", " ", clause)
+        clause = re.sub(r"\s+", " ", clause).strip().rstrip(".!?")
+        return clause.strip(" ,;:-")
+
+    def _side_is_clearly_defined(entity: str, other_entity: str, sentence: str) -> tuple[bool, str]:
+        accepted, reason, _score = _sentence_alignment_reason(sentence, entity, other_entity)
+        if not accepted:
+            return False, reason
+        normalized_sentence = re.sub(r"\s+", " ", str(sentence or "").strip().lower())
+        if not re.search(
+            r"\b(?:is|are|was|were|refers\s+to|defined\s+as|means|involves|focuses\s+on|concerned\s+with|consists\s+of|includes|emphasizes|characterized\s+by|forms\s+an\s+association|associates)\b",
+            normalized_sentence,
+        ):
+            return False, "not_clearly_defined"
+        if len(_synthesis_content_tokens(normalized_sentence)) < 3:
+            return False, "too_little_content"
+        return True, "ok"
+
+    def _synthesis_sentence_passes_guard(synthesis_sentence: str, left_evidence: str, right_evidence: str) -> tuple[bool, str]:
+        synthesis_text = re.sub(r"\s+", " ", str(synthesis_sentence or "").strip())
+        if not synthesis_text:
+            return False, "empty_synthesis"
+        if len(re.findall(r"[a-z0-9]+", synthesis_text.lower())) > 90:
+            return False, "synthesis_too_long"
+        sentence_count = len([part for part in re.split(r"(?<=[.!?])\s+", synthesis_text) if part.strip()])
+        if sentence_count > 1:
+            return False, "multiple_synthesis_sentences"
+
+        evidence_tokens = _synthesis_content_tokens(f"{left_evidence} {right_evidence} {left} {right}")
+        synthesis_tokens = _synthesis_content_tokens(synthesis_text)
+        allowed_bridge_tokens = {"while"}
+        unsupported_tokens = sorted(token for token in synthesis_tokens if token not in evidence_tokens and token not in allowed_bridge_tokens)
+        if unsupported_tokens:
+            return False, "unsupported_tokens=" + ",".join(unsupported_tokens[:6])
+
+        inferred_relation_tokens = {
+            "causes", "caused", "therefore", "depends", "results", "resulting", "leads", "leading",
+            "supports", "opposes", "proves", "creates", "requires",
+        }
+        unsupported_relations = sorted(token for token in inferred_relation_tokens if token in synthesis_tokens and token not in evidence_tokens)
+        if unsupported_relations:
+            return False, "unsupported_relation=" + ",".join(unsupported_relations[:4])
+        return True, "grounded_join_of_side_evidence"
+
+    def _build_grounded_synthesis_sentence(left_evidence: str, right_evidence: str) -> tuple[str | None, str]:
+        left_clear, left_clear_reason = _side_is_clearly_defined(left, right, left_evidence)
+        right_clear, right_clear_reason = _side_is_clearly_defined(right, left, right_evidence)
+        if not left_clear or not right_clear:
+            return None, f"side_not_clearly_defined left={left_clear_reason} right={right_clear_reason}"
+
+        left_clause = _synthesis_clause(left_evidence)
+        right_clause = _synthesis_clause(right_evidence)
+        if not left_clause or not right_clause:
+            return None, "empty_side_clause"
+        if left_clause.lower() == right_clause.lower():
+            return None, "identical_side_clause"
+        synthesis_sentence = f"{left_clause}, while {right_clause}."
+        guard_passed, guard_reason = _synthesis_sentence_passes_guard(synthesis_sentence, left_evidence, right_evidence)
+        if not guard_passed:
+            return None, guard_reason
+        return synthesis_sentence, guard_reason
+
+    def _direct_difference_sentence(all_docs: list[dict]) -> str:
+        left_tokens = _entity_tokens(left)
+        right_tokens = _entity_tokens(right)
+        compare_marker_re = re.compile(r"\b(?:different|difference|differs?|whereas|while|unlike|compared\s+with|compared\s+to|contrast|contrasts)\b", re.IGNORECASE)
+        for compare_doc in _dedupe_compare_docs(all_docs or [])[:12]:
+            compare_text = str((compare_doc or {}).get("page_content") or (compare_doc or {}).get("text") or (compare_doc or {}).get("content") or "")
+            for raw_sentence in _split_text_into_sentences(compare_text)[:20]:
+                sentence = _ensure_sentence_period(_clean_definition_like_sentence(raw_sentence))
+                sentence_low = sentence.lower()
+                if not compare_marker_re.search(sentence_low):
+                    continue
+                if _token_hits(sentence_low, left_tokens) >= max(1, min(2, len(left_tokens))) and _token_hits(sentence_low, right_tokens) >= max(1, min(2, len(right_tokens))):
+                    if len(sentence) <= 240:
+                        return sentence
+        return "The documents define them separately, but do not provide a direct comparison."
+
+    def _compare_output_passes_contamination_guard(answer_text: str) -> tuple[bool, str]:
+        lines = [line.strip() for line in str(answer_text or "").splitlines() if line.strip()]
+        if len(lines) < 3:
+            return False, "missing_compare_lines"
+        side_pairs = [(left, right), (right, left)]
+        for entity, other_entity in side_pairs:
+            label = _display_entity(entity)
+            matching_lines = [line for line in lines if line.lower().startswith(label.lower() + ":")]
+            if not matching_lines:
+                return False, f"missing_label_{label}"
+            content = matching_lines[0].split(":", 1)[1].strip().lower()
+            other_phrase = re.sub(r"\s+", " ", str(other_entity or "").strip().lower())
+            if other_phrase and re.match(
+                rf"^(?:the\s+)?{re.escape(other_phrase)}\b\s+(?:is|are|was|were|refers\s+to|means|can\s+be\s+defined\s+as|is\s+defined\s+as)\b",
+                content,
+            ):
+                return False, f"{label}_line_starts_with_other_entity"
+        left_line = next((line for line in lines if line.lower().startswith(_display_entity(left).lower() + ":")), "")
+        right_line = next((line for line in lines if line.lower().startswith(_display_entity(right).lower() + ":")), "")
+        if left_line and right_line and left_line.split(":", 1)[-1].strip().lower() == right_line.split(":", 1)[-1].strip().lower():
+            return False, "identical_side_evidence"
+        return True, "ok"
+
+    left_docs = _prepare_entity_compare_docs(left, right)
+    right_docs = _prepare_entity_compare_docs(right, left)
+    if not left_docs or not right_docs:
+        logger.info("[COMPARE CONTAMINATION GUARD] passed=%s reason=%s", False, "missing_entity_grounding")
+        return RAG_NO_MATCH_RESPONSE
+
+    left_sentence, _left_doc, left_reason = _extract_aligned_entity_sentence(left, right, left_docs)
+    right_sentence, _right_doc, right_reason = _extract_aligned_entity_sentence(right, left, right_docs)
+    if not left_sentence or not right_sentence:
+        logger.info(
+            "[COMPARE CONTAMINATION GUARD] passed=%s reason=%s",
+            False,
+            f"alignment_failed left={left_reason} right={right_reason}",
+        )
+        return RAG_NO_MATCH_RESPONSE
+    if left_sentence.lower() == right_sentence.lower():
+        logger.info("[COMPARE CONTAMINATION GUARD] passed=%s reason=%s", False, "identical_side_evidence")
+        return RAG_NO_MATCH_RESPONSE
+
+    left_sentence = _ensure_sentence_period(left_sentence)
+    right_sentence = _ensure_sentence_period(right_sentence)
+    logger.info("[SYNTHESIS BUILD] using grounded evidence only")
+    synthesis_sentence, synthesis_reason = _build_grounded_synthesis_sentence(left_sentence, right_sentence)
+    synthesis_passed = bool(synthesis_sentence)
+    logger.info("[SYNTHESIS GUARD] passed=%s reason=%s", synthesis_passed, synthesis_reason)
+    if relation_query and synthesis_sentence:
+        logger.info("[COMPARE FINAL ANSWER] %s", synthesis_sentence[:280])
+        return synthesis_sentence
+
+    synthesis_output = synthesis_sentence if synthesis_sentence else synthesis_fallback
+    answer = "\n".join(
+        [
+            f"{_display_entity(left)}: {left_sentence}",
+            f"{_display_entity(right)}: {right_sentence}",
+            synthesis_output,
+        ]
+    )
+    answer = "\n".join(re.sub(r"[ \t]+", " ", line).strip() for line in answer.splitlines() if line.strip())
+    passed, reason = _compare_output_passes_contamination_guard(answer)
+    logger.info("[COMPARE CONTAMINATION GUARD] passed=%s reason=%s", passed, reason)
+    if not passed:
+        return RAG_NO_MATCH_RESPONSE
+    logger.info("[COMPARE FINAL ANSWER] %s", answer[:280].replace("\n", " | "))
+    return answer
+
+
 def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
+    strict_compare_answer = _compare_answer_from_docs_strict(query, docs)
+    if strict_compare_answer is not None:
+        return strict_compare_answer
+
     left, right = _compare_terms_from_query(query)
     if not left or not right:
         return None
@@ -8045,10 +10669,18 @@ def _compare_answer_from_docs(query: str, docs: list[dict]) -> str | None:
     if left_sent and right_sent and left_sent.lower() == right_sent.lower():
         return None
 
-    left_sent = left_sent[:220].rstrip(" ,;:-")
-    right_sent = right_sent[:220].rstrip(" ,;:-")
-    answer = f"{left.title()}: {left_sent}\n{right.title()}: {right_sent}"
-    answer = re.sub(r"\s*[•\-]\s*", " ", answer)
+    left_sent = left_sent[:220].rstrip(" ,;:-.!?")
+    right_sent = right_sent[:220].rstrip(" ,;:-.!?")
+    left_clause = left_sent.rstrip(" .!?;:-")
+    right_clause = right_sent.rstrip(" .!?;:-")
+    synthesis_sentence = f"{left_clause}, while {right_clause}."
+    answer = "\n".join(
+        [
+            f"{left.title()}: {left_clause}.",
+            f"{right.title()}: {right_clause}.",
+            synthesis_sentence,
+        ]
+    )
     answer = re.sub(r"[ \t]+", " ", answer).strip()
     if len(answer) > 500:
         answer = answer[:500].rstrip(" ,;:-") + "."
@@ -13571,15 +16203,11 @@ def _retrieval_context_is_reliable(query_text: str, retrieved_docs: list[dict]) 
 
 
 
-# Arabic STT initial prompt — primes the Whisper decoder with domain-relevant
-# vocabulary so it prefers "أبيع" (sell) over "أبي" (daddy), "يجب" over "أجب", etc.
+# Arabic STT initial prompt — generic transcription guidance for Arabic questions.
 _ARABIC_STT_INITIAL_PROMPT = (
-    "لماذا يجب أن أبيع على أمازون؟ "
-    "ما هو البيع على أمازون؟ "
-    "كيف أبدأ البيع؟ "
-    "ما الذي يمكنني بيعه في متجر أمازون؟ "
-    "ما هي رسوم البيع على أمازون؟ "
-    "كيف أسجل كبائع على أمازون؟"
+    "هذا تسجيل لسؤال عربي واضح لمساعد يعتمد على مستندات المستخدم. "
+    "قد يتضمن السؤال عبارات عامة مثل: ما هو، ما هي، اشرح، عرّف، قارن، اذكر، ما الفرق. "
+    "اكتب الكلام العربي كما قيل دون إضافة إجابة أو معلومات من خارج التسجيل."
 )
 
 
@@ -13662,20 +16290,24 @@ def _clean_ocr_artifacts(text: str) -> str:
     for suffix in merged_noise_suffixes:
         text = re.sub(fr'\b([A-Za-z]{{3,}})({re.escape(suffix)})\b', r'\1 \2', text, flags=re.IGNORECASE)
 
-    # 5. BROKEN TOKENS: Remove isolated noise letters usually seen in mis-spaced names or list headers
+    # 5. OCR TOKEN REPAIR: Generic prefix/suffix repairs for common PDF spacing loss
+    text, _prefix_split_changed = _split_safe_ocr_merged_prefix_words(text)
+    text, _split_merge_changed = _followup_merge_safe_ocr_split_words(text)
+
+    # 6. BROKEN TOKENS: Remove isolated noise letters usually seen in mis-spaced names or list headers
     text = re.sub(r'\b[A-Za-z]\b\s+([A-Z][a-z]+)', r'\1', text)
 
-    # 6. COLLAPSE repeated adjacent phrases (e.g., "the the" or longer repeated spans)
+    # 7. COLLAPSE repeated adjacent phrases (e.g., "the the" or longer repeated spans)
     # Collapse simple word repeats
     text = re.sub(r'\b(\w+)(?:\s+\1){2,}\b', r'\1', text, flags=re.IGNORECASE)
     # Collapse longer repeated substring sequences (two-or-more repeats)
     text = re.sub(r'(\b[\w\s]{8,120}?\b)(?:\s+\1){1,}', r'\1', text, flags=re.IGNORECASE)
 
-    # 7. REPEATED CHARS: Clean duplicated characters or punctuation (OCR artifacts)
+    # 8. REPEATED CHARS: Clean duplicated characters or punctuation (OCR artifacts)
     text = re.sub(r'([.,:;!?])\1+', r'\1', text)
     text = re.sub(r'([a-zA-Z])\1{3,}', r'\1', text)
 
-    # 8. Normalize inner whitespace
+    # 9. Normalize inner whitespace
     text = re.sub(r'\s+', ' ', text)
 
     return text.strip()
@@ -13699,7 +16331,16 @@ def _is_compare_query(query_text: str) -> bool:
     q = (query_text or "").strip().lower()
     if not q:
         return False
-    return ("difference between" in q) or ("compare" in q) or bool(re.search(r"\bvs\.?\b", q))
+    return bool(
+        re.search(r"\b(?:difference|differences|different|distinction)\b", q)
+        or re.search(r"\b(?:compare|compared|comparison|contrast|contrasts)\b", q)
+        or re.search(r"\b(?:differentiate|distinguish)\b", q)
+        or re.search(r"\b(?:relationship|relation)\b.+\bbetween\b.+\band\b", q)
+        or re.search(r"\bhow\s+(?:does|do|is|are)\b.+\brelat(?:e|es|ed)\b.+\b(?:to|with)\b", q)
+        or re.search(r"^\s*(?:what\s+is|define|explain)\s+.+?\s+(?:and|;)\s+(?:what\s+is|define|explain)\s+.+", q)
+        or re.search(r"\b(?:versus|vs\.?)\b", q)
+        or re.search(r"\bbetween\b.+\band\b", q)
+    )
 
 
 def _is_strict_overview_query(query_text: str) -> bool:
@@ -15178,7 +17819,7 @@ def _extract_simple_definition_sentence(query_text: str, docs: list[dict]) -> st
         concept_token_need = max(1, min(2, len(clear_entity_tokens)))
         person_name_re = re.compile(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}\b")
         banned_value_tokens = {
-            "management", "theory", "ideas", "contributors", "classification", "table", "figure", "contents",
+            "theory", "ideas", "contributors", "classification", "table", "figure", "contents",
             "chapter", "unit", "process", "model", "approach", "system", "method", "principles",
         }
 
@@ -15757,6 +18398,8 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 "can", "could", "would", "will", "shall", "may", "might", "must",
             }
             for prefix in glued_prefixes:
+                if prefix == "or" and x[:1].isupper() and x[1:].islower():
+                    continue
                 if low_x.startswith(prefix) and len(x) > len(prefix) + 2:
                     tail = x[len(prefix):]
                     if tail.lower() in glued_suffixes or len(tail) >= 4:
@@ -15771,6 +18414,12 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                 right = parts[i + 1].strip(" ,;:-")
                 if re.fullmatch(r"[A-Za-z]{3,8}", left) and re.fullmatch(r"[A-Za-z]{3,12}", right):
                     combined = left + right
+                    left_low = left.lower()
+                    right_low = right.lower()
+                    if left_low in stopwords or right_low in stopwords:
+                        merged_parts.append(parts[i])
+                        i += 1
+                        continue
                     right_is_suffix_fragment = bool(
                         re.fullmatch(r"(?:ve|ion|ions|al|ally|ity|ities|ing|ed|er|ers|es|s)", right, flags=re.IGNORECASE)
                     )
@@ -17395,7 +20044,7 @@ def _validate_concept_match(query_text: str, items: list[str], family_v2: str = 
 #   "andforemost"            -> "and foremost"       (conjunction + word)
 # Random garbage ("kjsdfhskdf") is NOT split and remains rejectable.
 _OCR_GLUED_FUNCTION_PREFIXES = (
-    "The", "A", "An", "And", "Or", "To", "Of", "For", "In", "On", "At", "By",
+    "The", "A", "An", "And", "To", "Of", "For", "In", "On", "At", "By",
     "With", "From", "Into", "Onto", "Upon", "This", "That", "These", "Those",
     "Many", "Most", "All", "Each", "Every", "Both", "Either", "Neither",
     "Various", "Several", "Other", "Another", "Such", "More", "Less", "Few",
@@ -18216,6 +20865,8 @@ def _is_targeted_list_question(query: str) -> bool:
     q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if not q:
         return False
+    if _is_ms_symbolic_list_query(query):
+        return True
     if re.search(r"\blist\b", q):
         return True
     if re.match(r"^\s*(?:what|which)\s+are\b", q):
@@ -19448,16 +22099,21 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
         (r"\bme\s*mory\b", "memory"),
         (r"\bin\s*dividuals?\b", "individual"),
         (r"\bfor\s*mulas?\b", "formula"),
+        (r"\bwhere\s+by\b", "whereby"),
+        (r"\bwhere\s+as\b", "whereas"),
     ]
     for patt, repl in fixes:
         txt = re.sub(patt, repl, txt, flags=re.IGNORECASE)
+
+    txt, _prefix_repaired = _split_safe_ocr_merged_prefix_words(txt)
+    txt, _split_word_repaired = _followup_merge_safe_ocr_split_words(txt)
 
     txt = re.sub(r"(?:^|\n)\s*[-•*]\s*(?:the|a|an)\s+(?:different|various|following)\s*(?=\n|$)", "", txt, flags=re.IGNORECASE)
     txt = re.sub(r"\s+-\s*(?:the|a|an)\s+(?:different|various|following)\s*$", "", txt, flags=re.IGNORECASE)
 
     glued_prefixes = (
         "these", "those", "this", "that", "the", "and", "or", "to", "of", "for", "with", "by",
-        "from", "in", "on", "at", "into", "within",
+        "from", "on", "at", "into", "within",
     )
     glued_suffixes = {
         "is", "are", "was", "were", "be", "been", "being", "do", "does", "did", "have", "has", "had",
@@ -19478,7 +22134,12 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
         for prefix in glued_prefixes:
             if lowered.startswith(prefix) and len(word) > len(prefix) + 2:
                 tail = word[len(prefix):]
-                if tail.lower() in glued_suffixes or len(tail) >= 4:
+                tail_l = tail.lower().strip(".,:;!?)]}")
+                safe_tail = bool(
+                    tail_l in glued_suffixes
+                    or _OCR_PREFIX_REMAINDER_SUFFIX_RE.search(tail_l)
+                )
+                if safe_tail:
                     split_word = f"{word[:len(prefix)]} {tail}"
                     break
         rebuilt_words.append(split_word or word)
@@ -19488,7 +22149,32 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     txt = re.sub(r"\b([A-Z][a-z]{2,})\s+([A-Z][a-z]{2,})\s+([A-Z][a-z]{2,})\b", r"\1 \2 \3", txt)
     txt = re.sub(r"\s+([,.;:!?])", r"\1", txt)
 
-    parts = [p.strip() for p in re.split(r"(?<=[.!?])\s+", txt) if p.strip()]
+    is_bullet_list_answer = bool(
+        len(re.findall(r"(?m)^\s*(?:[-•*]|\d+[.)])\s+\S", txt)) >= 2
+    )
+    is_labeled_comparison_answer = bool(
+        len(re.findall(r"(?m)^\s*[A-Z][A-Za-z0-9'’\- ]{1,60}:\s+\S", txt)) >= 2
+    )
+
+    if is_bullet_list_answer or is_labeled_comparison_answer:
+        lines: list[str] = []
+        seen_lines: set[str] = set()
+        for line in txt.splitlines():
+            cleaned_line = re.sub(r"[ \t]+", " ", str(line or "")).strip()
+            if not cleaned_line:
+                continue
+            if re.fullmatch(r"SYNTHESIS\s*:", cleaned_line, flags=re.IGNORECASE):
+                continue
+            cleaned_line = re.sub(r"^\s*[-•*]\s+(?=[A-Z][A-Za-z0-9'’\- ]{1,60}:\s+)", "", cleaned_line)
+            key = re.sub(r"[^a-z0-9]+", " ", cleaned_line.lower()).strip()
+            if key and key in seen_lines:
+                continue
+            if key:
+                seen_lines.add(key)
+            lines.append(cleaned_line)
+        txt = "\n".join(lines) if lines else txt
+
+    parts = [] if (is_bullet_list_answer or is_labeled_comparison_answer) else [p.strip() for p in re.split(r"(?<=[.!?])\s+", txt) if p.strip()]
     if parts:
         deduped = []
         seen = set()
@@ -19504,7 +22190,7 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
             and re.search(r"\b(is|refers to|defined as|means)\b", parts[0].lower())
             and not re.match(r"^\s*after\b", parts[0], flags=re.IGNORECASE)
         )
-        if is_definition_like:
+        if is_definition_like and not is_labeled_comparison_answer:
             txt = parts[0]
         else:
             txt = " ".join(parts)
@@ -19512,6 +22198,268 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     txt = re.sub(r"\s{2,}", " ", txt).strip()
     txt = txt.strip('"\'“”‘’')
     return txt
+
+
+def _polish_final_answer_presentation(query_text: str, answer_text: str) -> str:
+    ans = str(answer_text or "").strip()
+    if not ans or ans.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        return RAG_NO_MATCH_RESPONSE if ans.lower() == RAG_NO_MATCH_RESPONSE.lower() else ans
+
+    def _has_arabic_chars_local(value: str) -> bool:
+        return bool(re.search(r"[\u0600-\u06FF]", str(value or "")))
+
+    def _display_dedupe_key(value: str) -> str:
+        raw = str(value or "").lower()
+        if _has_arabic_chars_local(raw):
+            return re.sub(r"[^\w\u0600-\u06FF]+", " ", raw, flags=re.UNICODE).strip()
+        return re.sub(r"[^a-z0-9]+", " ", raw).strip()
+
+    def _is_list_request(query_value: str) -> bool:
+        q_raw = re.sub(r"\s+", " ", str(query_value or "").strip())
+        q = q_raw.lower()
+        if not q:
+            return False
+        return bool(
+            _is_targeted_list_question(q)
+            or re.match(r"^\s*(?:what|which)\s+are\b", q)
+            or re.match(r"^\s*(?:list|name|give|mention|identify|enumerate)\b", q)
+            or re.search(r"(?:ما\s+(?:هي|هو|هم)|اذكر|اكتب|عدد|قائمة|ما\s+ال)", q_raw)
+        )
+
+    compact_item_verb_re = re.compile(
+        r"\b(?:is|are|was|were|be|been|being|has|have|had|include|includes|included|"
+        r"consist|consists|comprise|comprises|means|refers\s+to|focus|focuses|study|studies)\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _compact_list_item(item_value: str) -> bool:
+        s = re.sub(r"\s+", " ", str(item_value or "")).strip(" ,;:-")
+        if not s or len(s) > 80:
+            return False
+        if _has_arabic_chars_local(s):
+            words = re.findall(r"[\u0600-\u06FF]+", s)
+            if not (1 <= len(words) <= 5):
+                return False
+            if re.search(r"(?:^|\s)(?:هو|هي|هم|كان|كانت|يكون|تكون|يعني|تعني|يشير|تشير|يركز|تركز|يشمل|تشمل|يتضمن|تتضمن)(?:\s|$)", s):
+                return False
+            if re.search(r"[;:؛؟!?]|\.\s+", s):
+                return False
+            return True
+        words = re.findall(r"[A-Za-z][A-Za-z\-']*", s)
+        if not (1 <= len(words) <= 6):
+            return False
+        if compact_item_verb_re.search(s):
+            return False
+        if re.search(r"[;:]|\.\s+", s):
+            return False
+        return True
+
+    def _clean_list_item_for_display(item_value: str) -> str:
+        item = re.sub(r"^\s*(?:[-•*]|[\d\u0660-\u0669]+[.)]|[a-z][.)])\s*", "", str(item_value or ""), flags=re.IGNORECASE)
+        item = re.sub(r"\s+", " ", item).strip(" ,;:-،؛")
+        if _has_arabic_chars_local(item):
+            item = re.sub(r"^و(?=[\u0600-\u06FF]{2,}$)", "", item).strip()
+        if _compact_list_item(item):
+            item = item.rstrip(".!?").strip()
+        return item
+
+    def _dedupe_display_items(source_items: list[str]) -> list[str]:
+        seen_items: set[str] = set()
+        final_items: list[str] = []
+        for item in source_items:
+            key = _display_dedupe_key(item)
+            if not key or key in seen_items:
+                continue
+            seen_items.add(key)
+            final_items.append(item)
+        return final_items
+
+    def _split_dash_list(payload: str) -> list[str]:
+        parts = [p.strip() for p in re.split(r"\s+-\s+", str(payload or "")) if p.strip()]
+        if len(parts) < 3:
+            return []
+        parts[0] = re.sub(
+            r"^.*(?:[:]|\b(?:are|include|includes|comprise|comprises|consist\s+of|consists\s+of|namely)\b)\s+",
+            "",
+            parts[0],
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned = [_clean_list_item_for_display(part) for part in parts]
+        cleaned = [item for item in cleaned if item]
+        if len(cleaned) >= 3 and all(_compact_list_item(item) for item in cleaned):
+            seen: set[str] = set()
+            out: list[str] = []
+            for item in cleaned:
+                key = _display_dedupe_key(item)
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                out.append(item)
+            return out
+        return []
+
+    def _strip_list_intro(payload: str) -> str:
+        text_value = re.sub(r"\s+", " ", str(payload or "")).strip()
+        if not text_value:
+            return text_value
+        text_value = re.sub(
+            r"^.*(?:[:：]|\b(?:are|include|includes|included|comprise|comprises|consist\s+of|consists\s+of|namely)\b)\s+",
+            "",
+            text_value,
+            flags=re.IGNORECASE,
+        ).strip()
+        text_value = re.sub(
+            r"^.*(?:[:：]|(?:هي|هم|تشمل|يشمل|تتضمن|يتضمن|تضم|يتكون\s+من|تتكون\s+من|كالتالي))\s+",
+            "",
+            text_value,
+        ).strip()
+        return text_value
+
+    def _split_delimited_list(payload: str) -> list[str]:
+        stripped = _strip_list_intro(payload)
+        parts = [
+            p.strip()
+            for p in re.split(r"\s*(?:[,،؛;]|\s+-\s+|\s*/\s*)\s*", stripped)
+            if p.strip()
+        ]
+        if len(parts) < 3:
+            return []
+        cleaned = [_clean_list_item_for_display(part) for part in parts]
+        cleaned = [item for item in cleaned if item]
+        if len(cleaned) >= 3 and all(_compact_list_item(item) for item in cleaned):
+            return _dedupe_display_items(cleaned)
+        return []
+
+    def _split_compact_inline_list(payload: str) -> list[str]:
+        compact = _strip_list_intro(payload).strip(" .،,;؛")
+        if not compact or re.search(r"[,،؛;:/]|\s+-\s+|[!?؟]", compact):
+            return []
+
+        if _has_arabic_chars_local(compact):
+            if re.search(r"(?:^|\s)(?:هو|هي|هم|كان|كانت|يكون|تكون|يعني|تعني|يشير|تشير|يركز|تركز|يشمل|تشمل|يتضمن|تتضمن)(?:\s|$)", compact):
+                return []
+            tokens = re.findall(r"[\u0600-\u06FF]+", compact)
+            if not (3 <= len(tokens) <= 12):
+                return []
+            if any(token in {"و", "من", "في", "على", "إلى", "الى", "عن"} for token in tokens):
+                return []
+            cleaned = [_clean_list_item_for_display(token) for token in tokens]
+            cleaned = [item for item in cleaned if item]
+            if len(cleaned) >= 3 and all(_compact_list_item(item) for item in cleaned):
+                return _dedupe_display_items(cleaned)
+            return []
+
+        if re.search(r"[^A-Za-z\s.'\-]", compact):
+            return []
+        tokens = re.findall(r"[A-Za-z][A-Za-z\-']*", compact)
+        if not (3 <= len(tokens) <= 12):
+            return []
+        if any(token.lower() in {"and", "or", "of", "the", "in", "to", "for", "with", "by"} for token in tokens):
+            return []
+        cleaned = [_clean_list_item_for_display(token) for token in tokens]
+        cleaned = [item for item in cleaned if item]
+        if len(cleaned) >= 3 and all(_compact_list_item(item) for item in cleaned):
+            return _dedupe_display_items(cleaned)
+        return []
+
+    def _polish_list(ans_value: str) -> str:
+        if not _is_list_request(query_text):
+            return ans_value
+        raw_lines = [line.strip() for line in str(ans_value or "").splitlines() if line.strip()]
+        if not raw_lines:
+            return ans_value
+        items: list[str] = []
+        bullet_or_split_lines = 0
+        for line in raw_lines:
+            bullet_match = re.match(r"^\s*(?:[-•*]|[\d\u0660-\u0669]+[.)]|[a-z][.)])\s+(.+)$", line, flags=re.IGNORECASE)
+            payload = bullet_match.group(1).strip() if bullet_match else line
+            split_items = _split_delimited_list(payload) or _split_compact_inline_list(payload)
+            if split_items:
+                items.extend(split_items)
+                bullet_or_split_lines += 1
+                continue
+            dash_items = _split_dash_list(payload)
+            if dash_items:
+                items.extend(dash_items)
+                bullet_or_split_lines += 1
+                continue
+            if bullet_match:
+                cleaned_item = _clean_list_item_for_display(payload)
+                if cleaned_item:
+                    items.append(cleaned_item)
+                    bullet_or_split_lines += 1
+                continue
+            if line.count(" - ") >= 2:
+                dash_items = _split_dash_list(line)
+                if dash_items:
+                    items.extend(dash_items)
+                    bullet_or_split_lines += 1
+
+        if len(items) >= 2 and bullet_or_split_lines >= 1:
+            final_items = _dedupe_display_items(items)
+            if len(final_items) >= 2:
+                return "\n".join(f"- {item}" for item in final_items)
+        return ans_value
+
+    def _polish_compare(ans_value: str) -> str:
+        english_label_re = re.compile(r"^[A-Z][A-Za-z0-9'’\- ]{1,60}[:：]\s+\S")
+        arabic_label_re = re.compile(r"^[\u0600-\u06FF][\u0600-\u06FF0-9\s'’\-ـ]{1,60}[:：]\s+\S")
+
+        def _is_label_line(line_value: str) -> bool:
+            return bool(english_label_re.match(line_value) or arabic_label_re.match(line_value))
+
+        def _has_difference_label(line_value: str) -> bool:
+            return bool(re.match(r"^\s*(?:Difference|Key difference|الفرق|الاختلاف)\s*[:：]", str(line_value or ""), flags=re.IGNORECASE))
+
+        def _strip_difference_label(line_value: str) -> str:
+            return re.sub(r"^\s*(?:Difference|Key difference|الفرق|الاختلاف)\s*[:：]\s*", "", str(line_value or ""), flags=re.IGNORECASE).strip()
+
+        compare_requested = bool(
+            _is_compare_query(query_text)
+            or re.search(r"\bSYNTHESIS\s*:", ans_value, flags=re.IGNORECASE)
+            or re.search(r"(?:ما\s+الفرق|الفرق\s+بين|قارن|مقارنة|بين\s+.+\s+و)", str(query_text or ""))
+            or len([line for line in str(ans_value or "").splitlines() if _is_label_line(line.strip())]) >= 2
+        )
+        if not compare_requested:
+            return ans_value
+        text_value = re.sub(r"\s*SYNTHESIS\s*:\s*(?:[-•*]\s*)?", "\n", str(ans_value or ""), flags=re.IGNORECASE)
+        label_start = r"(?:[A-Z][A-Za-z0-9'’\- ]{1,60}[:：]\s+\S|[\u0600-\u06FF][\u0600-\u06FF0-9\s'’\-ـ]{1,60}[:：]\s+\S)"
+        text_value = re.sub(r"(?<=[.!?؟。])\s+(?=" + label_start + r")", "\n", text_value)
+        lines: list[str] = []
+        for line in text_value.splitlines():
+            cleaned_line = re.sub(r"[ \t]+", " ", line).strip()
+            if not cleaned_line:
+                continue
+            if re.fullmatch(r"SYNTHESIS\s*:", cleaned_line, flags=re.IGNORECASE):
+                continue
+            if len(lines) >= 2:
+                cleaned_line = re.sub(r"^\s*[-•*]\s+", "", cleaned_line)
+            lines.append(cleaned_line)
+        if len(lines) == 2 and all(_is_label_line(line) for line in lines):
+            tail_match = re.match(
+                r"^(.+?[.!?؟。])\s+(.+(?:\bwhile\b|\bwhereas\b|\bhowever\b|\bbut\b|بينما|في\s+حين|أما).*)$",
+                lines[1],
+                flags=re.IGNORECASE,
+            )
+            if tail_match:
+                lines[1] = tail_match.group(1).strip()
+                lines.append(tail_match.group(2).strip())
+        if len(lines) >= 3 and sum(1 for line in lines[:2] if _is_label_line(line)) >= 2:
+            arabic_answer = _has_arabic_chars_local("\n".join(lines[:3]))
+            difference_label = "الفرق" if arabic_answer else "Difference"
+            third_line = lines[2]
+            if _has_difference_label(third_line):
+                lines[2] = f"{difference_label}: {_strip_difference_label(third_line)}"
+            else:
+                lines[2] = f"{difference_label}: {third_line}"
+            return "\n\n".join(lines[:3])
+        if len(lines) == 1:
+            return lines[0]
+        return "\n\n".join(lines) if lines else ans_value
+
+    ans = _polish_compare(ans)
+    ans = _polish_list(ans)
+    return ans.strip()
 
 
 def _extract_fallback_list(query_text: str, docs: list[dict]) -> str | None:
@@ -19642,6 +22590,7 @@ def _apply_not_found_ux(query: str, answer: str, doc_dicts: List[Dict[str, Any]]
     def _finalize(a: str) -> str:
         raw = str(a or "").strip()
         cleaned = _cleanup_final_answer_text(raw)
+        cleaned = _polish_final_answer_presentation(query, cleaned)
         if cleaned != raw:
             logger.info("[OCR CLEANUP APPLIED] before=%s | after=%s", raw[:180], cleaned[:180])
         return cleaned
@@ -19863,13 +22812,21 @@ def _extract_overview_chapter_compare_answer(query: str, doc_dicts: List[Dict[st
             ):
                 diff_sent = s
                 break
-        if not diff_sent:
-            diff_sent = f"{left_raw.title()} and {right_raw.title()} differ in their main focus and approach."
+        left_line = re.sub(r"\s+", " ", str(left_sent or "")).strip().rstrip(" .!?;:-")
+        right_line = re.sub(r"\s+", " ", str(right_sent or "")).strip().rstrip(" .!?;:-")
+        if diff_sent:
+            comparison_line = re.sub(r"\s+", " ", str(diff_sent or "")).strip()
+            if not re.search(r"[.!?]$", comparison_line):
+                comparison_line = comparison_line.rstrip(" ,;:-") + "."
+        else:
+            comparison_line = f"{left_line}, while {right_line}."
 
-        return (
-            f"- {left_raw.title()} summary: {left_sent}\n"
-            f"- {right_raw.title()} summary: {right_sent}\n"
-            f"- Key difference: {diff_sent}"
+        return "\n".join(
+            [
+                f"{left_raw.title()}: {left_line}.",
+                f"{right_raw.title()}: {right_line}.",
+                comparison_line,
+            ]
         )
 
     doc_scores: List[Tuple[float, Dict[str, Any]]] = []
@@ -20072,21 +23029,58 @@ def _is_biography_sentence(s: str) -> bool:
     return any(x in low for x in [" was ", " is ", " born ", " known as ", " considered ", " introduced "])
 
 
+def _normalize_compare_entity_term(term: str) -> str:
+    value = re.sub(r"\s+", " ", str(term or "").strip().lower())
+    value = value.strip(" .?!,;:'\"")
+    value = re.sub(r"^(?:the|a|an)\s+", "", value)
+    value = re.sub(
+        r"\s+(?:from|in|according\s+to|based\s+on)\s+(?:the\s+)?(?:document|book|text|context|source)\b.*$",
+        "",
+        value,
+    )
+    value = re.sub(r"\s+(?:please|kindly)\s*$", "", value)
+    value = re.sub(r"\s+", " ", value).strip(" .?!,;:'\"")
+    if value in {"it", "this", "that", "these", "those", "they", "them"}:
+        return ""
+    return value
+
+
 def _compare_terms_from_query(query: str) -> Tuple[str, str]:
-    q = (query or "").strip().lower()
-    m = re.search(r"difference\s+between\s+(.+?)\s+and\s+(.+?)(?:\?|$)", q)
-    if not m:
-        m = re.search(r"compare\s+(.+?)\s+and\s+(.+?)(?:\?|$)", q)
-    if not m:
+    q = re.sub(r"\s+", " ", (query or "").strip().lower())
+    patterns = [
+        r"\b(?:difference|differences|distinction)\s+between\s+(.+?)\s+and\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:compare|contrast|differentiate|distinguish)\s+(?:between\s+)?(.+?)\s+(?:and|with|to)\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:relationship|relation)\s+between\s+(.+?)\s+and\s+(.+?)(?:[?.!]|$)",
+        r"\bhow\s+(?:does|do)\s+(.+?)\s+relat(?:e|es)?\s+(?:to|with)\s+(.+?)(?:[?.!]|$)",
+        r"\bhow\s+(?:is|are)\s+(.+?)\s+related\s+(?:to|with)\s+(.+?)(?:[?.!]|$)",
+        r"^\s*(?:what\s+is|define|explain)\s+(.+?)\s+(?:and|;)\s+(?:what\s+is|define|explain)\s+(.+?)(?:[?.!]|$)",
+        r"\bbetween\s+(.+?)\s+and\s+(.+?)(?:[?.!]|$)",
+        r"^(.+?)\s+(?:vs\.?|versus)\s+(.+?)(?:[?.!]|$)",
+        r"\bhow\s+(?:is|are)\s+(.+?)\s+and\s+(.+?)\s+different\b(?:[?.!]|$)",
+        r"\bwhat\s+(?:is|are)\s+the\s+differences?\s+between\s+(.+?)\s+and\s+(.+?)(?:[?.!]|$)",
+    ]
+    match = None
+    for pattern in patterns:
+        match = re.search(pattern, q)
+        if match:
+            break
+    if not match:
         return "", ""
-    left = m.group(1).strip(" .?")
-    right = m.group(2).strip(" .?")
+
+    left = _normalize_compare_entity_term(match.group(1))
+    right = _normalize_compare_entity_term(match.group(2))
+    if not left or not right or left == right:
+        return "", ""
     left_toks = re.findall(r"[a-z0-9]{3,}", left.lower())
     right_toks = re.findall(r"[a-z0-9]{3,}", right.lower())
     if len(left_toks) == 1 and len(right_toks) >= 2:
         common_tail = right_toks[-1]
         if common_tail not in left_toks:
             left = f"{left} {common_tail}"
+    left = _normalize_compare_entity_term(left)
+    right = _normalize_compare_entity_term(right)
+    if not left or not right or left == right:
+        return "", ""
     return left, right
 
 
@@ -20873,10 +23867,24 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
 
     if is_list_mode:
         answer_type = str(dec.get("answer_type") or "")
-        fast_deterministic_mode = bool((not dec.get("used_llm", False)) and answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor", "list_route_deterministic"})
+        fast_deterministic_mode = bool((not dec.get("used_llm", False)) and answer_type in {"list_deterministic_context", "list_fast_simple", "list_extractor", "list_route_deterministic", "list_lexical_rescue"})
         list_support = dict(dec.get("_list_local_support") or {}) if isinstance(dec.get("_list_local_support"), dict) else {}
         if not list_support:
             list_support = _collect_local_window_support(retrieved_docs or [])
+        grounding_docs = list(retrieved_docs or [])
+        if answer_type == "list_lexical_rescue":
+            rescue_window_text = str(list_support.get("single_local_window_text") or "")
+            if rescue_window_text.strip():
+                grounding_docs.insert(0, {"page_content": rescue_window_text, "text": rescue_window_text, "metadata": {"source": "lexical_rescue_window"}})
+        hard_ms_profile = _list_precision_profile(query)
+        if _is_ms_symbolic_precision_profile(hard_ms_profile):
+            hard_shaped = _sanitize_list_answer_text(query, answer) or answer
+            if hard_shaped and _list_hard_validation_ok(query, hard_shaped, hard_ms_profile, grounding_docs):
+                logger.info("[LIST COHERENCE DEBUG] accepted=True reason=hard_ms_validation")
+                dec["answer"] = hard_shaped
+                logger.info("[FINAL ANSWER SOURCE] source_mode=%s answer_type=%s used_llm=%s", dec.get("source_mode"), dec.get("answer_type"), dec.get("used_llm"))
+                _log_final_decision_debug(rejected=False, rejection_reason="")
+                return dec
         list_ok, list_reason, shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(answer), strict_fast=fast_deterministic_mode, local_support=list_support)
         logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok), list_reason)
         if fast_deterministic_mode:
@@ -20976,7 +23984,7 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
             _log_final_decision_debug(rejected=True, rejection_reason="list_query_token_mismatch")
             return dec
 
-        _candidate_docs = list(retrieved_docs or [])
+        _candidate_docs = list(grounding_docs or [])
         _item_token_stop = {"the", "a", "an", "and", "or", "to", "of", "for", "in", "on", "at", "from", "with", "by", "is", "are", "was", "were", "this", "that", "these", "those"}
         _item_tokens: set[str] = set()
         for ln in str(shaped or "").splitlines():
@@ -21132,7 +24140,49 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
 
             logger.info("[LIST NEARBY SECTION ALLOW] enabled=true reason=controlled_nearby_alignment")
 
-        if not str(dec.get("answer_type") or "").startswith("list_route") and not _is_answer_grounded_in_docs(shaped, retrieved_docs or [], query_text=query):
+        def _list_items_grounded_in_docs(shaped_text: str, docs_for_grounding: list[dict]) -> bool:
+            grounding_context = "\n".join(
+                str((doc_for_grounding or {}).get("page_content") or (doc_for_grounding or {}).get("text") or "")
+                for doc_for_grounding in (docs_for_grounding or [])
+            ).lower()
+            if not grounding_context.strip():
+                return False
+            grounding_tokens = {
+                token for token in re.findall(r"[a-z0-9]{3,}", grounding_context)
+                if token not in _item_token_stop
+            }
+            if not grounding_tokens:
+                return False
+            item_rows = [
+                re.sub(r"^\s*(?:[-*•]|\d+[\.)])\s+", "", line).strip()
+                for line in str(shaped_text or "").splitlines()
+                if re.match(r"^\s*(?:[-*•]|\d+[\.)])\s+", str(line or ""))
+            ]
+            if len(item_rows) < 2:
+                return False
+            supported_rows = 0
+            for item_row in item_rows:
+                item_terms = [
+                    token for token in re.findall(r"[a-z0-9]{3,}", item_row.lower())
+                    if token not in _item_token_stop
+                ]
+                if not item_terms:
+                    return False
+                term_hits = sum(1 for token in item_terms if token in grounding_tokens)
+                if term_hits < max(1, math.ceil(len(item_terms) * 0.75)):
+                    return False
+                supported_rows += 1
+            return supported_rows == len(item_rows)
+
+        lexical_item_grounded = bool(
+            str(dec.get("answer_type") or "") == "list_lexical_rescue"
+            and float(list_support.get("primary_phrase_hits", 0.0) or 0.0) >= 0.5
+            and _list_items_grounded_in_docs(shaped, grounding_docs or [])
+        )
+        if lexical_item_grounded:
+            logger.info("[LIST GROUNDING] lexical_rescue_item_support=true")
+
+        if not str(dec.get("answer_type") or "").startswith("list_route") and not lexical_item_grounded and not _is_answer_grounded_in_docs(shaped, grounding_docs or [], query_text=query):
             logger.info("[LIST CANDIDATE REJECTED] reason=ungrounded answer=%s", shaped[:220])
             dec["answer"] = RAG_NO_MATCH_RESPONSE
             dec["used_llm"] = False
@@ -21191,7 +24241,7 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
     return dec
 
 
-def _shared_rag_final_answer_decision(
+def _shared_rag_final_answer_decision( # type: ignore
     query: str,
     doc_dicts: List[Dict[str, Any]],
     llm_text: Optional[str] = None,
@@ -22104,9 +25154,17 @@ def _shared_rag_final_answer_decision(
                 or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
             )
             if not list_mode:
+                if _doc_router_implies_comparison(query):
+                    return True, str(ans_text or "").strip()
                 return True, re.sub(r"\s+", " ", str(ans_text or "")).strip()
             answer_type_local = str(answer_type or "")
             strict_fast = bool((not used_llm) and answer_type_local in {"list_deterministic_context", "list_fast_simple", "list_extractor", "list_route_deterministic"})
+            hard_ms_profile = _list_precision_profile(query)
+            if _is_ms_symbolic_precision_profile(hard_ms_profile):
+                hard_shaped = _sanitize_list_answer_text(query, str(ans_text or "")) or str(ans_text or "")
+                if hard_shaped and _list_hard_validation_ok(query, hard_shaped, hard_ms_profile, routed_docs or doc_dicts or []):
+                    logger.info("[LIST COHERENCE DEBUG] accepted=True reason=hard_ms_validation")
+                    return True, hard_shaped
             list_ok_local, list_reason_local, shaped = _assess_list_coherence(query, _preclean_list_answer_for_assessment(str(ans_text or "")), strict_fast=strict_fast, local_support=list_local_support)
             logger.info("[LIST COHERENCE DEBUG] accepted=%s reason=%s", bool(list_ok_local), list_reason_local)
             if strict_fast:
@@ -22174,6 +25232,8 @@ def _shared_rag_final_answer_decision(
             answer_source_mode = "not_found_guard"
         if ans is not None and cleaned_ans != ans:
             logger.info("[OCR CLEANUP APPLIED] before=%s | after=%s", str(ans)[:180], str(cleaned_ans)[:180])
+        if cleaned_ans is not None:
+            cleaned_ans = _polish_final_answer_presentation(query, str(cleaned_ans or ""))
         rejected = bool(cleaned_ans == RAG_NO_MATCH_RESPONSE)
         rejection_reason = ""
         if rejected:
@@ -22209,6 +25269,17 @@ def _shared_rag_final_answer_decision(
         len(routed_docs or doc_dicts or []),
     )
     route_docs = list(routed_docs or doc_dicts or [])
+    cmp_left_early, cmp_right_early = _compare_terms_from_query(query)
+    if cmp_left_early and cmp_right_early:
+        answer_source_mode = "compare"
+        cmp_answer_early = _compare_answer_from_docs(query, route_docs)
+        if not cmp_answer_early:
+            cmp_answer_early = _extract_overview_chapter_compare_answer(query, route_docs[:5], overview_context)
+            if cmp_answer_early:
+                logger.info("[COMPARE ANSWER] %s", str(cmp_answer_early)[:280])
+        if cmp_answer_early:
+            return _result(cmp_answer_early, used_llm=False, answer_type="compare_explanation_fallback", items_count=0)
+
     if answer_route == "definition":
         route_answer = _extract_definition_route_answer(query, route_docs)
         if route_answer:
@@ -22421,6 +25492,7 @@ def _shared_rag_final_answer_decision(
         }
 
     if answer_route == "list":
+        answer_source_mode = "list"
         # MP-C6: extend the locality "single_local_window_text" with anchored
         # subsection slices from any retrieved chunk whose body contains a
         # heading or caption matching the query focus tokens. Without this,
@@ -22736,8 +25808,42 @@ def _shared_rag_final_answer_decision(
             pass
         route_answer = _extract_list_route_answer(query, route_docs, context_text=list_context, extra_docs=doc_dicts)
         if route_answer:
+            route_ok, route_reason, route_shaped = _assess_list_coherence(
+                query,
+                _preclean_list_answer_for_assessment(route_answer),
+                strict_fast=True,
+                local_support=list_local_support,
+            )
+            hard_ms_profile = _list_precision_profile(query)
+            hard_ms_route_ok = bool(
+                _is_ms_symbolic_precision_profile(hard_ms_profile)
+                and _list_hard_validation_ok(query, route_shaped or route_answer, hard_ms_profile, route_docs or doc_dicts or [])
+            )
+            logger.info("[ANSWER ROUTE LIST GUARD] accepted=%s reason=%s", bool(route_ok), route_reason)
+            if (route_ok and route_shaped) or hard_ms_route_ok:
+                final_route_answer = route_shaped or _sanitize_list_answer_text(query, route_answer) or route_answer
+                if hard_ms_route_ok and not route_ok:
+                    logger.info("[ANSWER ROUTE LIST GUARD] accepted=True reason=hard_ms_validation")
+                logger.info("[ANSWER ROUTE] mode=list deterministic=true answer=%s", final_route_answer[:220])
+                return _result(final_route_answer, used_llm=False, answer_type="list_route_deterministic", items_count=len([ln for ln in str(final_route_answer).splitlines() if ln.strip()]))
+            logger.info("[ANSWER ROUTE] mode=list deterministic_rejected reason=%s", route_reason)
+
+        lexical_route_answer, lexical_route_count, lexical_route_doc, lexical_route_support, lexical_route_reason = _extract_symbolic_list_lexical_rescue_answer(query, route_docs or doc_dicts or [])
+        if lexical_route_answer and lexical_route_doc is not None:
+            routed_docs = [lexical_route_doc]
+            route_docs = [lexical_route_doc]
+            list_context = str((lexical_route_doc or {}).get("page_content") or (lexical_route_doc or {}).get("text") or "")
+            list_local_support = dict(lexical_route_support or {})
+            list_section_confident = True
+            list_debug_selected_chunks = [dict((lexical_route_doc or {}).get("metadata") or {}).get("chunk_index")]
+            list_debug_section_confidences = [round(float((lexical_route_support or {}).get("confidence", 0.0) or 0.0), 3)]
+            logger.info("[LIST WINNER] mode=lexical_rescue_route items=%s", lexical_route_count)
+            return _result(lexical_route_answer, used_llm=False, answer_type="list_lexical_rescue", items_count=lexical_route_count)
+        if route_answer:
             logger.info("[ANSWER ROUTE] mode=list deterministic=true answer=%s", route_answer[:220])
             return _result(route_answer, used_llm=False, answer_type="list_route_deterministic", items_count=len([ln for ln in str(route_answer).splitlines() if ln.strip()]))
+        if lexical_route_reason and lexical_route_reason != "not_symbolic_list_query":
+            logger.info("[ANSWER ROUTE] mode=list lexical_rescue=false reason=%s", lexical_route_reason)
         logger.info("[ANSWER ROUTE] mode=list deterministic=false action=llm_required")
         return {
             "intent": intent,
@@ -22782,6 +25888,14 @@ def _shared_rag_final_answer_decision(
         "source_mode": "generic",
         "_list_local_support": dict(list_local_support or {}),
     }
+
+    """
+    Retired legacy fallback path.
+
+    The routed decision path above always returns before this point. Leaving the
+    old implementation as executable Python caused static analysis to report
+    hundreds of undefined-name diagnostics from unreachable code. Keep it inert
+    until this file is small enough for a deliberate cleanup pass.
 
     if family_v2 == "fact_entity":
         answer_source_mode = "fact"
@@ -23259,6 +26373,10 @@ def _shared_rag_final_answer_decision(
                 return rescue_shaped, rescue_count
             return None, 0
 
+        def _try_symbolic_list_lexical_rescue() -> tuple[str | None, int, dict | None, dict[str, Any]]:
+            rescue_answer, rescue_count, rescued_doc, rescue_support, _rescue_reason = _extract_symbolic_list_lexical_rescue_answer(query, routed_docs or doc_dicts or [])
+            return rescue_answer, rescue_count, rescued_doc, rescue_support
+
         if q_list_local.startswith("what are ") and (not structure_query_mode) and (not _is_targeted_list_question(q_list_local)):
             plural_term = re.sub(r"^what are\s+", "", q_list_local).strip(" .?")
             plural_sentence, _plural_md = _best_term_explanation_from_docs(plural_term, routed_docs or doc_dicts or [])
@@ -23296,6 +26414,16 @@ def _shared_rag_final_answer_decision(
             if single_doc_best and single_doc_count >= 2:
                 logger.info("[LIST WINNER] mode=deterministic_single_doc items=%s", single_doc_count)
                 return _result(single_doc_best, used_llm=False, answer_type="list_deterministic_context", items_count=single_doc_count)
+        lexical_rescue_answer, lexical_rescue_count, lexical_rescue_doc, lexical_rescue_support = _try_symbolic_list_lexical_rescue()
+        if lexical_rescue_answer and lexical_rescue_doc is not None:
+            routed_docs = [lexical_rescue_doc]
+            list_context = str((lexical_rescue_doc or {}).get("page_content") or (lexical_rescue_doc or {}).get("text") or "")
+            list_local_support = dict(lexical_rescue_support or {})
+            list_section_confident = True
+            list_debug_selected_chunks = [dict((lexical_rescue_doc or {}).get("metadata") or {}).get("chunk_index")]
+            list_debug_section_confidences = [round(float((lexical_rescue_support or {}).get("confidence", 0.0) or 0.0), 3)]
+            logger.info("[LIST WINNER] mode=lexical_rescue items=%s", lexical_rescue_count)
+            return _result(lexical_rescue_answer, used_llm=False, answer_type="list_lexical_rescue", items_count=lexical_rescue_count)
         structure_rescue_answer, structure_rescue_count = _try_structure_query_rescue()
         if structure_rescue_answer:
             logger.info("[LIST WINNER] mode=structure_query_rescue items=%s", structure_rescue_count)
@@ -23836,6 +26964,7 @@ def _shared_rag_final_answer_decision(
         "answer_type": "llm",
         "extractor_items_count": len(items),
     }
+    """
 
 
 def _extract_structured_list_from_context(context_chunks: List[str], query_text: str = "") -> Optional[List[str]]:
@@ -24718,6 +27847,19 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
 
     if _is_smalltalk(text):
         return (_smalltalk_response(text), [])
+
+    history_snapshot = list(conversation_history.get(connection_id, []) or [])
+    rewritten_comparison_query = _rewrite_bare_comparison_query_from_history(text, history_snapshot, connection_id)
+    if rewritten_comparison_query and rewritten_comparison_query != text:
+        logger.info(
+            "[COMPARE FOLLOWUP REWRITE] original=%r rewritten=%r",
+            (text or "")[:160],
+            rewritten_comparison_query[:160],
+        )
+        text = rewritten_comparison_query
+    elif _is_bare_comparison_followup_query(text):
+        logger.info("[COMPARE FOLLOWUP REWRITE] skipped_no_grounded_history -> not_found")
+        return (_apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, []), [])
 
     # ---- FOLLOW-UP / EXPLANATION MODE (HTTP path) -----------------------
     # Detect generic clarification intents ("what do you mean?", "explain more",
@@ -26631,11 +29773,15 @@ async def _tts_arabic_response(
     if EFFECTIVE_DISABLE_TTS:
         return None, 0, 0.0
 
+    guarded_text = await _guard_arabic_tts_text(arabic_text, reason_context="_tts_arabic_response")
+    if not guarded_text:
+        return None, 0, 0.0
+
     # Split into ~200-char chunks to respect XTTS token limit
     import re as _re2
     MAX_CHUNK = 200
     # Split on sentence boundaries first, then hard-clip remaining pieces
-    raw_sentences = _re2.split(r'(?<=[.؟!،])\s+', arabic_text.strip())
+    raw_sentences = _re2.split(r'(?<=[.؟!،])\s+', guarded_text.strip())
     tts_sentences = []
     for s in raw_sentences:
         while len(s) > MAX_CHUNK:
@@ -26672,6 +29818,7 @@ async def _tts_arabic_response(
             try:
                 chunk_start = time.perf_counter()
                 await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+                logger.info("[ARABIC TTS] engine=piper language=ar")
                 resp = await _sess.post(
                     f"{XTTS_SERVICE_URL}/synthesize",
                     json={"text": clean, "speaker": XTTS_SPEAKER, "language": "ar"},
@@ -26769,7 +29916,14 @@ async def _tts_single_response(
             await _ws_send_json({"type": "ttsAudioEnd"})
         return
 
-    clean = _preprocess_for_tts(text.strip(), language=language)
+    tts_text = text.strip()
+    if language == "ar":
+        guarded_text = await _guard_arabic_tts_text(tts_text, reason_context="_tts_single_response")
+        if not guarded_text:
+            return
+        tts_text = guarded_text
+
+    clean = _preprocess_for_tts(tts_text, language=language)
     if not clean:
         return
 
@@ -26786,6 +29940,8 @@ async def _tts_single_response(
         if t_meta is not None:
             t_meta.setdefault("xtts_send", chunk_start)
         await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+        if language == "ar":
+            logger.info("[ARABIC TTS] engine=piper language=ar")
         resp = await _tts_sess.post(
             f"{XTTS_SERVICE_URL}/synthesize",
             json={"text": clean, "speaker": XTTS_SPEAKER, "language": language},
@@ -26866,6 +30022,7 @@ async def send_final_response(
     send_chunk: bool = True,
     replace: bool = False,
     extra_payload: Optional[dict] = None,
+    query_text: str = "",
 ) -> None:
     """Send the final WS response and consistently attach TTS when enabled."""
     response_text = str(text or "")
@@ -26878,6 +30035,13 @@ async def send_final_response(
             bool(tts_enabled),
         )
         return
+
+    if arabic_mode or language == "ar":
+        response_text, _converted_to_arabic, _arabic_language_reason = await _ensure_arabic_answer_language(
+            response_text,
+            reason_context=f"send_final_response:{branch}",
+        )
+    response_text = _polish_final_answer_presentation(query_text, response_text)
 
     clean_text = response_text.strip()
     already_triggered = bool(timing.get("xtts_send"))
@@ -27038,13 +30202,19 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     the first sentence is ready, while LLM continues generating more text.
     """
     import time
+    language = _normalize_language_mode(language)
     # ---- DEFENSIVE FOLLOW-UP GUARD (must be FIRST) -----------------------
     # If a follow-up query somehow reached call_llm_streaming despite the
     # WS entrypoint routing, intercept here BEFORE the [FLOW] entering log
     # is emitted, so the log can never falsely indicate that a follow-up
     # entered the heavy RAG path.
     try:
-        if _is_followup_query(text, connection_id):
+        if language == "ar":
+            _ar_standalone, _ar_followup, _ar_reason = _log_arabic_route(text, connection_id)
+            _is_defensive_followup = bool(_ar_followup and not _ar_standalone)
+        else:
+            _is_defensive_followup = _is_followup_query(text, connection_id)
+        if _is_defensive_followup:
             logger.error("🔥 FOLLOWUP ROUTE TRIGGERED (defensive in call_llm_streaming)")
             logger.info("[FOLLOWUP] WS follow-up detected (defensive): '%s'", (text or "")[:80])
             fu_t0 = time.perf_counter()
@@ -27121,6 +30291,34 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     # the WS entrypoint. Do NOT add another follow-up branch here — it
     # would be unreachable code.
 
+    history_snapshot = list(conversation_history.get(connection_id, []) or [])
+    rewritten_comparison_query = _rewrite_bare_comparison_query_from_history(text, history_snapshot, connection_id)
+    if rewritten_comparison_query and rewritten_comparison_query != text:
+        logger.info(
+            "[COMPARE FOLLOWUP REWRITE] original=%r rewritten=%r",
+            (text or "")[:160],
+            rewritten_comparison_query[:160],
+        )
+        text = rewritten_comparison_query
+    elif _is_bare_comparison_followup_query(text):
+        short_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+        logger.info("[COMPARE FOLLOWUP REWRITE] skipped_no_grounded_history -> not_found")
+        try:
+            await send_final_response(
+                connection_id,
+                short_answer,
+                "ar" if language == "ar" else XTTS_LANGUAGE,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=(language == "ar"),
+                t_meta=t_meta,
+                branch="bare_comparison_no_history",
+            )
+        except Exception:
+            pass
+        return
+
     original_query_text = text
     is_generation_query_requested = _is_llm_generation_query(original_query_text)
     is_fact_query_early = _classify_query_family_v2(text) == "fact_entity"
@@ -27145,9 +30343,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     doc_dicts: List[Dict[str, Any]] = []
 
     # ===== ARABIC LANGUAGE HANDLING =====
-    # Auto-detect if caller passed "auto"
-    if language == "auto":
-        language = _detect_language(text)
+    logger.info("[LANGUAGE MODE] selected=%s", language)
 
     arabic_mode = (language == "ar")
     xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
@@ -27260,7 +30456,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 # Off-topic: no relevant docs in the knowledge base → Arabic refusal
                 logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
                 try:
-                    fallback_text = ARABIC_OFF_TOPIC_RESPONSE
+                    fallback_text = RAG_NO_MATCH_RESPONSE
                     await send_final_response(
                         connection_id,
                         fallback_text,
@@ -27390,8 +30586,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         family_v2_guard = _classify_query_family_v2(text)
         if family_v2_guard in {"definition_entity", "list_entity", "toc_structure"}:
             keep_for_structure = True
-        keep_for_manifest = ("manifest image" in ql and "scientific image" in ql)
-        if keep_for_structure or keep_for_manifest:
+        if keep_for_structure:
             logger.info("%s context_reliability_bypass | query='%s'", connection_id, text[:80])
         else:
             # Check for name/entity signals — these deserve a chance even if reliability markers are low
@@ -27414,7 +30609,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             f"{connection_id} RAG strict guard: no sufficiently relevant docs for query='{text[:80]}' "
             f"(threshold={RAG_STRICT_DISTANCE_THRESHOLD:.2f})"
         )
-        fallback_text = ARABIC_OFF_TOPIC_RESPONSE if arabic_mode else _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+        fallback_text = RAG_NO_MATCH_RESPONSE if arabic_mode else _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
         try:
             await send_final_response(
                 connection_id,
@@ -27461,6 +30656,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         if early_identity:
             try:
                 _save_last_answer_state(connection_id, text, early_identity, relevant_docs)
+                _append_conversation_turn(connection_id, text, early_identity)
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS early_identity)")
             try:
@@ -27881,6 +31077,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             try:
                 # Clears any stale prior state because answer is not-found.
                 _save_last_answer_state(connection_id, text, short_answer, doc_dicts if isinstance(doc_dicts, list) else [])
+                _append_conversation_turn(connection_id, text, short_answer)
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS safe fallback)")
             try:
@@ -27906,6 +31103,56 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 None,
                 response_time,
                 len(doc_dicts) if isinstance(doc_dicts, list) else 0,
+                len((text or "").strip()),
+                len(short_answer),
+            )
+            _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
+            return
+
+        compare_left, compare_right = _compare_terms_from_query(text)
+        if compare_left and compare_right and _is_compare_query(text):
+            logger.info(
+                "[COMPARE ROUTE][WS] deterministic_aligned left=%s right=%s router_mode=%s",
+                compare_left,
+                compare_right,
+                doc_router_mode,
+            )
+            short_answer = _compare_answer_from_docs(text, doc_dicts) or RAG_NO_MATCH_RESPONSE
+            if arabic_mode:
+                short_answer, _cmp_ar_converted, _cmp_ar_reason = await _ensure_arabic_answer_language(
+                    short_answer,
+                    reason_context="comparison_aligned",
+                )
+            short_answer = _polish_final_answer_presentation(text, short_answer)
+            try:
+                _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+                _append_conversation_turn(connection_id, text, short_answer)
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (WS compare aligned)")
+            try:
+                await send_final_response(
+                    connection_id,
+                    short_answer,
+                    "ar" if arabic_mode else xtts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=len(doc_dicts),
+                    arabic_mode=arabic_mode,
+                    t_meta=t_meta,
+                    branch="comparison_aligned",
+                    query_text=text,
+                )
+            except Exception:
+                pass
+            response_time = int((time.time() - start_time) * 1000)
+            log_usage(
+                user.get("username", "unknown"),
+                user.get("role", "unknown"),
+                text,
+                "success",
+                None,
+                response_time,
+                len(doc_dicts),
                 len((text or "").strip()),
                 len(short_answer),
             )
@@ -27939,6 +31186,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 try:
                     # On not-found, this clears any stale prior state.
                     _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+                    _append_conversation_turn(connection_id, text, short_answer)
                 except Exception:
                     logger.exception("[FOLLOWUP] save state failed (WS generation insufficient)")
                 try:
@@ -28011,6 +31259,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             short_answer = _format_generation_answer_by_query(text, _cleanup_final_answer_text(short_answer))
             try:
                 _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+                _append_conversation_turn(connection_id, text, short_answer)
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS generation accept)")
             try:
@@ -28043,6 +31292,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
             try:
                 _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+                _append_conversation_turn(connection_id, text, short_answer)
             except Exception:
                 logger.exception("[FOLLOWUP] save state failed (WS pre_simple extractor)")
             try:
@@ -28056,6 +31306,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     arabic_mode=arabic_mode,
                     t_meta=t_meta,
                     branch=str(stream_pre_simple.get("answer_type") or "deterministic_pre_simple"),
+                    query_text=text,
                 )
             except Exception:
                 pass
@@ -28638,6 +31889,8 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 "\nDOC ROUTER MODE: MULTI_SOURCE_SYNTHESIS\n"
                 "- Use only the selected active source documents in the context.\n"
                 "- Combine facts only when each fact is directly supported by the context.\n"
+                "- For comparison questions, compare only source-supported attributes for each requested concept.\n"
+                "- Do not invent unstated contrasts; if a direct contrast is not supported, state only what each selected source supports.\n"
                 "- If a requested part is missing from the selected context, write exactly: Not found in the document.\n"
             )
         elif doc_router_mode == "single_source":
@@ -28861,9 +32114,16 @@ STRICT BEHAVIOR:
         else:
             short_answer = _apply_not_found_ux(text, short_answer, doc_dicts)
         short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
+        if arabic_mode:
+            short_answer, _short_ar_converted, _short_ar_reason = await _ensure_arabic_answer_language(
+                short_answer,
+                reason_context="stream_short_circuit",
+            )
+        short_answer = _polish_final_answer_presentation(text, short_answer)
         _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
         try:
             _save_last_answer_state(connection_id, text, short_answer, doc_dicts)
+            _append_conversation_turn(connection_id, text, short_answer)
         except Exception:
             logger.exception("[FOLLOWUP] save state failed (WS short_circuit_non_llm)")
         try:
@@ -28877,6 +32137,7 @@ STRICT BEHAVIOR:
                 arabic_mode=arabic_mode,
                 t_meta=t_meta,
                 branch=str(stream_pre_decision.get("answer_type") or "stream_short_circuit"),
+                query_text=text,
             )
         except Exception:
             pass
@@ -28914,19 +32175,13 @@ STRICT BEHAVIOR:
             )
         else:
             system_prompt = (
-                "أنت Assistify، مساعد خدمات أمازون. "
+                "أنت Assistify، مساعد إجابة يعتمد على قاعدة معرفة مسترجعة. "
                 "القواعد الصارمة:\n"
-                "1. أجب بالعربية فقط — يُمنع منعاً باتاً استخدام أي كلمة بالإنجليزية أو الصينية أو أي لغة غير العربية.\n"
-                "2. احتفظ بأسماء الخدمات والمنتجات كما هي بالإنجليزية: Amazon, Prime, "
-                "'Prime badge', FBA, FBM, Kindle, Alexa — لا تترجمها أبداً. "
-                "مثلاً: 'شارة Prime' وليس 'التوتر الأزرق'.\n"
-                "3. لا تبدأ إجابتك بـ 'حسناً' أو 'حسنا' أو 'بالتأكيد'. ابدأ بالإجابة مباشرة.\n"
-                "4. أجب في جملة واحدة أو جملتين فقط (أقل من 35 كلمة). "
-                "يُحظر تمامًا استخدام القوائم المرقّمة أو النقطية أو أي ترقيم (1. 2. 3. \u2022 -). "
-                "اكتب فقرة واحدة متصلة. لا تقطع الجملة في المنتصف أبدًا.\n"
-                "5. إجابتك يجب أن تأتي فقط من قاعدة المعرفة (KNOWLEDGE BASE) أدناه. "
-                "ترجم محتوى قاعدة المعرفة إلى العربية بأمانة ودقة حرفية — لا تختلق أو تستبدل أو تضيف أي معلومة غير موجودة في قاعدة المعرفة. "
-                "كل رقم وكل حقيقة يجب أن تأتي من قاعدة المعرفة مباشرة. اترك الأسماء التقنية كما هي بالإنجليزية."
+                "1. أجب بالعربية فقط، ولا تستخدم الإنجليزية إلا للرموز أو الاختصارات التي لا يمكن ترجمتها.\n"
+                "2. استخدم فقط المعلومات الموجودة في سياق قاعدة المعرفة أدناه. لا تضف أي حقيقة من خارج السياق.\n"
+                "3. ترجم الحقائق والقوائم والمقارنات المسترجعة إلى العربية بأمانة مع الحفاظ على المعنى.\n"
+                "4. إذا كان السؤال يطلب قائمة، أجب بقائمة عربية موجزة. وإذا كان يطلب مقارنة، أجب بمقارنة عربية موجزة.\n"
+                "5. إذا لم يدعم السياق الإجابة، اكتب بالضبط: Not found in the document."
                 f"{context_block}"
             )
     else:
@@ -29003,6 +32258,12 @@ STRICT BEHAVIOR:
             else:
                 deterministic_answer = _apply_not_found_ux(text, deterministic_answer, doc_dicts)
             deterministic_answer = _ws_fix_explanation_answer(text, deterministic_answer, doc_dicts)
+        else:
+            deterministic_answer, _det_ar_converted, _det_ar_reason = await _ensure_arabic_answer_language(
+                deterministic_answer,
+                reason_context="deterministic_fast_path",
+            )
+        deterministic_answer = _polish_final_answer_presentation(text, deterministic_answer)
         try:
             _log_answer_mode_markers(text, doc_dicts, deterministic_answer, source_mode="extractor")
             await websocket.send_json({"type": "thinking"})
@@ -29017,6 +32278,7 @@ STRICT BEHAVIOR:
                 t_meta=t_meta,
                 branch=str(deterministic_decision.get("answer_type") or "deterministic_fast_path"),
                 replace=True,
+                query_text=text,
                 extra_payload={
                     "latency": {
                     "first_token_ms": None,
@@ -29494,6 +32756,13 @@ STRICT BEHAVIOR:
                 clean = _preprocess_for_tts(clean, language=xtts_lang)
                 if not clean:
                     continue
+                if xtts_lang == "ar":
+                    guarded_clean = await _guard_arabic_tts_text(clean, reason_context="ws_tts_consumer")
+                    if not guarded_clean:
+                        continue
+                    clean = _preprocess_for_tts(guarded_clean, language=xtts_lang)
+                    if not clean:
+                        continue
 
                 chunk_start = time.perf_counter()
                 if not t_meta.get("xtts_send"):
@@ -29516,6 +32785,8 @@ STRICT BEHAVIOR:
                             f"[TTS QUEUE] ws_consumer acquired_synth_lock "
                             f"wait_ms={int((_t_q_acq - _t_q_wait) * 1000)} text_len={len(clean)}"
                         )
+                        if xtts_lang == "ar":
+                            logger.info("[ARABIC TTS] engine=piper language=ar")
                         resp = await _tts_sess.post(
                             f"{XTTS_SERVICE_URL}/synthesize",
                             json={"text": clean, "speaker": XTTS_SPEAKER, "language": xtts_lang},
@@ -29772,6 +33043,12 @@ STRICT BEHAVIOR:
                 replacement_answer = _smalltalk_response(text)
             else:
                 replacement_answer = _apply_not_found_ux(text, replacement_answer, doc_dicts)
+            if arabic_mode:
+                replacement_answer, _replacement_ar_converted, _replacement_ar_reason = await _ensure_arabic_answer_language(
+                    replacement_answer,
+                    reason_context="stream_post_decision_replacement",
+                )
+            replacement_answer = _polish_final_answer_presentation(text, replacement_answer)
             full_response = replacement_answer
             try:
                 await websocket.send_json({
@@ -29798,6 +33075,12 @@ STRICT BEHAVIOR:
                 full_response = _smalltalk_response(text)
             else:
                 full_response = _apply_not_found_ux(text, full_response.strip(), doc_dicts)
+
+        if arabic_mode and full_response.strip():
+            full_response, _full_ar_converted, _full_ar_reason = await _ensure_arabic_answer_language(
+                full_response.strip(),
+                reason_context="llm_streaming_full_response",
+            )
 
         if full_response.strip():
             # Store original Arabic question in history (not the English translation)
@@ -29932,8 +33215,11 @@ STRICT BEHAVIOR:
 
 
         _final_text = _sanitize_arabic_text(full_response.strip()) if arabic_mode else full_response.strip()
-        if not arabic_mode:
+        if arabic_mode:
+            _final_text = _polish_final_answer_presentation(text, _final_text)
+        else:
             _final_text = _ws_fix_explanation_answer(text, _final_text, doc_dicts)
+            _final_text = _polish_final_answer_presentation(text, _final_text)
         _log_answer_mode_markers(text, doc_dicts, _final_text, source_mode=("llm" if stream_post_decision.get("used_llm", True) else "extractor"))
         try:
             await asyncio.wait_for(send_final_response(
@@ -29947,6 +33233,7 @@ STRICT BEHAVIOR:
                 t_meta=t_meta,
                 branch="llm_streaming_final",
                 send_chunk=False,
+                query_text=text,
                 extra_payload={
                     "latency": {
                     "first_token_ms": round(first_token_ms) if first_token_ms else None,
@@ -30032,6 +33319,7 @@ async def query_rag(data: QueryRequest, request: Request, user=Depends(require_l
         normalized_query_for_output, _ = _normalize_definition_query_before_retrieval(data.text)
         ai_response = _force_clean_definition_sentence(normalized_query_for_output or data.text, ai_response, retrieved_docs)
     ai_response = _cleanup_final_answer_text(ai_response)
+    ai_response = _polish_final_answer_presentation(data.text, ai_response)
     logger.info("[HTTP FINAL ANSWER BEFORE RETURN] %s", str(ai_response or "")[:320])
     return {"answer": ai_response}
 
@@ -30438,24 +33726,73 @@ def _arabic_multilingual_model_ready() -> bool:
     """Return True if a multilingual Whisper model is loaded or on-disk (direct folder or HF cache)."""
     if whisper_model_multilingual is not None:
         return True
-    if _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir()):
-        return True
-    # Also check HF cache format: models--Systran--faster-whisper-small/snapshots/<hash>/
-    _hf_snaps = _MULTILINGUAL_MODEL_PATH.parent / "models--Systran--faster-whisper-small" / "snapshots"
-    return _hf_snaps.exists() and any(_hf_snaps.iterdir())
+    return _arabic_multilingual_model_on_disk()
+
+
+async def _piper_arabic_voice_ready() -> tuple[bool, dict]:
+    """Check that the current TTS service is Piper and has an Arabic voice loaded."""
+    project_root = Path(__file__).resolve().parent.parent
+    ar_voice_path = project_root / "models" / "piper" / "ar" / "voice.onnx"
+    ar_config_path = ar_voice_path.with_suffix(ar_voice_path.suffix + ".json")
+    local_files_ready = ar_voice_path.exists() and ar_config_path.exists()
+    health: dict = {}
+    service_ready = False
+    ar_voice_loaded = False
+
+    if not EFFECTIVE_DISABLE_TTS:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=2)) as session:
+                async with session.get(f"{XTTS_SERVICE_URL}/health") as resp:
+                    if resp.status == 200:
+                        health = await resp.json()
+                        service_ready = (
+                            health.get("status") == "ok"
+                            and health.get("engine") == "piper"
+                            and health.get("ready") is True
+                        )
+                        voices = health.get("voices") or {}
+                        ar_voice_loaded = "ar" in voices
+        except Exception as exc:
+            health = {"error": str(exc)}
+
+    return service_ready and ar_voice_loaded and local_files_ready, {
+        "service_ready": service_ready,
+        "ar_voice_loaded": ar_voice_loaded,
+        "local_files_ready": local_files_ready,
+        "voice_path": str(ar_voice_path),
+        "health": health,
+    }
 
 
 @app.get("/arabic/status")
 async def arabic_status(user=Depends(require_login())):
-    """Return whether the multilingual Whisper model (for Arabic STT) is ready."""
-    model_on_disk = _MULTILINGUAL_MODEL_PATH.exists() and any(_MULTILINGUAL_MODEL_PATH.iterdir())
+    """Return honest readiness for Arabic mode: multilingual STT + Piper Arabic TTS."""
+    model_on_disk = _arabic_multilingual_model_on_disk()
     model_loaded  = whisper_model_multilingual is not None
-    xtts_arabic_ok = xtts_model is not None  # XTTS v2 supports Arabic natively
+    stt_ready = model_on_disk or model_loaded
+    tts_ready, tts_details = await _piper_arabic_voice_ready()
+    missing_components: list[str] = []
+    if not stt_ready:
+        missing_components.append("multilingual_whisper")
+    if not tts_ready:
+        missing_components.append("piper_arabic_voice")
+    arabic_ready = not missing_components
+    logger.info(
+        "[ARABIC STATUS] stt_ready=%s tts_ready=%s missing_components=%s",
+        stt_ready, tts_ready, missing_components,
+    )
     return {
-        "multilingual_model_ready": model_on_disk or model_loaded,
+        "arabic_ready": arabic_ready,
+        "stt_ready": stt_ready,
+        "tts_ready": tts_ready,
+        "tts_engine": "piper",
+        "stt_model": "faster-whisper-small" if stt_ready else None,
+        "missing_components": missing_components,
+        "piper_arabic_voice_ready": tts_ready,
+        "piper_details": tts_details,
+        "multilingual_model_ready": stt_ready,
         "multilingual_model_loaded": model_loaded,
         "multilingual_model_on_disk": model_on_disk,
-        "xtts_arabic_ready": xtts_arabic_ok,
         "download_state": _arabic_download_status.get("state", "idle"),
         "download_message": _arabic_download_status.get("message", ""),
         "model_path": str(_MULTILINGUAL_MODEL_PATH),
@@ -31517,6 +34854,8 @@ async def _xtts_synthesize_full(text: str, speaker: str, language: str, req_id: 
     via _XTTS_INFLIGHT. Caches result via _XTTS_CACHE.
     """
     key = _tts_cache_key(text, language, speaker)
+    if language == "ar":
+        logger.info("[ARABIC TTS] engine=piper language=ar")
 
     cached = await _tts_cache_get(key)
     if cached is not None:
@@ -31722,6 +35061,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
         global _consecutive_gpu_growth, _consecutive_cpu_growth, _sessions_blocked, _sessions_blocked_since
         import time as _time
 
+        lang = _normalize_language_mode(lang)
+
         # ---- Memory-leak gate ----
         if _sessions_blocked:
             current_mem = _get_memory_snapshot()
@@ -31805,11 +35146,15 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         except Exception as e:
                             logger.error(f"Failed to lazy-load Whisper model: {e}")
                     
-                    # Pick the best available model for the language
-                    _model = whisper_model_multilingual if (
-                        lang == "ar" and whisper_model_multilingual is not None
-                    ) else whisper_model
-                    
+                    # Pick the explicit manual model for the selected language.
+                    if lang == "ar":
+                        _model = whisper_model_multilingual
+                        logger.info("[ARABIC STT] model=faster-whisper-small language=ar")
+                        if _model is None:
+                            raise RuntimeError("Arabic STT requires the multilingual Whisper model; English-only fallback is disabled.")
+                    else:
+                        _model = whisper_model
+
                     if _model is None:
                         raise RuntimeError("STT Model could not be loaded or is unavailable.")
 
@@ -31888,11 +35233,28 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     if cancel_evt:
                         cancel_evt.clear()
 
+                    voice_history_snapshot = list(conversation_history.get(conn_id, []) or [])
+                    _ar_voice_standalone = False
+                    _ar_voice_followup = False
+                    if lang == "ar":
+                        _ar_voice_standalone, _ar_voice_followup, _ar_voice_reason = _log_arabic_route(full_text, conn_id)
+                    rewritten_voice_comparison = _rewrite_bare_comparison_query_from_history(full_text, voice_history_snapshot, conn_id)
+                    if rewritten_voice_comparison and rewritten_voice_comparison != full_text:
+                        logger.info(
+                            "[COMPARE FOLLOWUP REWRITE] original=%r rewritten=%r",
+                            (full_text or "")[:160],
+                            rewritten_voice_comparison[:160],
+                        )
+                        full_text = rewritten_voice_comparison
+
                     # ---- FOLLOW-UP ROUTING (voice path) ----
                     # Bypass full RAG retrieval/LLM pipeline for clarification
                     # queries spoken by the user.
                     try:
-                        _fu_check_v = _is_followup_query(full_text, conn_id)
+                        if lang == "ar":
+                            _fu_check_v = bool(_ar_voice_followup and not _ar_voice_standalone)
+                        else:
+                            _fu_check_v = _is_followup_query(full_text, conn_id)
                     except Exception:
                         _fu_check_v = False
                     logger.error("🔥 WS RECEIVED TEXT (voice): %s", full_text)
@@ -32003,7 +35365,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     if not first_audio_arrival and len(audio_buffer) == 0:
                         first_audio_arrival = current_time
 
-                    if EFFECTIVE_DISABLE_WHISPER or whisper_model is None:
+                    selected_stt_model = whisper_model_multilingual if session_language == "ar" else whisper_model
+                    if EFFECTIVE_DISABLE_WHISPER or selected_stt_model is None:
                         if not stt_disabled_notified:
                             stt_disabled_notified = True
                             logger.warning(f"{connection_id} received audio while STT is disabled/unavailable")
@@ -32117,11 +35480,9 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 logger.info(f"{connection_id} User barge-in - LLM generation interrupted")
 
                             elif action == "set_language":
-                                # Frontend informed us of language selection (en/ar/auto)
-                                new_lang = payload.get("language", "en")
-                                if new_lang in ("en", "ar", "auto"):
-                                    session_language = new_lang
-                                    logger.info(f"{connection_id} Language set to: {session_language}")
+                                # Frontend informed us of the manual language selection (en/ar)
+                                session_language = _normalize_language_mode(payload.get("language", "en"))
+                                logger.info("[LANGUAGE MODE] selected=%s", session_language)
                         
                         elif "text" in payload:
                             # Handle typed text queries with streaming
@@ -32142,10 +35503,14 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 )
                                 text = _norm_text
                             # Allow per-message language override; fall back to session setting
-                            msg_lang = payload.get("language", session_language)
-                            if msg_lang in ("en", "ar", "auto"):
-                                session_language = msg_lang  # update session preference
+                            msg_lang = _normalize_language_mode(payload.get("language", session_language))
+                            session_language = msg_lang
+                            logger.info("[LANGUAGE MODE] selected=%s", msg_lang)
                             if text:
+                                _ar_text_standalone = False
+                                _ar_text_followup = False
+                                if msg_lang == "ar":
+                                    _ar_text_standalone, _ar_text_followup, _ar_text_reason = _log_arabic_route(text, connection_id)
                                 # ---- KB READY GATE (must be before follow-up or RAG) ----
                                 # Block all queries while a new document is being indexed
                                 # so no old-document content leaks and no answer is given
@@ -32173,9 +35538,42 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     except Exception:
                                         pass
                                     continue
+                                history_snapshot = list(conversation_history.get(connection_id, []) or [])
+                                rewritten_comparison_query = _rewrite_bare_comparison_query_from_history(text, history_snapshot, connection_id)
+                                if rewritten_comparison_query and rewritten_comparison_query != text:
+                                    logger.info(
+                                        "[COMPARE FOLLOWUP REWRITE] original=%r rewritten=%r",
+                                        (text or "")[:160],
+                                        rewritten_comparison_query[:160],
+                                    )
+                                    text = rewritten_comparison_query
+                                elif _is_bare_comparison_followup_query(text):
+                                    strict_not_found = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+                                    logger.info("[COMPARE FOLLOWUP REWRITE] skipped_no_grounded_history -> not_found")
+                                    try:
+                                        nf_t_meta = {"request_start": time.perf_counter()}
+                                        await send_final_response(
+                                            connection_id,
+                                            strict_not_found,
+                                            "ar" if msg_lang == "ar" else XTTS_LANGUAGE,
+                                            not EFFECTIVE_DISABLE_TTS,
+                                            websocket=websocket,
+                                            sources=0,
+                                            arabic_mode=(msg_lang == "ar"),
+                                            t_meta=nf_t_meta,
+                                            branch="bare_comparison_no_history",
+                                        )
+                                        _emit_perf_report(nf_t_meta, nf_t_meta["request_start"], text, strict_not_found, connection_id)
+                                    except Exception:
+                                        pass
+                                    continue
+
                                 # ---- HARD DEBUG: prove the WS entrypoint is reached ----
                                 try:
-                                    _fu_check = _is_followup_query(text, connection_id)
+                                    if msg_lang == "ar":
+                                        _fu_check = bool(_ar_text_followup and not _ar_text_standalone)
+                                    else:
+                                        _fu_check = _is_followup_query(text, connection_id)
                                 except Exception:
                                     _fu_check = False
                                 logger.error("🔥 WS RECEIVED TEXT: %s", text)

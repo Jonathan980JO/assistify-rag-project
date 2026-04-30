@@ -504,7 +504,6 @@
         <span class="lang-bar-label">🌐 Language:</span>
         <button type="button" class="lang-btn active" id="langEn" onclick="setLanguage('en')" title="English">EN 🇬🇧</button>
         <button type="button" class="lang-btn ar-btn" id="langAr" onclick="setLanguage('ar')" title="Arabic">AR 🇸🇦</button>
-        <button type="button" class="lang-btn" id="langAuto" onclick="setLanguage('auto')" title="Auto-detect">Auto 🔍</button>
       </div>
       <div class="chat-log" id="chatLog"></div>
       <form id="chatForm">
@@ -543,13 +542,13 @@
   <div class="ar-modal-overlay" id="arModal">
     <div class="ar-modal">
       <h2><span class="ar-flag">🇸🇦</span> Arabic Mode – Required Files</h2>
-      <p>To enable full Arabic support (voice input, chat, and RAG interaction), the system needs to download additional model files.</p>
+      <p>To enable full Arabic support (voice input, chat, and RAG interaction), the system checks the required local model files.</p>
       <ul class="req-list">
-        <li>📦 <strong>Whisper Multilingual STT</strong> – faster-whisper medium (Arabic voice input)</li>
-        <li>🔊 <strong>XTTS v2 Arabic TTS</strong> – already included in the system</li>
-        <li>🌐 <strong>Translation module</strong> – uses local LLM (no internet needed)</li>
+        <li>📦 <strong>Whisper Multilingual STT</strong> – faster-whisper small (Arabic voice input)</li>
+        <li>🔊 <strong>Piper Arabic TTS</strong> – local Arabic voice synthesis</li>
+        <li>🌐 <strong>Translation module</strong> – Arabic questions are translated for retrieval</li>
       </ul>
-      <p style="color:#f6c33c; font-size:0.82rem;">⚠ Note: Arabic questions are restricted to topics within the system knowledge base (Amazon services). General off-topic questions will be politely declined.</p>
+      <p style="color:#f6c33c; font-size:0.82rem;">⚠ Note: Arabic questions are restricted to topics supported by the current knowledge base.</p>
       <div class="ar-modal-actions">
         <button type="button" class="btn-dl" id="arDlBtn" onclick="startArabicDownload()">⬇ Download Arabic Models</button>
         <button type="button" class="btn-skip" onclick="skipArabicDownload()">Use without voice</button>
@@ -626,7 +625,7 @@
     }
 
     // ===== LANGUAGE MANAGEMENT =====
-    let currentLanguage = 'en'; // 'en' | 'ar' | 'auto'
+    let currentLanguage = 'en'; // 'en' | 'ar'
     let arabicModelsChecked = false; // whether we've shown the Arabic download modal
 
     const UI_STRINGS = {
@@ -659,15 +658,17 @@
     };
 
     function getUIStr(key) {
-      const lang = currentLanguage === 'auto' ? 'en' : currentLanguage;
+      const lang = currentLanguage;
       return (UI_STRINGS[lang] || UI_STRINGS.en)[key] || UI_STRINGS.en[key];
     }
 
     function setLanguage(lang) {
+      if (!['en', 'ar'].includes(lang)) {
+        lang = 'en';
+      }
       currentLanguage = lang;
       document.getElementById('langEn').classList.toggle('active', lang === 'en');
       document.getElementById('langAr').classList.toggle('active', lang === 'ar');
-      document.getElementById('langAuto').classList.toggle('active', lang === 'auto');
 
       // Update UI text
       const thinkingText = document.getElementById('thinkingText');
@@ -675,7 +676,11 @@
       const chatInputEl = document.getElementById('chatInput');
       if (thinkingText) thinkingText.textContent = getUIStr('thinking');
       if (aiSpeakingText) aiSpeakingText.textContent = getUIStr('speaking');
-      if (chatInputEl) chatInputEl.placeholder = getUIStr('placeholder');
+      if (chatInputEl) {
+        chatInputEl.placeholder = getUIStr('placeholder');
+        chatInputEl.dir = (lang === 'ar') ? 'rtl' : 'ltr';
+        chatInputEl.style.textAlign = (lang === 'ar') ? 'right' : 'left';
+      }
       if (btnStart) btnStart.textContent = getUIStr('start');
       if (btnStop) btnStop.textContent = getUIStr('stop');
       if (btnMute) btnMute.textContent = getUIStr('mute');
@@ -699,7 +704,7 @@
         const resp = await fetch('/arabic/status', { credentials: 'include' });
         if (resp.ok) {
           const data = await resp.json();
-          if (!data.multilingual_model_ready) {
+          if (!data.arabic_ready) {
             document.getElementById('arModal').classList.add('show');
           }
         } else {
@@ -770,7 +775,7 @@
           const data = await resp.json();
           pct = Math.min(pct + 5, 90);
           bar.style.width = pct + '%';
-          if (data.multilingual_model_ready) {
+          if (data.arabic_ready || data.stt_ready) {
             clearInterval(ticker);
             bar.style.width = '100%';
             status.textContent = '✅ Arabic models ready! Restart server to use voice input in Arabic.';
@@ -790,8 +795,10 @@
     // Restore saved language
     (function() {
       const saved = localStorage.getItem('assistify_lang');
-      if (saved && ['en', 'ar', 'auto'].includes(saved)) {
+      if (saved && ['en', 'ar'].includes(saved)) {
         setLanguage(saved);
+      } else if (saved === 'auto') {
+        setLanguage('en');
       }
     })();
 
@@ -1163,10 +1170,7 @@
         bargeIn(true); // silent barge-in for text input
       }
 
-      // Determine effective language (auto = detect from text)
-      const effectiveLang = currentLanguage === 'auto'
-        ? (detectArabicText(text) ? 'ar' : 'en')
-        : currentLanguage;
+      const effectiveLang = currentLanguage;
 
       resetWsResponseBuffer('text_submit');
       setTextSubmitLock(true);
@@ -1230,8 +1234,7 @@
       _liveCallMode = true;
       // Inform the server of the current language for STT + LLM routing
       if (ws && ws.readyState === WebSocket.OPEN) {
-        const effectiveLang = currentLanguage === 'auto' ? 'auto' : currentLanguage;
-        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language: effectiveLang }));
+        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language: currentLanguage }));
       }
       await startRecording();
     };
