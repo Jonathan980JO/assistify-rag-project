@@ -131,7 +131,13 @@
       padding-right: 4px;
       font-size: 1.1em;
     }
-    .chat-msg { margin: .8em 0; }
+    .chat-msg {
+      margin: .8em 0;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      line-height: 1.45;
+      unicode-bidi: plaintext;
+    }
     .user { color: #10a37f; font-weight: 600; }
     .assistant { color: #f6c33c; }
     form {
@@ -599,12 +605,21 @@
     let wsResponseActive = false;
     let wsResponseFinalized = false;
     let responseAudioReceived = false;
+    let currentResponseUserText = '';
+    let currentResponseHasTextChunk = false;
+    let lastAssistantFinalText = '';
+    let lastAssistantFinalUserText = '';
+    let _lastFinalTtsSignature = '';
 
-    function resetWsResponseBuffer(reason = 'new_request') {
+    function resetWsResponseBuffer(reason = 'new_request', userText = '') {
+      finishAssistantTypingNow();
       full_response = '';
       wsResponseActive = true;
       wsResponseFinalized = false;
       responseAudioReceived = false;
+      currentResponseUserText = userText || '';
+      currentResponseHasTextChunk = false;
+      _lastFinalTtsSignature = '';
       _streamingMsgEl = null;
       console.log(`[WS DEBUG] Response buffer reset (${reason})`);
     }
@@ -630,6 +645,8 @@
 
     const UI_STRINGS = {
       en: {
+        greeting: 'Hello, how can I help you today?',
+        listening: 'Listening...',
         thinking: 'Thinking...',
         speaking: 'AI is speaking...',
         placeholder: 'Type your question...',
@@ -643,7 +660,9 @@
         interrupted: '[🔊 Interrupted — listening...]',
       },
       ar: {
-        thinking: '...جارٍ التفكير',
+        greeting: 'مرحبًا، كيف يمكنني مساعدتك اليوم؟',
+        listening: 'جاري الاستماع...',
+        thinking: 'جاري التفكير...',
         speaking: '🔊 المساعد يتحدث...',
         placeholder: 'اكتب سؤالك هنا...',
         start: '🎤 ابدأ',
@@ -657,9 +676,55 @@
       },
     };
 
+    const GREETING_SESSION_KEY = 'assistify_chat_greeting_shown';
+    let greetingMsgEl = null;
+    let activeIndicatorKey = null;
+
     function getUIStr(key) {
       const lang = currentLanguage;
       return (UI_STRINGS[lang] || UI_STRINGS.en)[key] || UI_STRINGS.en[key];
+    }
+
+    function greetingAlreadyShownThisSession() {
+      try {
+        return sessionStorage.getItem(GREETING_SESSION_KEY) === '1';
+      } catch (e) {
+        return false;
+      }
+    }
+
+    function markGreetingShownThisSession() {
+      try {
+        sessionStorage.setItem(GREETING_SESSION_KEY, '1');
+      } catch (e) { /* ignore unavailable session storage */ }
+    }
+
+    function chatHasConversationContent() {
+      if (!chatLog) return false;
+      return !!chatLog.querySelector('.chat-msg.user, .chat-msg.assistant:not([data-assistify-greeting="true"])');
+    }
+
+    function updateGreetingLanguage() {
+      if (!chatLog) return;
+      greetingMsgEl = greetingMsgEl || chatLog.querySelector('[data-assistify-greeting="true"]');
+      if (!greetingMsgEl || chatHasConversationContent()) return;
+      const arabic = currentLanguage === 'ar';
+      greetingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+      greetingMsgEl.textContent = getUIStr('greeting');
+    }
+
+    function ensureGreetingMessage() {
+      if (!chatLog || greetingMsgEl || greetingAlreadyShownThisSession()) return;
+      if (chatLog.querySelector('.chat-msg')) return;
+
+      const arabic = currentLanguage === 'ar';
+      greetingMsgEl = document.createElement('div');
+      greetingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
+      greetingMsgEl.dataset.assistifyGreeting = 'true';
+      greetingMsgEl.textContent = getUIStr('greeting');
+      chatLog.appendChild(greetingMsgEl);
+      chatLog.scrollTop = chatLog.scrollHeight;
+      markGreetingShownThisSession();
     }
 
     function setLanguage(lang) {
@@ -674,7 +739,10 @@
       const thinkingText = document.getElementById('thinkingText');
       const aiSpeakingText = document.getElementById('aiSpeakingText');
       const chatInputEl = document.getElementById('chatInput');
-      if (thinkingText) thinkingText.textContent = getUIStr('thinking');
+      if (thinkingText) {
+        thinkingText.textContent = getUIStr(activeIndicatorKey || 'thinking');
+        thinkingText.dir = (lang === 'ar') ? 'rtl' : 'ltr';
+      }
       if (aiSpeakingText) aiSpeakingText.textContent = getUIStr('speaking');
       if (chatInputEl) {
         chatInputEl.placeholder = getUIStr('placeholder');
@@ -697,23 +765,13 @@
       }
 
       localStorage.setItem('assistify_lang', lang);
+      updateGreetingLanguage();
     }
 
     async function checkArabicModels() {
-      try {
-        const resp = await fetch('/arabic/status', { credentials: 'include' });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (!data.arabic_ready) {
-            document.getElementById('arModal').classList.add('show');
-          }
-        } else {
-          // Endpoint not available, show modal anyway for info
-          document.getElementById('arModal').classList.add('show');
-        }
-      } catch (e) {
-        document.getElementById('arModal').classList.add('show');
-      }
+      const modal = document.getElementById('arModal');
+      if (modal) modal.classList.remove('show');
+      console.log('[VOICE PACKAGE UX] popup_disabled=True reason=local_piper_runtime');
     }
 
     async function startArabicDownload() {
@@ -802,13 +860,28 @@
       }
     })();
 
+    ensureGreetingMessage();
+
     // ---- Streaming TTS queue & barge-in state ----
     let pauseAudioSending = false;   // pause mic→WS during TTS but keep mic alive
     let isTTSPlaying = false;        // true while any TTS audio is playing
-    let ttsQueue = [];               // queue of sentences to speak
+    let ttsQueue = [];               // queue of { text, language } items to speak
     let ttsPrefetchCache = {};       // prefetched TTS audio blobs { text: blobURL }
     let isThinking = false;          // true while AI is generating
     let _streamingMsgEl = null;      // current streaming assistant message element
+    const TYPE_CHAR_DELAY_MS = 22;
+    const TYPE_LINE_DELAY_MS = 90;
+    const THINKING_DELAY_MIN_MS = 300;
+    const THINKING_DELAY_MAX_MS = 700;
+    const GRAPHEME_SEGMENTER = (typeof Intl !== 'undefined' && Intl.Segmenter)
+      ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+      : null;
+    let _typingTargetText = '';
+    let _typingRenderedText = '';
+    let _typingTimer = null;
+    let _typingDelayTimer = null;
+    let _typingActive = false;
+    let _typingFinalized = false;
     let bargeInThreshold = 0.04;     // energy threshold for barge-in detection
     let consecutiveVoiceFrames = 0;  // consecutive high-energy frames during TTS
     let bargeInFramesNeeded = 3;     // ~200ms to confirm user is speaking
@@ -966,6 +1039,7 @@
 
       ws.onopen = () => {
         console.log("[DEBUG] WebSocket connected successfully");
+        ensureGreetingMessage();
         appendMsg('system', 'Connected to Assistify RAG system.');
         reconnectAttempts = 0;
       };
@@ -974,6 +1048,7 @@
         wsResponseActive = false;
         wsResponseFinalized = true;
         setTextSubmitLock(false);
+        hideThinking();
         appendMsg('system', '[Connection lost - attempting to reconnect...]');
         if(isRecording) {
           stopRecording();
@@ -988,6 +1063,7 @@
         wsResponseActive = false;
         wsResponseFinalized = true;
         setTextSubmitLock(false);
+        hideThinking();
         appendMsg('system', '[Error] WebSocket connection failed.');
       };
 
@@ -1028,8 +1104,8 @@
           }
           // Streaming: one sentence at a time (text display only — TTS handled server-side)
           const chunkText = data.text || '';
+          currentResponseHasTextChunk = true;
           full_response += chunkText;
-          hideThinking();
           showAISpeaking();
           handleResponseChunk(chunkText, data.index);
 
@@ -1042,15 +1118,28 @@
           // TTS is now streamed server-side via WebSocket binary — no addToTTSQueue
 
         } else if(data.type === 'aiResponseDone') {
+          const finalCandidate = data.fullText || full_response || '';
+          if (shouldSkipDuplicateFinal(finalCandidate, 'aiResponseDone')) {
+            return;
+          }
           if (!wsResponseActive || wsResponseFinalized) {
             return;
           }
           // Streaming complete
-          hideThinking();
           const finalText = finalizeWsResponse(data.fullText || '');
+          let finalTtsStarted = false;
           if(finalText) {
             lastAIResponse = finalText;
+            if (!data.arabic_mode) {
+              finalTtsStarted = triggerFinalTTSParallel(finalText, {
+                source: 'aiResponseDone',
+                language: currentLanguage,
+                skipIfServerAudio: true,
+              });
+            }
             finalizeStreamingDisplay(finalText);
+          } else {
+            hideThinking();
           }
           // Log server-side latency metrics (Phase 6)
           if (data.latency) {
@@ -1064,39 +1153,46 @@
           // In Arabic mode, TTS is handled async by arabic_tts_complete event
           // Don't call _handleTtsComplete() now, as Arabic TTS hasn't started yet
           if (!data.arabic_mode) {
-            if (!responseAudioReceived && finalText) {
-              console.warn('[TTS FALLBACK] No WebSocket audio received; requesting /tts for final response');
-              addToTTSQueue(finalText);
-            } else {
+            if (!finalTtsStarted && responseAudioReceived) {
               _handleTtsComplete();
             }
           }
           setTextSubmitLock(false);
 
         } else if(data.type === 'aiResponse') {
+          const finalCandidate = data.text || full_response || '';
+          if (shouldSkipDuplicateFinal(finalCandidate, 'aiResponse')) {
+            return;
+          }
           if (!wsResponseActive || wsResponseFinalized) {
             return;
           }
           // Fallback: non-streaming full response
           const finalText = finalizeWsResponse(data.text || '');
-          if(finalText && finalText !== lastAIResponse) {
+          if(finalText) {
             lastAIResponse = finalText;
-            appendMsg('assistant', finalText, detectArabicText(finalText));
-            hideThinking();
 
             if (_liveCallMode && isRecording) {
               pauseAudioSending = true;
             } else if(isRecording) {
               stopRecording(true);
             }
-            addToTTSQueue(finalText);
-            setTextSubmitLock(false);
+            triggerFinalTTSParallel(finalText, {
+              source: 'aiResponse',
+              language: currentLanguage,
+            });
+            finalizeStreamingDisplay(finalText);
+          } else {
+            hideThinking();
           }
+          setTextSubmitLock(false);
 
         } else if(data.type === 'transcript') {
           if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
             lastTranscript = data.text;
+            resetWsResponseBuffer('voice_transcript', data.text);
             lastUserMsgEl = appendMsg('user', data.text, detectArabicText(data.text));
+            showThinking();
           }
         } else if(data.type === 'transcriptCorrection') {
           // Backend corrected the garbled Arabic STT — update the 'أنت:' bubble silently
@@ -1155,29 +1251,102 @@
     // Initialize connection
     connectWebSocket();
 
+    const ASSISTANT_HELP_RESPONSES = {
+      en: 'I can help you with the uploaded documents. You can ask me to explain concepts, list items mentioned in the documents, summarize relevant parts, compare grounded topics, and answer in English or Arabic when supported.',
+      ar: 'أقدر أساعدك في المستندات المرفوعة. يمكنك أن تسألني عن شرح المفاهيم، استخراج القوائم المذكورة في المستندات، تلخيص الأجزاء المهمة، مقارنة الموضوعات المدعومة بالمستندات، والإجابة بالعربية أو الإنجليزية عند توفر الدعم.',
+    };
+    const ASSISTANT_HELP_EN_QUERIES = new Set([
+      'what can you do',
+      'what you can do',
+      'how can you help me',
+      'what can i ask you',
+      'what are your capabilities',
+      'help',
+      'what do you support',
+    ]);
+    const ASSISTANT_HELP_AR_QUERIES = new Set([
+      'ماذا يمكنك أن تفعل',
+      'تقدر تساعدني في إيه',
+      'ممكن تساعدني في إيه',
+      'ما الذي يمكنك مساعدتي به',
+      'ماذا أستطيع أن أسألك',
+    ]);
+
+    function normalizeAssistantHelpQuery(text) {
+      return (text || '')
+        .toLowerCase()
+        .replace(/[\u064B-\u065F\u0670]/g, '')
+        .replace(/[؟?!.،,;:]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function getAssistantHelpIntent(text) {
+      const normalized = normalizeAssistantHelpQuery(text);
+      if (!normalized) return null;
+      if (ASSISTANT_HELP_AR_QUERIES.has(normalized)) {
+        return { language: 'ar', response: ASSISTANT_HELP_RESPONSES.ar };
+      }
+      if (ASSISTANT_HELP_EN_QUERIES.has(normalized)) {
+        return { language: 'en', response: ASSISTANT_HELP_RESPONSES.en };
+      }
+      return null;
+    }
+
+    function prepareLocalAssistantResponse(userText) {
+      finishAssistantTypingNow();
+      full_response = '';
+      wsResponseActive = false;
+      wsResponseFinalized = true;
+      responseAudioReceived = false;
+      currentResponseUserText = userText || '';
+      currentResponseHasTextChunk = false;
+      _lastFinalTtsSignature = '';
+      _streamingMsgEl = null;
+    }
+
     chatForm.onsubmit = e => {
       _unlockAudio();
       e.preventDefault();
       if (textRequestInFlight) return;
       const text = chatInput.value.trim();
       if (!text) return;
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        appendMsg('system', '[Not connected — please wait a moment and try again]');
-        return;
-      }
       // Interrupt any ongoing AI response or TTS
       if (isTTSPlaying || isThinking) {
         bargeIn(true); // silent barge-in for text input
       }
 
       const effectiveLang = currentLanguage;
+      const helpIntent = getAssistantHelpIntent(text);
+      if (helpIntent) {
+        console.log(`[ASSISTANT HELP INTENT] language=${helpIntent.language} handled=True`);
+        prepareLocalAssistantResponse(text);
+        appendMsg('user', text, helpIntent.language === 'ar');
+        chatInput.value = '';
+        lastTranscript = text;
+        showThinking();
+        triggerFinalTTSParallel(helpIntent.response, {
+          source: 'help',
+          language: helpIntent.language,
+          requestText: text,
+        });
+        queueAssistantTyping(helpIntent.response, true);
+        return;
+      }
 
-      resetWsResponseBuffer('text_submit');
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        appendMsg('system', '[Not connected — please wait a moment and try again]');
+        return;
+      }
+
+      resetWsResponseBuffer('text_submit', text);
       setTextSubmitLock(true);
+      showThinking();
       try {
         ws.send(JSON.stringify({ text, language: effectiveLang }));
       } catch (err) {
         setTextSubmitLock(false);
+        hideThinking();
         appendMsg('system', '[Error] Failed to send message. Please try again.');
         return;
       }
@@ -1198,6 +1367,7 @@
       const msg = document.createElement('div');
       const arabic = isArabic || detectArabicText(text);
       msg.className = `chat-msg ${role}${arabic ? ' arabic-msg' : ''}`;
+      msg.dir = arabic ? 'rtl' : 'ltr';
       const label = role === 'assistant'
         ? (arabic ? 'المساعد:' : 'Assistant:')
         : (role === 'user' ? (arabic ? 'أنت:' : 'You:') : '');
@@ -1308,16 +1478,17 @@
       return c;
     }
 
-    async function _playStreamingTTS(sentence) {
+    async function _playStreamingTTS(sentence, ttsLanguage) {
       const audioCtx = _getTTSAudioContext();
       _ttsStreamAbort = new AbortController();
       _ttsSources = [];
+      ttsLanguage = ttsLanguage || getTTSLanguageForText(sentence);
 
       const t_xtts_start = performance.now() / 1000;
       const resp = await fetch('/tts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: sentence }),
+        body: JSON.stringify({ text: sentence, language: ttsLanguage }),
         credentials: 'include',
         signal: _ttsStreamAbort.signal,
       });
@@ -1460,13 +1631,28 @@
     }
 
     // ---- UI Feedback Functions ----
-    function showThinking() {
-      isThinking = true;
+    function setActivityIndicator(key) {
+      activeIndicatorKey = key;
+      const textEl = document.getElementById('thinkingText');
+      if (textEl) {
+        textEl.textContent = getUIStr(key);
+        textEl.dir = (currentLanguage === 'ar') ? 'rtl' : 'ltr';
+      }
       const el = document.getElementById('thinkingIndicator');
       if (el) el.classList.add('visible');
     }
+
+    function showThinking() {
+      isThinking = true;
+      setActivityIndicator('thinking');
+    }
+    function showListening() {
+      isThinking = false;
+      setActivityIndicator('listening');
+    }
     function hideThinking() {
       isThinking = false;
+      activeIndicatorKey = null;
       const el = document.getElementById('thinkingIndicator');
       if (el) el.classList.remove('visible');
     }
@@ -1488,32 +1674,183 @@
     }
 
     // ---- Streaming Response Display ----
-    function handleResponseChunk(text, index) {
-      const arabic = detectArabicText(text);
-      if (index === 0) {
-        _streamingMsgEl = document.createElement('div');
-        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
-        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + text;
-        chatLog.appendChild(_streamingMsgEl);
-      } else if (_streamingMsgEl) {
-        const isAr = _streamingMsgEl.classList.contains('arabic-msg') || arabic;
-        _streamingMsgEl.textContent += ' ' + text;
-        if (arabic && !_streamingMsgEl.classList.contains('arabic-msg')) {
-          _streamingMsgEl.classList.add('arabic-msg');
-          _streamingMsgEl.textContent = 'المساعد: ' + _streamingMsgEl.textContent.replace(/^Assistant: /, '');
-        }
+    function getAssistantLabel(arabic) {
+      return arabic ? 'المساعد:' : 'Assistant:';
+    }
+
+    function normalizeAssistantFinalText(text) {
+      return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function markAssistantFinalText(text) {
+      const normalized = normalizeAssistantFinalText(text);
+      if (!normalized) return;
+      lastAssistantFinalText = normalized;
+      lastAssistantFinalUserText = currentResponseUserText || '';
+    }
+
+    function shouldSkipDuplicateFinal(fullText, source) {
+      const normalized = normalizeAssistantFinalText(fullText);
+      if (!normalized || normalized !== lastAssistantFinalText) return false;
+      const sameRequest = !!currentResponseUserText && currentResponseUserText === lastAssistantFinalUserText;
+      const currentAccumulated = normalizeAssistantFinalText(full_response);
+      const staleAgainstCurrentChunk = currentResponseHasTextChunk && currentAccumulated && currentAccumulated !== normalized;
+      const idleDuplicate = !wsResponseActive || wsResponseFinalized;
+      const preChunkDuplicate = wsResponseActive && !currentResponseHasTextChunk && !_streamingMsgEl && !_typingTargetText && !sameRequest;
+      if (idleDuplicate || staleAgainstCurrentChunk || preChunkDuplicate) {
+        console.log(`[UX TYPEWRITER] skip_duplicate_final source=${source} chars=${normalized.length}`);
+        return true;
       }
+      return false;
+    }
+
+    function applyAssistantBubbleLanguage(msg, arabic) {
+      if (!msg) return;
+      msg.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}${_typingActive ? ' typing-active' : ''}`;
+      msg.dir = arabic ? 'rtl' : 'ltr';
+    }
+
+    function renderAssistantBubble(text) {
+      if (!_streamingMsgEl) return;
+      const arabic = detectArabicText(_typingTargetText || text);
+      applyAssistantBubbleLanguage(_streamingMsgEl, arabic);
+      _streamingMsgEl.textContent = `${getAssistantLabel(arabic)} ${text}`;
       chatLog.scrollTop = chatLog.scrollHeight;
     }
 
-    function finalizeStreamingDisplay(fullText) {
-      if (_streamingMsgEl) {
-        const arabic = detectArabicText(fullText);
-        _streamingMsgEl.className = `chat-msg assistant${arabic ? ' arabic-msg' : ''}`;
-        _streamingMsgEl.textContent = (arabic ? 'المساعد: ' : 'Assistant: ') + fullText;
-        _streamingMsgEl = null;
-      }
+    function ensureAssistantTypingBubble() {
+      if (_streamingMsgEl) return;
+      const arabic = detectArabicText(_typingTargetText);
+      _streamingMsgEl = document.createElement('div');
+      applyAssistantBubbleLanguage(_streamingMsgEl, arabic);
+      _streamingMsgEl.textContent = `${getAssistantLabel(arabic)} `;
+      chatLog.appendChild(_streamingMsgEl);
       chatLog.scrollTop = chatLog.scrollHeight;
+      console.log(`[UX TYPEWRITER] create_bubble language=${arabic ? 'ar' : 'en'}`);
+    }
+
+    function getThinkingDelayMs() {
+      return THINKING_DELAY_MIN_MS + Math.floor(Math.random() * (THINKING_DELAY_MAX_MS - THINKING_DELAY_MIN_MS + 1));
+    }
+
+    function isListLine(line) {
+      return /^\s*(?:[-*•]|\d+[.)]|[\u0660-\u0669\u06F0-\u06F9]+[.)]|[A-Za-z][.)])\s+\S/.test(line);
+    }
+
+    function nextGraphemeEnd(text, start) {
+      if (GRAPHEME_SEGMENTER) {
+        const iterator = GRAPHEME_SEGMENTER.segment(text.slice(start))[Symbol.iterator]();
+        const first = iterator.next().value;
+        if (first && first.segment) return start + first.segment.length;
+      }
+      const cp = text.codePointAt(start);
+      return start + (cp && cp > 0xffff ? 2 : 1);
+    }
+
+    function nextTypingSliceEnd(text, start) {
+      if (start >= text.length) return start;
+      const lineStart = start === 0 || text[start - 1] === '\n';
+      if (lineStart) {
+        const nextLineBreak = text.indexOf('\n', start);
+        const lineEnd = nextLineBreak === -1 ? text.length : nextLineBreak + 1;
+        const line = text.slice(start, lineEnd);
+        if (isListLine(line) && (_typingFinalized || nextLineBreak !== -1)) {
+          return lineEnd;
+        }
+      }
+      return nextGraphemeEnd(text, start);
+    }
+
+    function clearTypingTimers() {
+      if (_typingDelayTimer) {
+        clearTimeout(_typingDelayTimer);
+        _typingDelayTimer = null;
+      }
+      if (_typingTimer) {
+        clearTimeout(_typingTimer);
+        _typingTimer = null;
+      }
+    }
+
+    function runTypingStep() {
+      _typingTimer = null;
+      if (!_typingActive || !_streamingMsgEl) return;
+
+      if (_typingRenderedText.length >= _typingTargetText.length) {
+        if (_typingFinalized) {
+          const completedText = _typingTargetText;
+          _typingActive = false;
+          renderAssistantBubble(completedText);
+          markAssistantFinalText(completedText);
+          _streamingMsgEl = null;
+          _typingTargetText = '';
+          _typingRenderedText = '';
+          _typingFinalized = false;
+        }
+        return;
+      }
+
+      const nextEnd = nextTypingSliceEnd(_typingTargetText, _typingRenderedText.length);
+      const sliceLen = Math.max(1, nextEnd - _typingRenderedText.length);
+      _typingRenderedText = _typingTargetText.slice(0, nextEnd);
+      renderAssistantBubble(_typingRenderedText);
+      const delay = sliceLen > 1 ? TYPE_LINE_DELAY_MS : TYPE_CHAR_DELAY_MS;
+      _typingTimer = setTimeout(runTypingStep, delay);
+    }
+
+    function startTypingAfterDelay() {
+      if (_typingActive || _typingDelayTimer) return;
+      _typingDelayTimer = setTimeout(() => {
+        _typingDelayTimer = null;
+        ensureAssistantTypingBubble();
+        _typingActive = true;
+        hideThinking();
+        runTypingStep();
+      }, getThinkingDelayMs());
+    }
+
+    function queueAssistantTyping(fullText, finalized) {
+      const nextText = fullText || '';
+      if (!nextText) return;
+      _typingTargetText = nextText;
+      if (finalized) {
+        console.log(`[UX TYPEWRITER] finalize chars=${nextText.length}`);
+        markAssistantFinalText(nextText);
+      }
+      _typingFinalized = _typingFinalized || !!finalized;
+      if (_typingRenderedText.length > _typingTargetText.length || !_typingTargetText.startsWith(_typingRenderedText)) {
+        _typingRenderedText = '';
+      }
+      if (_typingActive) {
+        if (!_typingTimer) runTypingStep();
+      } else {
+        startTypingAfterDelay();
+      }
+    }
+
+    function finishAssistantTypingNow() {
+      clearTypingTimers();
+      if (_typingTargetText) {
+        ensureAssistantTypingBubble();
+        _typingRenderedText = _typingTargetText;
+        _typingActive = false;
+        renderAssistantBubble(_typingTargetText);
+        markAssistantFinalText(_typingTargetText);
+      }
+      _typingTargetText = '';
+      _typingRenderedText = '';
+      _typingActive = false;
+      _typingFinalized = false;
+    }
+
+    function handleResponseChunk(text, index) {
+      console.log(`[UX TYPEWRITER] append_chunk index=${index ?? 0} chars=${(text || '').length}`);
+      queueAssistantTyping(full_response || text || '', false);
+    }
+
+    function finalizeStreamingDisplay(fullText) {
+      const finalText = fullText || full_response || '';
+      queueAssistantTyping(finalText, true);
     }
 
     // ---- TTS Queue System (sentence-by-sentence playback with prefetch) ----
@@ -1534,19 +1871,85 @@
       }
     }
 
+    function detectTTSLanguageLabel(text) {
+      const value = text || '';
+      const arabicChars = (value.match(/[\u0600-\u06FF]/g) || []).length;
+      const latinChars = (value.match(/[A-Za-z]/g) || []).length;
+      if (arabicChars > 0 && arabicChars >= Math.max(2, latinChars * 0.4)) return 'arabic';
+      if (latinChars > 0 && arabicChars === 0) return 'english';
+      if (latinChars > arabicChars * 2) return 'english';
+      if (arabicChars > 0) return 'arabic';
+      return 'unknown';
+    }
+
     // Browser-native TTS fallback (Web Speech API)
-    function _speakBrowser(text) {
+    function getTTSLanguageForText(text, selectedLanguage = currentLanguage) {
+      const selected = selectedLanguage === 'ar' ? 'ar' : 'en';
+      const textLanguage = detectTTSLanguageLabel(text);
+      if (selected === 'ar' && textLanguage === 'english') {
+        console.log('[UX TTS LANG] selected=ar text=english action=skipped');
+        return 'en';
+      }
+      if (textLanguage === 'arabic') return 'ar';
+      if (textLanguage === 'english') return 'en';
+      return selected;
+    }
+
+    function getTTSQueueText(item) {
+      if (!item) return '';
+      if (typeof item === 'string') return item;
+      return item.text || '';
+    }
+
+    function getTTSQueueLanguage(item, fallbackLanguage = currentLanguage) {
+      if (item && typeof item === 'object' && item.language) return item.language;
+      return getTTSLanguageForText(getTTSQueueText(item), fallbackLanguage);
+    }
+
+    function getTTSCacheKey(itemOrText, language) {
+      const text = getTTSQueueText(itemOrText);
+      const ttsLanguage = language || getTTSQueueLanguage(itemOrText);
+      return `${ttsLanguage}::${text}`;
+    }
+
+    function triggerFinalTTSParallel(text, options = {}) {
+      const cleanText = (text || '').trim();
+      if (!cleanText) return false;
+      const selectedLanguage = options.language || currentLanguage;
+      const requestText = options.requestText || currentResponseUserText || '';
+      const signature = `${selectedLanguage}::${requestText}::${normalizeAssistantFinalText(cleanText)}`;
+
+      if (options.skipIfServerAudio && responseAudioReceived) {
+        _lastFinalTtsSignature = signature;
+        console.log('[UX TTS] duplicate_blocked=True');
+        return false;
+      }
+
+      const duplicate = !!signature && signature === _lastFinalTtsSignature;
+      console.log(`[UX TTS] duplicate_blocked=${duplicate ? 'True' : 'False'}`);
+      if (duplicate) return false;
+
+      _lastFinalTtsSignature = signature;
+      console.log('[UX TTS] start_parallel=True');
+      addToTTSQueue(cleanText, selectedLanguage);
+      return true;
+    }
+
+    function _speakBrowser(text, ttsLanguage) {
       return new Promise((resolve) => {
         if (!window.speechSynthesis) { resolve(); return; }
         // Cancel any queued browser utterances
         window.speechSynthesis.cancel();
         const utt = new SpeechSynthesisUtterance(text);
-        utt.lang = 'en-US';
+        const speechLanguage = ttsLanguage || getTTSLanguageForText(text);
+        utt.lang = speechLanguage === 'ar' ? 'ar-SA' : 'en-US';
         utt.rate = 1.05;
         utt.pitch = 1.0;
         // Pick a natural-sounding voice if available
         const voices = speechSynthesis.getVoices();
-        const preferred = voices.find(v => /zira|david|google us|samantha/i.test(v.name));
+        const preferred = voices.find(v => speechLanguage === 'ar'
+          ? /arabic|ar-|hoda|naayf|maged/i.test(`${v.name} ${v.lang}`)
+          : /zira|david|google us|samantha/i.test(v.name));
         if (preferred) utt.voice = preferred;
         utt.onend = resolve;
         utt.onerror = resolve;
@@ -1554,18 +1957,20 @@
       });
     }
 
-    function addToTTSQueue(text) {
+    function addToTTSQueue(text, selectedLanguage = currentLanguage) {
       if (!text || text.trim() === '') return;
       const cleaned = text.replace(/[\u{1F000}-\u{1F9FF}\u{2600}-\u{27BF}]/gu, '').trim();
       if (!cleaned) return;
+      const ttsLanguage = getTTSLanguageForText(cleaned, selectedLanguage);
+      const queueItem = { text: cleaned, language: ttsLanguage };
 
-      ttsQueue.push(cleaned);
+      ttsQueue.push(queueItem);
 
       // Only prefetch if this sentence will wait in queue (isTTSPlaying=true).
       // If isTTSPlaying is false, playNextInQueue() is about to fetch it directly —
       // prefetching the same sentence simultaneously wastes an XTTS slot and can
       // cause later sentences to time out, triggering the browser-voice fallback.
-      if (_xttsAvailable && isTTSPlaying) prefetchTTS(cleaned);
+      if (_xttsAvailable && isTTSPlaying) prefetchTTS(queueItem);
 
       // Start playing if not already
       if (!isTTSPlaying) {
@@ -1594,10 +1999,17 @@
 
       isTTSPlaying = true;
       showAISpeaking();
-      const sentence = ttsQueue.shift();
+      const item = ttsQueue.shift();
+      const sentence = getTTSQueueText(item);
+      if (!sentence) {
+        playNextInQueue();
+        return;
+      }
+      const sentenceLanguage = getTTSQueueLanguage(item);
+      const sentenceCacheKey = getTTSCacheKey(sentence, sentenceLanguage);
 
       // Prefetch next sentence while this one plays
-      if (ttsQueue.length > 0 && !ttsPrefetchCache[ttsQueue[0]]) {
+      if (ttsQueue.length > 0 && !ttsPrefetchCache[getTTSCacheKey(ttsQueue[0])]) {
         prefetchTTS(ttsQueue[0]);
       }
 
@@ -1605,10 +2017,10 @@
       //      non-cached sentences stream via Web Audio API.
       let serverOK = false;
       if (_xttsAvailable) {
-        if (ttsPrefetchCache[sentence]) {
+        if (ttsPrefetchCache[sentenceCacheKey]) {
           // Play from prefetch cache via <audio> element (already fully loaded)
-          const url = ttsPrefetchCache[sentence];
-          delete ttsPrefetchCache[sentence];
+          const url = ttsPrefetchCache[sentenceCacheKey];
+          delete ttsPrefetchCache[sentenceCacheKey];
           try {
             audioPlayer.src = url;
             _currentTTSAudio = audioPlayer;
@@ -1646,7 +2058,7 @@
         } else {
           // Stream via Web Audio API — no full buffering
           try {
-            serverOK = await _playStreamingTTS(sentence);
+            serverOK = await _playStreamingTTS(sentence, sentenceLanguage);
           } catch (err) {
             if (err.name !== 'AbortError') {
               console.warn('[TTS] Streaming playback error:', err.message || err);
@@ -1659,7 +2071,7 @@
       // ---- Browser Speech API fallback (only when XTTS fetch failed or play failed) ----
       if (!serverOK) {
         try {
-          await _speakBrowser(sentence);
+          await _speakBrowser(sentence, sentenceLanguage);
         } catch(e) { /* ignore */ }
       }
 
@@ -1667,17 +2079,21 @@
       playNextInQueue();
     }
 
-    async function prefetchTTS(text) {
+    async function prefetchTTS(itemOrText) {
       // Prefetch is best-effort — failure here must NEVER disable XTTS.
       // The real fetch in playNextInQueue() is the authoritative one.
-      if (!_xttsAvailable || ttsPrefetchCache[text]) return;
+      const text = getTTSQueueText(itemOrText);
+      const ttsLanguage = getTTSQueueLanguage(itemOrText);
+      const cacheKey = getTTSCacheKey(text, ttsLanguage);
+      if (!text) return;
+      if (!_xttsAvailable || ttsPrefetchCache[cacheKey]) return;
       try {
         const controller = new AbortController();
         const t = setTimeout(() => controller.abort(), 90000); // generous — XTTS can take 20s+
         const resp = await fetch('/tts', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text }),
+          headers: { 'Content-Type': 'application/json', 'X-TTS-Prefetch': '1' },
+          body: JSON.stringify({ text, language: ttsLanguage }),
           credentials: 'include',
           signal: controller.signal,
         });
@@ -1686,7 +2102,7 @@
           const blob = await resp.blob();
           // Only cache if still relevant (XTTS not disabled while we were fetching)
           if (_xttsAvailable) {
-            ttsPrefetchCache[text] = URL.createObjectURL(blob);
+            ttsPrefetchCache[cacheKey] = URL.createObjectURL(blob);
           } else {
             // We already have the blob but XTTS was disabled; discard it cleanly
             console.log('[TTS prefetch] Discarding result — XTTS disabled during fetch');
@@ -1757,7 +2173,8 @@
       hideAISpeaking();
 
       if (!silent) {
-        appendMsg('system', '[🔊 Interrupted — listening...]');
+        showListening();
+        appendMsg('system', getUIStr('interrupted'));
       }
     }
 
@@ -1837,7 +2254,8 @@
         btnStart.classList.add('recording');
         btnMute.textContent = '🔇 Stop Recording';
         showWaveform();
-        if (!silent) appendMsg('system', '[🎤 Recording started - speak now]');
+        showListening();
+        if (!silent) appendMsg('system', getUIStr('recordStart'));
       } catch(err) {
         console.error("[ERROR] startRecording failed:", err);
         appendMsg('system', 'Could not start voice recording: ' + err.message);
@@ -1867,7 +2285,8 @@
       btnMute.style.background = '#f59e0b';
       isMuted = false;
       hideWaveform();
-      if (!silent) appendMsg('system', '[⏸️ Recording stopped]');
+      hideThinking();
+      if (!silent) appendMsg('system', getUIStr('recordStop'));
     }
 
     function convertToPCM16(float32Array) {
