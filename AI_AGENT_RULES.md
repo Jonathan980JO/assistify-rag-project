@@ -400,3 +400,97 @@ If the document does not support the answer, the system must not invent one.
 
 Correct failure is better than fake success.
 
+\---
+
+\## Compiler / VS Code Diagnostics Must Be Clean
+
+This section is **mandatory**. The agent must not consider any task complete until all diagnostics are clean for every file it edited.
+
+\### Rule 1 — No stopping with open problems
+
+The agent must not stop after code edits until every modified file shows **zero VS Code / Pylance / compiler problems** introduced by the patch.
+
+\### Rule 2 — Required checks after every patch
+
+After every code change, the agent must run **all** of the following:
+
+1\. VS Code / Pylance diagnostics for every modified Python file (use `get_errors` tool or equivalent)
+
+2\. Python compile check for every modified file:
+
+   ```
+   python -m py_compile <modified_file>
+   ```
+
+3\. Any relevant syntax or lint check available in the workspace
+
+\### Rule 3 — Errors must be fixed before stopping
+
+If diagnostics reveal any of the following caused by the agent's patch:
+
+\- syntax errors
+
+\- undefined names / missing imports
+
+\- unreachable or broken code
+
+\- type / compile failures
+
+\- warnings introduced by the patch
+
+Then the agent must:
+
+1\. Fix the problem immediately
+
+2\. Rerun all diagnostics
+
+3\. Repeat until clean
+
+\### Rule 4 — No false success reports
+
+The agent must **not** report success while VS Code still shows problems in any file it edited.
+
+\### Rule 5 — Separate pre-existing warnings from new problems
+
+If the file already had unrelated warnings before the task:
+
+\- clearly separate pre-existing warnings from new problems introduced by the patch
+
+\- do not introduce new problems
+
+\- fix all new problems before stopping
+
+Pre-existing warnings that the agent did not introduce are allowed to remain, but must be explicitly noted.
+
+\### Rule 6 — Final report requirements
+
+Every final report must include:
+
+\- list of modified files
+
+\- diagnostics command / tool used
+
+\- compile result for each modified Python file
+
+\- confirmation: **"VS Code/Pylance diagnostics are clean for modified files"**
+
+\- confirmation: **"py\_compile passed for modified Python files"**
+
+\---
+
+\## Task Prompt Authoring Guidelines
+
+When writing future task prompts, prefer reusable generic instructions. Every new task prompt should include or reference the following checklist:
+
+\- **Strict no-hardcoding rule** — no fixed answers, no domain term lists, no question→answer maps
+
+\- **Read AGENT\_TASK\_PROMPT.md first** before starting any work
+
+\- **Read AI\_AGENT\_RULES.md second** and obey it fully
+
+\- **Preserve RAG grounding** — all answers must come from retrieved evidence
+
+\- **Run real WebSocket validation** when the behavior change affects `/ws` routes
+
+\- **Run compiler and VS Code diagnostics** before submitting the final answer
+

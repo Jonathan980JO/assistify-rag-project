@@ -156,3 +156,10 @@ Json/
 
 scratch/
 *.txt
+
+models/
+TTS_local_backup/
+archived_pdfs/
+*.wav
+*.bak
+tools/testing/*.last.json

@@ -107,18 +107,126 @@
     }
     main {
       display: flex;
+      align-items: stretch;
+      justify-content: center;
+      gap: 16px;
+      min-height: calc(100vh - 76px);
+      padding: 18px;
+      box-sizing: border-box;
+    }
+    .conversation-sidebar {
+      width: 280px;
+      min-width: 240px;
+      max-width: 320px;
+      background: #202123;
+      border: 1px solid #343541;
+      border-radius: 8px;
+      display: flex;
       flex-direction: column;
+      min-height: 60vh;
+      max-height: calc(100vh - 112px);
+      overflow: hidden;
+    }
+    .conversation-sidebar-header {
+      padding: 12px;
+      border-bottom: 1px solid #343541;
+    }
+    .new-chat-btn {
+      width: 100%;
+      display: flex;
       align-items: center;
-      min-height: 85vh;
-      padding: 2em 0;
+      justify-content: center;
+      gap: 8px;
+      background: #2b2c33;
+      border: 1px solid #4b4d57;
+      color: #f4f4f5;
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+    .new-chat-btn:hover {
+      background: #343641;
+      border-color: #10a37f;
+    }
+    .conversation-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+    .conversation-item {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      text-align: left;
+      background: transparent;
+      color: #d9d9e3;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      padding: 10px 11px;
+      margin-bottom: 4px;
+      font-size: 0.9rem;
+      line-height: 1.25;
+      cursor: pointer;
+      box-sizing: border-box;
+    }
+    .conversation-title {
+      flex: 1;
+      min-width: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .conversation-item:hover {
+      background: #2b2c33;
+    }
+    .conversation-item:focus-visible {
+      outline: 2px solid #10a37f;
+      outline-offset: 2px;
+    }
+    .conversation-item.active {
+      background: #343541;
+      border-color: #10a37f;
+      color: #fff;
+    }
+    .conversation-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      flex-shrink: 0;
+    }
+    .conversation-action-btn {
+      width: 24px;
+      height: 24px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: #9ca3af;
+      font-size: 0.82rem;
+      line-height: 1;
+      cursor: pointer;
+    }
+    .conversation-action-btn:hover {
+      background: #3f414a;
+      color: #fff;
+      border-color: #555861;
+    }
+    .conversation-empty {
+      color: #9ca3af;
+      font-size: 0.88rem;
+      padding: 12px 10px;
     }
     .chat-container {
       background: #2b2b2b;
-      border-radius: 14px;
+      border-radius: 8px;
       box-shadow: 0 2px 18px #101015cc;
       padding: 1.4em;
       width: 95vw;
-      max-width: 440px;
+      max-width: 760px;
       min-height: 60vh;
       display: flex;
       flex-direction: column;
@@ -459,6 +567,23 @@
     }
     .chat-msg.arabic-msg.user { color: #60a5fa; }
     .arabic-label { font-size: 0.72rem; color: #888; margin-bottom: 2px; }
+    @media (max-width: 820px) {
+      main {
+        flex-direction: column;
+        padding: 12px;
+      }
+      .conversation-sidebar {
+        width: 100%;
+        max-width: none;
+        min-height: 150px;
+        max-height: 230px;
+      }
+      .chat-container {
+        width: 100%;
+        max-width: none;
+        box-sizing: border-box;
+      }
+    }
   </style>
 </head>
 <body>
@@ -504,6 +629,12 @@
     <button class="kb-banner-close" onclick="dismissKbBanner()">✕ Dismiss</button>
   </div>
   <main>
+    <aside class="conversation-sidebar" aria-label="Chat history">
+      <div class="conversation-sidebar-header">
+        <button type="button" class="new-chat-btn" id="newChatBtn"><span>+</span><span>New Chat</span></button>
+      </div>
+      <div class="conversation-list" id="conversationList"></div>
+    </aside>
     <div class="chat-container">
       <!-- Language Selector Bar -->
       <div class="lang-bar" id="langBar">
@@ -586,6 +717,8 @@
     const chatLog = document.getElementById('chatLog');
     const chatForm = document.getElementById('chatForm');
     const chatInput = document.getElementById('chatInput');
+    const conversationListEl = document.getElementById('conversationList');
+    const newChatBtn = document.getElementById('newChatBtn');
     const sendBtn = chatForm ? chatForm.querySelector('button[type="submit"]') : null;
     const btnStart = document.getElementById('btnStart');
     const btnMute = document.getElementById('btnMute');
@@ -610,6 +743,11 @@
     let lastAssistantFinalText = '';
     let lastAssistantFinalUserText = '';
     let _lastFinalTtsSignature = '';
+    let activeConversationId = null;
+    let conversations = [];
+    let loadedConversationId = null;
+    let conversationLoadInFlightId = null;
+    let lastWsConversationIdSent = null;
 
     function resetWsResponseBuffer(reason = 'new_request', userText = '') {
       finishAssistantTypingNow();
@@ -637,6 +775,269 @@
       if (sendBtn) {
         sendBtn.disabled = textRequestInFlight;
       }
+    }
+
+    function renderConversationList() {
+      if (!conversationListEl) return;
+      conversationListEl.innerHTML = '';
+      if (!conversations.length) {
+        const empty = document.createElement('div');
+        empty.className = 'conversation-empty';
+        empty.textContent = 'No chats yet';
+        conversationListEl.appendChild(empty);
+        return;
+      }
+      conversations.forEach(conv => {
+        const item = document.createElement('div');
+        item.className = `conversation-item${conv.id === activeConversationId ? ' active' : ''}`;
+        item.dataset.id = conv.id;
+        item.setAttribute('role', 'button');
+        item.tabIndex = 0;
+        item.title = conv.title || 'New chat';
+        const title = document.createElement('span');
+        title.className = 'conversation-title';
+        title.textContent = conv.title || 'New chat';
+        const actions = document.createElement('span');
+        actions.className = 'conversation-actions';
+        const renameBtn = document.createElement('button');
+        renameBtn.type = 'button';
+        renameBtn.className = 'conversation-action-btn';
+        renameBtn.textContent = '✎';
+        renameBtn.title = 'Rename chat';
+        renameBtn.setAttribute('aria-label', `Rename ${conv.title || 'chat'}`);
+        renameBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          renameConversation(conv.id, conv.title || 'New chat');
+        });
+        const deleteBtn = document.createElement('button');
+        deleteBtn.type = 'button';
+        deleteBtn.className = 'conversation-action-btn';
+        deleteBtn.textContent = '×';
+        deleteBtn.title = 'Delete chat';
+        deleteBtn.setAttribute('aria-label', `Delete ${conv.title || 'chat'}`);
+        deleteBtn.addEventListener('click', (event) => {
+          event.stopPropagation();
+          deleteConversation(conv.id);
+        });
+        actions.appendChild(renameBtn);
+        actions.appendChild(deleteBtn);
+        item.appendChild(title);
+        item.appendChild(actions);
+        item.addEventListener('click', () => loadConversation(conv.id));
+        item.addEventListener('keydown', (event) => {
+          if (event.target !== item) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            loadConversation(conv.id);
+          }
+        });
+        conversationListEl.appendChild(item);
+      });
+    }
+
+    async function fetchConversations() {
+      const resp = await fetch('/conversations', { credentials: 'include' });
+      if (!resp.ok) throw new Error(`Failed to load conversations (${resp.status})`);
+      const data = await resp.json();
+      conversations = Array.isArray(data.conversations) ? data.conversations : [];
+      renderConversationList();
+      return conversations;
+    }
+
+    function resetChatSurface() {
+      finishAssistantTypingNow();
+      clearTypingTimers();
+      full_response = '';
+      wsResponseActive = false;
+      wsResponseFinalized = true;
+      responseAudioReceived = false;
+      currentResponseUserText = '';
+      currentResponseHasTextChunk = false;
+      _streamingMsgEl = null;
+      _typingTargetText = '';
+      _typingRenderedText = '';
+      _typingActive = false;
+      _typingFinalized = false;
+      if (chatLog) chatLog.innerHTML = '';
+      greetingMsgEl = null;
+      hideThinking();
+      hideAISpeaking();
+    }
+
+    function notifyConversationSelection() {
+      if (!activeConversationId || !ws || ws.readyState !== WebSocket.OPEN) return;
+      if (activeConversationId === lastWsConversationIdSent) {
+        console.log(`[CONV UI] ws_set_conversation skipped id=${activeConversationId}`);
+        return;
+      }
+      try {
+        ws.send(JSON.stringify({
+          type: 'control',
+          action: 'set_conversation_id',
+          conversation_id: activeConversationId,
+        }));
+        lastWsConversationIdSent = activeConversationId;
+        console.log(`[CONV UI] ws_set_conversation sent id=${activeConversationId}`);
+      } catch (e) {
+        console.warn('[CONV] failed to notify websocket conversation id', e);
+      }
+    }
+
+    function setActiveConversationId(conversationId) {
+      activeConversationId = conversationId ? String(conversationId) : activeConversationId;
+      renderConversationList();
+      notifyConversationSelection();
+    }
+
+    function renderConversationMessages(messages, conversationId = null) {
+      resetChatSurface();
+      (messages || []).forEach(message => {
+        if (!message || !['user', 'assistant'].includes(message.role)) return;
+        appendMsg(message.role, message.text || '', detectArabicText(message.text || ''));
+      });
+      if (conversationId) loadedConversationId = String(conversationId);
+    }
+
+    async function loadConversation(conversationId) {
+      const requestedId = conversationId ? String(conversationId) : '';
+      if (!requestedId || textRequestInFlight) return;
+      if (requestedId === activeConversationId && requestedId === loadedConversationId) {
+        console.log(`[CONV UI] skip_duplicate_load id=${requestedId}`);
+        return;
+      }
+      if (requestedId === conversationLoadInFlightId) {
+        console.log(`[CONV UI] skip_duplicate_load id=${requestedId}`);
+        return;
+      }
+      conversationLoadInFlightId = requestedId;
+      try {
+        const resp = await fetch(`/conversations/${encodeURIComponent(requestedId)}`, {
+          credentials: 'include',
+        });
+        if (!resp.ok) {
+          appendMsg('system', '[Error] Could not load chat.');
+          return;
+        }
+        const conversation = await resp.json();
+        setActiveConversationId(conversation.id);
+        renderConversationMessages(conversation.messages || [], conversation.id);
+        renderConversationList();
+        if (chatInput) chatInput.focus();
+      } finally {
+        if (conversationLoadInFlightId === requestedId) conversationLoadInFlightId = null;
+      }
+    }
+
+    async function createNewConversation() {
+      if (textRequestInFlight) return;
+      const resp = await fetch('/conversations', {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!resp.ok) {
+        appendMsg('system', '[Error] Could not create chat.');
+        return null;
+      }
+      const conversation = await resp.json();
+      activeConversationId = conversation.id;
+      resetChatSurface();
+      loadedConversationId = conversation.id;
+      await fetchConversations();
+      setActiveConversationId(conversation.id);
+      if (chatInput) chatInput.focus();
+      return conversation;
+    }
+
+    async function renameConversation(conversationId, currentTitle) {
+      if (!conversationId || textRequestInFlight) return;
+      const nextTitle = prompt('Rename chat', currentTitle || 'New chat');
+      if (nextTitle === null) return;
+      const title = nextTitle.trim();
+      if (!title) {
+        appendMsg('system', '[Error] Chat title cannot be empty.');
+        return;
+      }
+      const resp = await fetch(`/conversations/${encodeURIComponent(conversationId)}`, {
+        method: 'PATCH',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: title.slice(0, 80) }),
+      });
+      if (!resp.ok) {
+        appendMsg('system', '[Error] Could not rename chat.');
+        return;
+      }
+      await fetchConversations();
+      renderConversationList();
+    }
+
+    async function deleteConversation(conversationId) {
+      if (!conversationId || textRequestInFlight) return;
+      if (!confirm('Delete this chat?')) return;
+      const requestedId = String(conversationId);
+      const wasActive = requestedId === activeConversationId;
+      const resp = await fetch(`/conversations/${encodeURIComponent(requestedId)}`, {
+        method: 'DELETE',
+        credentials: 'include',
+      });
+      if (!resp.ok) {
+        appendMsg('system', '[Error] Could not delete chat.');
+        return;
+      }
+      await fetchConversations();
+      if (wasActive) {
+        activeConversationId = null;
+        loadedConversationId = null;
+        lastWsConversationIdSent = null;
+        if (conversations.length) {
+          await loadConversation(conversations[0].id);
+        } else {
+          await createNewConversation();
+        }
+      } else {
+        renderConversationList();
+      }
+    }
+
+    async function refreshConversationsQuietly() {
+      try {
+        await fetchConversations();
+      } catch (e) {
+        console.warn('[CONV] refresh failed', e);
+      }
+    }
+
+    async function storeLocalConversationMessage(role, text) {
+      if (!activeConversationId || !text) return;
+      try {
+        await fetch(`/conversations/${encodeURIComponent(activeConversationId)}/message`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role, text }),
+        });
+        await refreshConversationsQuietly();
+      } catch (e) {
+        console.warn('[CONV] local message persist failed', e);
+      }
+    }
+
+    async function initializeConversationUi() {
+      try {
+        await fetchConversations();
+        if (conversations.length) {
+          await loadConversation(conversations[0].id);
+        } else {
+          await createNewConversation();
+        }
+      } catch (e) {
+        console.warn('[CONV] initialization failed', e);
+        renderConversationList();
+      }
+    }
+
+    if (newChatBtn) {
+      newChatBtn.addEventListener('click', createNewConversation);
     }
 
     // ===== LANGUAGE MANAGEMENT =====
@@ -1039,17 +1440,26 @@
 
       ws.onopen = () => {
         console.log("[DEBUG] WebSocket connected successfully");
+        notifyConversationSelection();
         ensureGreetingMessage();
-        appendMsg('system', 'Connected to Assistify RAG system.');
+        if (!chatHasConversationContent()) {
+          appendMsg('system', 'Connected to Assistify RAG system.');
+        }
         reconnectAttempts = 0;
       };
 
       ws.onclose = () => {
+        const hadPendingRequest = textRequestInFlight || wsResponseActive;
         wsResponseActive = false;
         wsResponseFinalized = true;
         setTextSubmitLock(false);
         hideThinking();
-        appendMsg('system', '[Connection lost - attempting to reconnect...]');
+        appendMsg(
+          'system',
+          hadPendingRequest
+            ? '[Connection interrupted while waiting for the answer. Please try again.]'
+            : '[Connection lost - attempting to reconnect...]'
+        );
         if(isRecording) {
           stopRecording();
         }
@@ -1079,6 +1489,11 @@
         if (data.timing) {
           console.log(`[TIMING] Received timing data:`, data.timing);
           Object.assign(_active_timing, data.timing);
+        }
+        if (data.conversation_id && data.conversation_id !== activeConversationId) {
+          activeConversationId = data.conversation_id;
+          renderConversationList();
+          refreshConversationsQuietly();
         }
 
         if(data.type === 'thinking') {
@@ -1158,6 +1573,7 @@
             }
           }
           setTextSubmitLock(false);
+          refreshConversationsQuietly();
 
         } else if(data.type === 'aiResponse') {
           const finalCandidate = data.text || full_response || '';
@@ -1186,6 +1602,7 @@
             hideThinking();
           }
           setTextSubmitLock(false);
+          refreshConversationsQuietly();
 
         } else if(data.type === 'transcript') {
           if(data.final && data.text && data.text.trim() && data.text !== lastTranscript) {
@@ -1215,6 +1632,12 @@
           appendMsg('system', '[Error] ' + (data.message || 'Connection error'));
         } else if(data.type === 'info') {
           appendMsg('system', data.message);
+        } else if(data.type === 'conversation') {
+          if (data.conversation_id && data.conversation_id !== activeConversationId) {
+            activeConversationId = String(data.conversation_id);
+            renderConversationList();
+            refreshConversationsQuietly();
+          }
         } else if(data.type === 'control') {
           console.log('[Control]', data);
         } else if(data.type === 'arabic_tts_complete') {
@@ -1248,8 +1671,8 @@
       };
     }
 
-    // Initialize connection
-    connectWebSocket();
+    // Initialize conversations, then connect the live socket.
+    initializeConversationUi().finally(connectWebSocket);
 
     const ASSISTANT_HELP_RESPONSES = {
       en: 'I can help you with the uploaded documents. You can ask me to explain concepts, list items mentioned in the documents, summarize relevant parts, compare grounded topics, and answer in English or Arabic when supported.',
@@ -1331,6 +1754,10 @@
           requestText: text,
         });
         queueAssistantTyping(helpIntent.response, true);
+        (async () => {
+          await storeLocalConversationMessage('user', text);
+          await storeLocalConversationMessage('assistant', helpIntent.response);
+        })();
         return;
       }
 
@@ -1343,7 +1770,7 @@
       setTextSubmitLock(true);
       showThinking();
       try {
-        ws.send(JSON.stringify({ text, language: effectiveLang }));
+        ws.send(JSON.stringify({ text, language: effectiveLang, conversation_id: activeConversationId }));
       } catch (err) {
         setTextSubmitLock(false);
         hideThinking();

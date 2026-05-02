@@ -1,0 +1,36 @@
+{
+  "conversations": [
+    {
+      "id": "f721f06e-d184-40d5-83de-fb8038d0a9a2",
+      "title": "hi",
+      "messages": [
+        {
+          "role": "user",
+          "text": "hi"
+        },
+        {
+          "role": "assistant",
+          "text": "Hello! How can I assist you today?"
+        },
+        {
+          "role": "user",
+          "text": "what is pyschology?"
+        },
+        {
+          "role": "assistant",
+          "text": "Psychology is the scientific study of behavior and mental processes."
+        },
+        {
+          "role": "user",
+          "text": "what is managment"
+        },
+        {
+          "role": "assistant",
+          "text": "Management is a social process where by businesses aim to fulfill the needs and desires of society's members by utilizing society's resources."
+        }
+      ],
+      "created_at": "2026-05-02T03:27:09.678474+00:00",
+      "updated_at": "2026-05-02T03:28:01.599993+00:00"
+    }
+  ]
+}

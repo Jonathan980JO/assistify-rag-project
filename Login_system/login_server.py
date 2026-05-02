@@ -2492,6 +2492,112 @@ def logout(request: Request):
 
 
 
+
+# ========== CONVERSATION HISTORY PROXIES ==========
+@app.get("/conversations")
+async def conversations_proxy(request: Request, user=Depends(require_login())):
+    """Proxy conversation list requests to the RAG server."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(
+                f"{RAG_HTTP_BASE}/conversations",
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
+@app.get("/conversations/{conversation_id}")
+async def conversation_detail_proxy(conversation_id: str, request: Request, user=Depends(require_login())):
+    """Proxy conversation detail requests to the RAG server."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(
+                f"{RAG_HTTP_BASE}/conversations/{conversation_id}",
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
+@app.post("/conversations")
+async def conversation_create_proxy(request: Request, user=Depends(require_login())):
+    """Proxy conversation creation to the RAG server."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(
+                f"{RAG_HTTP_BASE}/conversations",
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
+@app.patch("/conversations/{conversation_id}")
+async def conversation_rename_proxy(conversation_id: str, request: Request, user=Depends(require_login())):
+    """Proxy conversation rename requests to the RAG server."""
+    body = await request.body()
+    headers = _rag_proxy_headers(request)
+    headers["Content-Type"] = request.headers.get("content-type", "application/json")
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.patch(
+                f"{RAG_HTTP_BASE}/conversations/{conversation_id}",
+                data=body,
+                headers=headers,
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
+@app.delete("/conversations/{conversation_id}")
+async def conversation_delete_proxy(conversation_id: str, request: Request, user=Depends(require_login())):
+    """Proxy conversation deletion requests to the RAG server."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.delete(
+                f"{RAG_HTTP_BASE}/conversations/{conversation_id}",
+                headers=_rag_proxy_headers(request),
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
+@app.post("/conversations/{conversation_id}/message")
+async def conversation_message_proxy(conversation_id: str, request: Request, user=Depends(require_login())):
+    """Proxy frontend-only message persistence to the RAG server."""
+    body = await request.body()
+    headers = _rag_proxy_headers(request)
+    headers["Content-Type"] = request.headers.get("content-type", "application/json")
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(
+                f"{RAG_HTTP_BASE}/conversations/{conversation_id}/message",
+                data=body,
+                headers=headers,
+            ) as resp:
+                return await _rag_json_or_error(resp)
+    except HTTPException:
+        raise
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"RAG server unreachable: {str(e)}")
+
+
 # ========== ARABIC LANGUAGE SUPPORT PROXIES ==========
 @app.get("/arabic/status")
 async def arabic_status_proxy(request: Request):
