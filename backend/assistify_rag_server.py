@@ -6,9 +6,11 @@ import asyncio
 import logging
 import sqlite3
 import math
+from datetime import datetime, timezone
 from urllib.parse import urlsplit
 from pathlib import Path
 from collections import defaultdict, Counter
+from threading import RLock
 
 print("RUNNING PATCHED VERSION")
 # Silence a known third-party warning (ctranslate2 imports pkg_resources).
@@ -55,7 +57,7 @@ from itsdangerous import URLSafeSerializer
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel
-from typing import Optional, TYPE_CHECKING, List, Set, Dict, Tuple, Any, Union, Callable, Awaitable
+from typing import Optional, TYPE_CHECKING, List, Set, Dict, Tuple, Any, Union, Callable, Awaitable, cast
 ###############################
 # Voice pipeline globals (fix NameError)
 _active_voice_task = None
@@ -423,6 +425,260 @@ conversation_history = defaultdict(list)
 MAX_CONVERSATIONS = 1000  # Maximum number of conversations to keep in memory
 MAX_CONVERSATION_AGE = 3600  # Maximum age of conversation in seconds (1 hour)
 conversation_timestamps = {}  # Track last activity time for cleanup
+
+CONVERSATIONS_FILE = Path(__file__).resolve().parent / "conversations.json"
+_conversation_store_lock = RLock()
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _empty_conversation_store() -> dict:
+    return {"conversations": []}
+
+
+def _ensure_conversation_store_file() -> None:
+    with _conversation_store_lock:
+        if not CONVERSATIONS_FILE.exists():
+            CONVERSATIONS_FILE.write_text(
+                json.dumps(_empty_conversation_store(), indent=2),
+                encoding="utf-8",
+            )
+
+
+def _load_conversation_store() -> dict:
+    with _conversation_store_lock:
+        _ensure_conversation_store_file()
+        try:
+            data = json.loads(CONVERSATIONS_FILE.read_text(encoding="utf-8") or "{}")
+        except Exception:
+            logger.exception("[CONV] failed to read conversation store; using empty store")
+            data = _empty_conversation_store()
+        if not isinstance(data, dict):
+            data = _empty_conversation_store()
+        conversations = data.get("conversations")
+        if not isinstance(conversations, list):
+            data["conversations"] = []
+        return data
+
+
+def _save_conversation_store(data: dict) -> None:
+    with _conversation_store_lock:
+        _ensure_conversation_store_file()
+        tmp_path = CONVERSATIONS_FILE.with_suffix(".json.tmp")
+        tmp_path.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        tmp_path.replace(CONVERSATIONS_FILE)
+
+
+def _find_conversation(data: dict, conversation_id: str) -> dict | None:
+    for conversation in data.get("conversations", []) or []:
+        if isinstance(conversation, dict) and conversation.get("id") == conversation_id:
+            return conversation
+    return None
+
+
+def _conversation_title_from_text(text: str) -> str:
+    words = re.findall(r"\S+", str(text or "").strip())
+    if not words:
+        return "New chat"
+    title = " ".join(words[:8])
+    if len(words) > 8:
+        title += "..."
+    return title[:80]
+
+
+def create_conversation(title: str | None = None) -> dict:
+    data = _load_conversation_store()
+    now = _utc_now_iso()
+    conversation = {
+        "id": str(uuid.uuid4()),
+        "title": (title or "New chat").strip() or "New chat",
+        "messages": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    data["conversations"].insert(0, conversation)
+    _save_conversation_store(data)
+    logger.info("[CONV] created id=%s", conversation["id"])
+    return conversation
+
+
+def get_or_create_conversation(conversation_id: str | None = None) -> dict:
+    data = _load_conversation_store()
+    if conversation_id:
+        existing = _find_conversation(data, conversation_id)
+        if existing is not None:
+            logger.info("[CONV] loaded id=%s", conversation_id)
+            return existing
+    return create_conversation()
+
+
+def list_conversations_summary() -> list[dict]:
+    data = _load_conversation_store()
+    conversations = [c for c in data.get("conversations", []) if isinstance(c, dict)]
+    conversations.sort(key=lambda c: str(c.get("updated_at") or ""), reverse=True)
+    return [
+        {
+            "id": c.get("id"),
+            "title": c.get("title") or "New chat",
+            "updated_at": c.get("updated_at"),
+        }
+        for c in conversations
+        if c.get("id")
+    ]
+
+
+def load_conversation_messages(conversation_id: str) -> list[dict]:
+    data = _load_conversation_store()
+    conversation = _find_conversation(data, conversation_id)
+    if conversation is None:
+        raise KeyError(conversation_id)
+    logger.info("[CONV] loaded id=%s", conversation_id)
+    messages = conversation.get("messages") or []
+    return [m for m in messages if isinstance(m, dict)]
+
+
+def append_conversation_message(conversation_id: str, role: str, text: str) -> dict:
+    role_value = str(role or "").strip().lower()
+    if role_value not in {"user", "assistant"}:
+        raise ValueError("role must be 'user' or 'assistant'")
+    text_value = str(text or "").strip()
+    data = _load_conversation_store()
+    conversation = _find_conversation(data, conversation_id)
+    if conversation is None:
+        raise KeyError(conversation_id)
+    messages = conversation.setdefault("messages", [])
+    messages.append({"role": role_value, "text": text_value})
+    if role_value == "user" and (not conversation.get("title") or conversation.get("title") == "New chat"):
+        conversation["title"] = _conversation_title_from_text(text_value)
+    conversation["updated_at"] = _utc_now_iso()
+    _save_conversation_store(data)
+    logger.info("[CONV] message_added role=%s id=%s", role_value, conversation.get("id"))
+    return conversation
+
+
+def _conversation_summary(conversation: dict) -> dict:
+    return {
+        "id": conversation.get("id"),
+        "title": conversation.get("title") or "New chat",
+        "updated_at": conversation.get("updated_at"),
+    }
+
+
+def rename_conversation(conversation_id: str, title: str) -> dict:
+    title_value = re.sub(r"\s+", " ", str(title or "")).strip()
+    if not title_value:
+        raise ValueError("title must not be empty")
+    if len(title_value) > 80:
+        title_value = title_value[:80].rstrip()
+    data = _load_conversation_store()
+    conversation = _find_conversation(data, conversation_id)
+    if conversation is None:
+        raise KeyError(conversation_id)
+    conversation["title"] = title_value
+    conversation["updated_at"] = _utc_now_iso()
+    _save_conversation_store(data)
+    logger.info("[CONV] renamed id=%s title=%s", conversation_id, title_value)
+    return _conversation_summary(conversation)
+
+
+def delete_conversation(conversation_id: str) -> None:
+    data = _load_conversation_store()
+    conversations = [c for c in data.get("conversations", []) if isinstance(c, dict)]
+    remaining = [c for c in conversations if c.get("id") != conversation_id]
+    if len(remaining) == len(conversations):
+        raise KeyError(conversation_id)
+    data["conversations"] = remaining
+    _save_conversation_store(data)
+    conversation_history.pop(conversation_id, None)
+    last_answer_state.pop(conversation_id, None)
+    recent_grounded_definition_concepts.pop(conversation_id, None)
+    conversation_timestamps.pop(conversation_id, None)
+    logger.info("[CONV] deleted id=%s", conversation_id)
+
+
+def _history_from_conversation_messages(conversation_id: str) -> list[dict]:
+    try:
+        messages = load_conversation_messages(conversation_id)
+    except KeyError:
+        return []
+    history: list[dict] = []
+    for message in messages:
+        role = message.get("role")
+        text = message.get("text")
+        if role in {"user", "assistant"}:
+            history.append({"role": role, "content": str(text or "")})
+    return history
+
+
+def bind_conversation_memory(runtime_id: str, conversation_id: str) -> None:
+    if not runtime_id or not conversation_id:
+        return
+    if conversation_id not in conversation_history:
+        conversation_history[conversation_id] = _history_from_conversation_messages(conversation_id)
+    conversation_history[runtime_id] = conversation_history[conversation_id]
+    conversation_timestamps[runtime_id] = time.time()
+    conversation_timestamps[conversation_id] = time.time()
+    if conversation_id in last_answer_state:
+        last_answer_state[runtime_id] = last_answer_state[conversation_id]
+    else:
+        last_answer_state.pop(runtime_id, None)
+    if conversation_id in recent_grounded_definition_concepts:
+        recent_grounded_definition_concepts[runtime_id] = recent_grounded_definition_concepts[conversation_id]
+    else:
+        recent_grounded_definition_concepts.pop(runtime_id, None)
+
+
+def persist_runtime_memory(runtime_id: str, conversation_id: str) -> None:
+    if not runtime_id or not conversation_id:
+        return
+    if runtime_id in conversation_history:
+        conversation_history[conversation_id] = conversation_history[runtime_id]
+    if runtime_id in last_answer_state:
+        last_answer_state[conversation_id] = last_answer_state[runtime_id]
+    else:
+        last_answer_state.pop(conversation_id, None)
+    if runtime_id in recent_grounded_definition_concepts:
+        recent_grounded_definition_concepts[conversation_id] = recent_grounded_definition_concepts[runtime_id]
+    else:
+        recent_grounded_definition_concepts.pop(conversation_id, None)
+    conversation_timestamps[conversation_id] = time.time()
+
+
+class ConversationCaptureWebSocket:
+    def __init__(self, websocket: WebSocket, conversation_id: str, runtime_id: str):
+        self._websocket = websocket
+        self._conversation_id = conversation_id
+        self._runtime_id = runtime_id
+        self._assistant_saved = False
+
+    async def send_json(self, payload):
+        if isinstance(payload, dict):
+            payload.setdefault("conversation_id", self._conversation_id)
+        await self._websocket.send_json(payload)
+        if (
+            isinstance(payload, dict)
+            and payload.get("type") == "aiResponseDone"
+            and not self._assistant_saved
+        ):
+            assistant_text = str(payload.get("fullText") or payload.get("text") or "").strip()
+            if assistant_text:
+                try:
+                    append_conversation_message(self._conversation_id, "assistant", assistant_text)
+                    self._assistant_saved = True
+                except Exception:
+                    logger.exception("[CONV] failed to persist assistant message id=%s", self._conversation_id)
+            persist_runtime_memory(self._runtime_id, self._conversation_id)
+
+    async def send_bytes(self, data):
+        await self._websocket.send_bytes(data)
+
+    def __getattr__(self, name: str):
+        return getattr(self._websocket, name)
 
 def cleanup_old_conversations():
     """Remove old conversations to prevent memory leak."""
@@ -5223,6 +5479,7 @@ async def startup_event():
     
     init_database()
     init_analytics_db()
+    _ensure_conversation_store_file()
     logger.warning(
         "[INGEST OWNER] RAG server is the single ingestion/delete owner; "
         "admin/login servers must proxy upload, update, and delete requests only."
@@ -6218,20 +6475,13 @@ def _is_arabic_small_talk(text: str) -> bool:
     t_norm = _re_mod.sub(r"[?؟!.,،؛:\-\"']+", ' ', t)
     t_norm = _re_mod.sub(r'\s+', ' ', t_norm).strip()
 
-    # Check against known greeting patterns
-    for phrase in ARABIC_GENERAL_TOPICS:
-        if phrase in t_norm:
-            return True
-
     # Interrogative starters are likely real questions, not greetings.
     if any(t_norm.startswith(prefix) for prefix in ("مين", "من", "ما", "ماذا", "كيف", "ليش", "لماذا", "وين", "متى")):
         return False
 
-    # Keep only ultra-short courtesy tokens as small talk.
-    if t_norm in {"شكرا", "شكراً", "thanks", "thank you", "ok", "okay"}:
-        return True
-
-    return False
+    # Keep only pure courtesy/greeting tokens as small talk; mixed queries
+    # like "مرحبا ما هو ..." must continue to the document router.
+    return t_norm in {str(p).strip().lower() for p in ARABIC_GENERAL_TOPICS} | {"تمام"}
 
 
 # ---- Arabic→English translation cache ----
@@ -9043,6 +9293,10 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
 
     generic_answer = _build_grounded_llm_answer(query, docs)
     if generic_answer:
+        _family_v2_for_generic = _classify_query_family_v2(query)
+        if _family_v2_for_generic not in {"definition_entity", "list_entity", "explanatory_compare", "fact_entity"} and not _should_allow_generic_answer(query, docs or [], _family_v2_for_generic, "ws_fix_generic_extracted"):
+            logger.info("[ANSWER BLOCKED] reason=low_confidence_generic")
+            return not_found
         logger.info("[WS FIXED ANSWER] mode=generic extracted=%s", generic_answer[:220])
         return _finalize_definition_output(generic_answer) if is_definition_mode else generic_answer
 
@@ -15070,8 +15324,6 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
     if not q.strip():
         return q
 
-    # P4: Removed domain-specific tokens (principles, management, abc, rebt, ellis)
-    # that biased spelling correction toward the previously-tested PDFs.
     query_core_vocab = {
         "what", "who", "define", "tell", "about", "explain", "overview", "summary",
         "chapter", "section", "list", "compare", "difference", "between", "process",
@@ -15105,26 +15357,57 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
             prev = cur
         return prev[lb]
 
-    def _build_dynamic_vocab() -> tuple[set[str], Dict[str, int], Dict[str, list[str]]]:
+    def _build_dynamic_vocab() -> tuple[set[str], Dict[str, int], Dict[str, list[str]], Dict[str, str]]:
         vocab_counter: Counter = Counter()
+        source_map: Dict[str, str] = {}
         for tok in query_core_vocab:
             vocab_counter[tok] += 1
+            source_map[tok] = "query_terms"
+
+        cached_payload = getattr(_lightweight_spelling_correction, "_doc_vocab_cache", None)
+        cache_key = None
 
         try:
             collection = getattr(getattr(live_rag, "vs", None), "collection", None)
             if collection is not None:
-                payload = collection.get(include=["documents"], limit=280)
-                docs_blob = payload.get("documents") if isinstance(payload, dict) else None
-                docs: list[str] = []
-                if isinstance(docs_blob, list):
-                    for entry in docs_blob:
-                        if isinstance(entry, str):
-                            docs.append(entry)
-                        elif isinstance(entry, list):
-                            docs.extend(str(x) for x in entry if isinstance(x, str))
-                for doc in docs[:280]:
-                    for tok in re.findall(r"[a-z]{4,22}", doc.lower()):
-                        vocab_counter[tok] += 1
+                collection_name = str(getattr(collection, "name", "") or "")
+                try:
+                    collection_count = int(collection.count())
+                except Exception:
+                    collection_count = 0
+                cache_key = (collection_name, collection_count)
+                if isinstance(cached_payload, dict) and cached_payload.get("key") == cache_key:
+                    doc_freq = cached_payload.get("freq") or {}
+                    for tok, freq in doc_freq.items():
+                        if isinstance(tok, str):
+                            vocab_counter[tok] += int(freq or 0)
+                            source_map.setdefault(tok, "document_vocab")
+                else:
+                    payload = collection.get(include=["documents", "metadatas"], limit=min(max(collection_count, 1), 5000))
+                    docs_blob = payload.get("documents") if isinstance(payload, dict) else None
+                    metas_blob = payload.get("metadatas") if isinstance(payload, dict) else None
+                    docs: list[str] = []
+                    if isinstance(docs_blob, list):
+                        for entry in docs_blob:
+                            if isinstance(entry, str):
+                                docs.append(entry)
+                            elif isinstance(entry, list):
+                                docs.extend(str(x) for x in entry if isinstance(x, str))
+                    if isinstance(metas_blob, list):
+                        for meta in metas_blob:
+                            if isinstance(meta, dict):
+                                docs.append(" ".join(str(v) for v in meta.values() if isinstance(v, (str, int, float))))
+                    doc_counter: Counter = Counter()
+                    for doc in docs:
+                        for tok in re.findall(r"[a-z]{4,22}", doc.lower()):
+                            doc_counter[tok] += 1
+                    for tok, freq in doc_counter.items():
+                        vocab_counter[tok] += freq
+                        source_map.setdefault(tok, "document_vocab")
+                    try:
+                        setattr(_lightweight_spelling_correction, "_doc_vocab_cache", {"key": cache_key, "freq": dict(doc_counter)})
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -15132,6 +15415,7 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
             txt = str((d or {}).get("page_content") or (d or {}).get("text") or "")[:3000]
             for tok in re.findall(r"[a-z]{4,22}", txt.lower()):
                 vocab_counter[tok] += 1
+                source_map[tok] = "retrieved_terms"
 
         filtered_vocab = {
             tok for tok, freq in vocab_counter.items()
@@ -15143,15 +15427,24 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
         by_initial: Dict[str, list[str]] = defaultdict(list)
         for tok in filtered_vocab:
             by_initial[tok[0]].append(tok)
-        return filtered_vocab, dict(vocab_counter), by_initial
+        return filtered_vocab, dict(vocab_counter), by_initial, source_map
 
-    vocab, freq_map, by_initial = _build_dynamic_vocab()
+    vocab, freq_map, by_initial, source_map = _build_dynamic_vocab()
 
     q_low = re.sub(r"\s+", " ", q.strip().lower())
     list_query_mode = bool(
         _is_targeted_list_question(q_low)
         or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
     )
+
+    correction_events: list[dict] = []
+
+    def _case_like(original: str, replacement: str) -> str:
+        if original.isupper():
+            return replacement.upper()
+        if original[:1].isupper():
+            return replacement.capitalize()
+        return replacement
 
     def _replace_token(m: re.Match) -> str:
         token = m.group(0)
@@ -15162,33 +15455,64 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
             return token
         if low in preserve_short_terms:
             return token
-        if len(low) < 4 or low in vocab:
+        if len(low) < 4 or low in query_core_vocab:
+            return token
+        low_freq = int(freq_map.get(low, 0) or 0)
+        if low in vocab and low_freq >= 5:
             return token
 
-        candidates = [
-            cand for cand in by_initial.get(low[0], [])
-            if abs(len(cand) - len(low)) <= 2
-        ]
+        candidates = [cand for cand in by_initial.get(low[0], []) if abs(len(cand) - len(low)) <= 2]
         if not candidates:
             return token
 
         best = token
         best_dist = 3
         best_freq = -1
+        second_dist = 3
         for cand in candidates:
+            if cand == low:
+                continue
             dist = _edit_distance_leq(low, cand, cap=2)
             if dist > 2:
                 continue
             cand_freq = int(freq_map.get(cand, 0))
             if dist < best_dist or (dist == best_dist and cand_freq > best_freq):
+                second_dist = best_dist
                 best = cand
                 best_dist = dist
                 best_freq = cand_freq
+            elif dist < second_dist:
+                second_dist = dist
 
-        return best if best_dist <= 2 else token
+        if best_dist > 2:
+            return token
+        confidence = max(0.0, 1.0 - (best_dist / max(len(low), len(best), 1)))
+        if best_freq >= 4:
+            confidence = min(0.99, confidence + 0.04)
+        if second_dist == best_dist and best_freq < 4:
+            return token
+        if confidence < 0.76:
+            return token
+        if low in vocab and best_freq < max(low_freq * 5, low_freq + 8):
+            return token
+        correction_events.append({
+            "before": token,
+            "after": best,
+            "confidence": confidence,
+            "source": source_map.get(best, "document_vocab"),
+        })
+        return _case_like(token, best)
 
     corrected = re.sub(r"\b[a-zA-Z]{2,}\b", _replace_token, q)
     corrected = re.sub(r"\s+", " ", corrected).strip()
+    for event in correction_events:
+        logger.info(
+            "[SPELLING CORRECTION] before=%s after=%s confidence=%.2f source=%s",
+            event["before"],
+            event["after"],
+            event["confidence"],
+            event["source"],
+        )
     logger.info("[FLOW] query_after = %s", (corrected or "")[:400])
     return corrected or q
 
@@ -21491,19 +21815,260 @@ def _is_weak_retrieval_evidence(query_text: str, family: str, retrieved_docs: li
     return (coverage < 0.22 and focus_ratio <= 0.0 and max_similarity < 0.15) or (not reliable and coverage < 0.35)
 
 
-def _is_smalltalk(text: str) -> bool:
-    text = (text or "").lower().strip()
-    return text in [
-        "hi", "hello", "hey", "thanks", "thank you",
-        "ok", "okay", "good morning", "good evening",
-        "how are you"
+ASSISTANT_META_RESPONSE_EN = (
+    "I can help you with the uploaded documents. You can ask me to explain concepts, "
+    "summarize relevant parts, list items mentioned in the documents, compare grounded topics, "
+    "and answer in English or Arabic when supported."
+)
+ASSISTANT_META_RESPONSE_AR = (
+    "أقدر أساعدك في المستندات المرفوعة. يمكنك أن تسألني عن شرح المفاهيم، "
+    "تلخيص الأجزاء المهمة، استخراج القوائم المذكورة في المستندات، مقارنة الموضوعات "
+    "المدعومة بالمستندات، والإجابة بالعربية أو الإنجليزية عند توفر الدعم."
+)
+
+
+def _normalize_query_for_router(query: str) -> str:
+    q = str(query or "").strip().lower()
+    q = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", q)
+    q = re.sub(r"[إأآٱ]", "ا", q)
+    q = re.sub(r"ى", "ي", q)
+    q = re.sub(r"ؤ", "و", q)
+    q = re.sub(r"ئ", "ي", q)
+    q = re.sub(r"ة", "ه", q)
+    q = re.sub(r"[^0-9a-z\u0600-\u06FF]+", " ", q)
+    return re.sub(r"\s+", " ", q).strip()
+
+
+def _route_response_language(query: str, language: str | None = None) -> str:
+    explicit = str(language or "").strip().lower()
+    if explicit in {"en", "ar"}:
+        return explicit
+    return "ar" if _detect_language(str(query or "")) == "ar" else "en"
+
+
+def _is_pure_smalltalk_query(query: str) -> bool:
+    q = _normalize_query_for_router(query)
+    if not q:
+        return False
+    english_smalltalk = {
+        "hi", "hello", "hey", "thanks", "thank you", "ok thanks", "okay thanks",
+        "ok", "okay", "good morning", "good afternoon", "good evening", "how are you",
+    }
+    arabic_smalltalk = {
+        "تمام", "شكرا", "السلام عليكم", "اهلا", "اهلا وسهلا", "مرحبا",
+        "صباح الخير", "مساء الخير", "كيف حالك",
+    }
+    return q in english_smalltalk or q in arabic_smalltalk
+
+
+def _is_assistant_capability_or_meta_query(query: str) -> bool:
+    q = _normalize_query_for_router(query)
+    if not q:
+        return False
+
+    if _detect_language(query) == "ar":
+        if any(marker in q for marker in ("قدراتك", "امكانياتك", "بتكلم عنك", "اتكلم عنك", "اقصدك")):
+            return True
+        if re.search(r"\b(?:انا\s+)?(?:بتكلم|اتكلم)\s+عنك\b", q):
+            return True
+        if re.search(r"\bاقصد\s+(?:امكانياتك|قدراتك|انت)\b", q):
+            return True
+        if re.search(r"\b(?:ماذا|ما)\s+(?:يمكنك|تقدر|تستطيع)\s+(?:ان\s+)?(?:تفعل|تعمل)\b", q):
+            return True
+        if re.search(r"\b(?:بتعرف|تعرف|تقدر)\s+(?:تعمل|تفعل)\s+(?:ايه|ماذا)\b", q):
+            return True
+        if re.search(r"\b(?:تقدر|ممكن|يمكنك|هل\s+يمكنك)\s+تساعد(?:ني)?\s+(?:في|ب)\s+(?:ايه|ماذا)\b", q):
+            return True
+        if re.search(r"\b(?:اقدر|ممكن)\s+اسالك\s+عن\s+(?:ايه|ماذا)\b", q):
+            return True
+        if re.search(r"\bما\s+هي\s+(?:قدراتك|امكانياتك)\b", q):
+            return True
+        return False
+
+    if q == "help":
+        return True
+    if re.search(r"\bwho\s+are\s+you\b", q):
+        return True
+    if re.search(r"\bhow\s+do\s+you\s+work\b", q):
+        return True
+    if re.search(r"\bwhat\s+can\s+i\s+ask\s+you\b", q):
+        return True
+    if re.search(r"\bwhat\s+are\s+your\s+(?:abilities|capabilities)\b", q):
+        return True
+    if re.search(r"\b(?:your|you(?:r)?)\s+(?:abilities|capabilities)\b", q):
+        return True
+    if re.search(r"\b(?:i\s+am|i\s*m|im|i)\s+(?:talking|asking)\s+about\s+you\b", q):
+        return True
+    if re.search(r"\b(?:i\s+mean|i\s+meant|mean|meant|talking\s+about)\s+(?:your\s+)?(?:abilities|capabilities)\b", q):
+        return True
+    if re.search(r"\b(?:what|which)\s+(?:can|could|do)\s+you\s+(?:do|help)(?:\s+(?:me|us))?(?:\s+with)?\b", q):
+        return True
+    if re.search(r"\bhow\s+(?:can|could|do)\s+you\s+help(?:\s+(?:me|us))?\b", q):
+        return True
+    if re.search(r"\bwhat\s+(?:you\s+can|can\s+you)\s+help\s+with\b", q):
+        return True
+    return False
+
+
+def _is_unsupported_unclear_query(query: str) -> bool:
+    q = _normalize_query_for_router(query)
+    if not q:
+        return True
+    if re.fullmatch(r"(?:bro\s+)?what", q):
+        return True
+    if re.search(r"\bwhat\s+are\s+you\s+saying\b", q):
+        return True
+    if re.fullmatch(r"(?:no\s+)+i\s+mean\s+(?:that|this)\s+thing", q):
+        return True
+    if re.fullmatch(r"(?:that|this)\s+thing", q):
+        return True
+    if re.fullmatch(r"random\s+nonsense", q):
+        return True
+    if re.fullmatch(r"(?:no\s*){2,}(?:i\s+mean\s*)?(?:that|this|it)?", q):
+        return True
+    return False
+
+
+def _looks_like_document_question(query: str) -> bool:
+    q = _normalize_query_for_router(query)
+    if not q:
+        return False
+    if _detect_language(query) == "ar":
+        return bool(
+            re.search(r"\b(?:ما|ماذا|من|متي|اين|كيف|لماذا|هل)\b", q)
+            or re.search(r"\b(?:اشرح|عرف|لخص|قارن|اذكر|عدد|استخرج)\b", q)
+        )
+
+    if re.search(r"\b(?:what|which|who|when|where|why|how)\b", q):
+        return True
+    if re.match(r"^\s*(?:define|explain|summari[sz]e|compare|list|name|give|mention|identify|describe|tell\s+me\s+about)\b", q):
+        return True
+    try:
+        family_v2 = _classify_query_family_v2(query)
+        if family_v2 in {"definition_entity", "list_entity", "fact_entity", "explanatory_compare", "sequence_lookup", "lesson_lookup", "toc_structure"}:
+            return True
+    except Exception:
+        pass
+    tokens = [t for t in re.findall(r"[a-z0-9]{3,}", q) if t not in {"please", "also", "just"}]
+    return len(tokens) >= 2
+
+
+def classify_query_route(query: str) -> str:
+    if _is_assistant_capability_or_meta_query(query):
+        return "assistant_meta"
+    if _is_pure_smalltalk_query(query):
+        return "smalltalk"
+    if _is_unsupported_unclear_query(query):
+        return "unsupported_unclear"
+    if _looks_like_document_question(query):
+        return "document_question"
+    return "unsupported_unclear"
+
+
+def _direct_route_answer(query: str, route: str, language: str | None = None) -> str:
+    lang = _route_response_language(query, language)
+    if route == "assistant_meta":
+        return ASSISTANT_META_RESPONSE_AR if lang == "ar" else ASSISTANT_META_RESPONSE_EN
+    if route == "smalltalk":
+        return _smalltalk_response(query)
+    return RAG_NO_MATCH_RESPONSE
+
+
+def _log_direct_route_handled(route: str, query: str, language: str | None = None) -> None:
+    lang = _route_response_language(query, language)
+    if route == "assistant_meta":
+        logger.info("[ROUTER META] handled=True language=%s query=%s", lang, str(query or "")[:240])
+    elif route == "smalltalk":
+        logger.info("[ROUTER SMALLTALK] handled=True language=%s query=%s", lang, str(query or "")[:240])
+    elif route == "unsupported_unclear":
+        logger.info("[ROUTER PERMISSION] handled=True route=unsupported_unclear query=%s", str(query or "")[:240])
+
+
+def _should_allow_generic_answer(query: str, docs: list[dict], family_v2: str, answer_type: str) -> bool:
+    generic_type = str(answer_type or "").lower()
+    family = str(family_v2 or _classify_query_family_v2(query) or "")
+    if not (generic_type.startswith("generic") or family in {"general", "out_of_scope_candidate"}):
+        logger.info("[ANSWER PERMISSION] allowed=True reason=structured_route")
+        return True
+
+    top_score = _max_doc_similarity(docs or [])
+    if top_score < -2.0:
+        logger.info("[ANSWER PERMISSION] allowed=False reason=top_score_below_floor top_score=%.3f", top_score)
+        return False
+
+    q_norm = _normalize_query_for_router(query)
+    explanatory_markers = re.search(
+        r"\b(?:explain|compare|difference|different|summari[sz]e|summary|overview|describe|tell\s+me\s+about|how|why)\b",
+        q_norm,
+    )
+    if family == "explanatory_compare" and not explanatory_markers and not _doc_router_implies_comparison(query):
+        logger.info("[ANSWER PERMISSION] allowed=False reason=family_explanatory_without_explanatory_intent")
+        return False
+
+    metrics = _retrieval_evidence_metrics(query, docs or [])
+    coverage = float(metrics.get("coverage", 0.0) or 0.0)
+    focus_ratio = float(metrics.get("focus_ratio", 0.0) or 0.0)
+    meaningful_tokens = [
+        t for t in _query_tokens_for_evidence(query)
+        if t not in {"help", "ability", "abilities", "capability", "capabilities", "assist", "assistant"}
     ]
+
+    heading_blob = " ".join(
+        " ".join(str((dict((d or {}).get("metadata") or {})).get(k) or "") for k in ("heading", "section", "title", "chapter"))
+        for d in (docs or [])[:4]
+    ).lower()
+    weak_only_tokens = bool(_query_tokens_for_evidence(query) and not meaningful_tokens)
+    weak_token_heading_hit = bool(
+        weak_only_tokens
+        and any(re.search(rf"\b{re.escape(tok)}\b", heading_blob) for tok in _query_tokens_for_evidence(query))
+    )
+    if weak_only_tokens and not weak_token_heading_hit:
+        logger.info("[ANSWER PERMISSION] allowed=False reason=no_meaningful_concept_tokens")
+        return False
+
+    if not meaningful_tokens and not weak_token_heading_hit:
+        logger.info("[ANSWER PERMISSION] allowed=False reason=no_entity_or_concept_coverage")
+        return False
+    if coverage < 0.50 and focus_ratio <= 0.0:
+        logger.info(
+            "[ANSWER PERMISSION] allowed=False reason=weak_query_coverage coverage=%.3f focus=%.3f top_score=%.3f",
+            coverage,
+            focus_ratio,
+            top_score,
+        )
+        return False
+    if _is_weak_retrieval_evidence(query, "out_of_scope_candidate", docs or []):
+        logger.info(
+            "[ANSWER PERMISSION] allowed=False reason=weak_concept_coverage coverage=%.3f focus=%.3f top_score=%.3f",
+            coverage,
+            focus_ratio,
+            top_score,
+        )
+        return False
+
+    logger.info(
+        "[ANSWER PERMISSION] allowed=True reason=generic_context_supported coverage=%.3f focus=%.3f top_score=%.3f",
+        coverage,
+        focus_ratio,
+        top_score,
+    )
+    return True
+
+
+def _is_smalltalk(text: str) -> bool:
+    return _is_pure_smalltalk_query(text)
 
 
 def _smalltalk_response(text: str) -> str:
-    t = (text or "").lower().strip()
-    if t in {"thanks", "thank you"}:
-        return "You're welcome. How can I assist you further?"
+    t = _normalize_query_for_router(text)
+    if _route_response_language(text) == "ar":
+        if t in {"شكرا"}:
+            return "العفو!"
+        if t == "تمام":
+            return "تمام، كيف يمكنني مساعدتك اليوم؟"
+        return "أهلاً! كيف يمكنني مساعدتك اليوم؟"
+    if t in {"thanks", "thank you", "ok thanks", "okay thanks"}:
+        return "You're welcome!"
     if t == "how are you":
         return "I'm doing well, thank you. How can I assist you today?"
     return "Hello! How can I assist you today?"
@@ -22774,6 +23339,25 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
     if answer == RAG_NO_MATCH_RESPONSE:
         dec["answer"] = RAG_NO_MATCH_RESPONSE
         _log_final_decision_debug(rejected=True, rejection_reason="not_found")
+        return dec
+
+    answer_type_for_permission = str(dec.get("answer_type") or "")
+    source_mode_for_permission = str(dec.get("source_mode") or "")
+    if (
+        not dec.get("used_llm", False)
+        and (
+            answer_type_for_permission.startswith("generic")
+            or source_mode_for_permission == "generic"
+            or (family in {"general", "out_of_scope_candidate"} and not (is_list_mode or is_definition_mode or fact_type))
+        )
+        and not _should_allow_generic_answer(query, retrieved_docs or [], family, answer_type_for_permission)
+    ):
+        logger.info("[ANSWER BLOCKED] reason=low_confidence_generic")
+        dec["answer"] = RAG_NO_MATCH_RESPONSE
+        dec["used_llm"] = False
+        dec["answer_type"] = "generic_low_confidence_blocked"
+        dec["source_mode"] = "not_found_guard"
+        _log_final_decision_debug(rejected=True, rejection_reason="low_confidence_generic")
         return dec
 
     if fact_type:
@@ -24772,6 +25356,9 @@ def _shared_rag_final_answer_decision( # type: ignore
 
     generic_route_answer = _build_grounded_llm_answer(query, route_docs)
     if generic_route_answer:
+        if not _should_allow_generic_answer(query, route_docs, family_v2, "generic_route_grounded"):
+            logger.info("[ANSWER BLOCKED] reason=low_confidence_generic")
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="generic_low_confidence_blocked", items_count=0)
         logger.info("[ANSWER ROUTE] mode=generic deterministic=true answer=%s", generic_route_answer[:220])
         return _result(generic_route_answer, used_llm=False, answer_type="generic_route_grounded", items_count=1)
     logger.info("[ANSWER ROUTE] mode=generic deterministic=false action=llm_required")
@@ -26724,6 +27311,32 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     if not text or len(text.strip()) < 2:
         return ("I didn't catch that. Could you repeat?", [])
 
+    route = classify_query_route(text)
+    if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
+        route_lang = _route_response_language(text)
+        direct_answer = _direct_route_answer(text, route, route_lang)
+        _log_direct_route_handled(route, text, route_lang)
+        try:
+            _append_conversation_turn(connection_id, text, direct_answer)
+        except Exception:
+            pass
+        response_time = int((time.time() - start_time) * 1000)
+        try:
+            log_usage(
+                username=(user or {}).get("username", "unknown"),
+                user_role=(user or {}).get("role", "unknown"),
+                query_text=text,
+                response_status="success",
+                error_message=None,
+                response_time_ms=response_time,
+                rag_docs_found=0,
+                query_length=len((text or "").strip()),
+                response_length=len(direct_answer or ""),
+            )
+        except Exception:
+            pass
+        return (direct_answer, [])
+
     # Generic conversational definition normalization (HTTP path).
     try:
         _norm = _normalize_conversational_definition_query(text)
@@ -26732,6 +27345,13 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     if _norm and _norm != text:
         logger.info("[CONV NORM] (http) '%s' -> '%s'", (text or "")[:160], _norm[:160])
         text = _norm
+
+    try:
+        _spell_norm = _lightweight_spelling_correction(text)
+    except Exception:
+        _spell_norm = text
+    if _spell_norm and _spell_norm.strip().lower() != (text or "").strip().lower():
+        text = _spell_norm
 
     if _is_smalltalk(text):
         return (_smalltalk_response(text), [])
@@ -29065,7 +29685,53 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     the first sentence is ready, while LLM continues generating more text.
     """
     import time
-    # ---- DEFENSIVE FOLLOW-UP GUARD (must be FIRST) -----------------------
+    # ---- PRE-RAG ROUTER (defensive for voice / non-typed callers) --------
+    try:
+        if text and len(str(text).strip()) >= 2:
+            direct_route = classify_query_route(text)
+            if direct_route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
+                route_t0 = time.perf_counter()
+                route_lang = _route_response_language(text, language)
+                direct_answer = _direct_route_answer(text, direct_route, route_lang)
+                _log_direct_route_handled(direct_route, text, route_lang)
+                try:
+                    _append_conversation_turn(connection_id, text, direct_answer)
+                except Exception:
+                    pass
+                route_t_meta = t_meta if isinstance(t_meta, dict) else {}
+                route_t_meta.setdefault("request_start", route_t0)
+                response_tts_lang = "ar" if (route_lang == "ar" and direct_route != "unsupported_unclear") else XTTS_LANGUAGE
+                await send_final_response(
+                    connection_id,
+                    direct_answer,
+                    response_tts_lang,
+                    not EFFECTIVE_DISABLE_TTS,
+                    websocket=websocket,
+                    sources=0,
+                    arabic_mode=(route_lang == "ar" and direct_route != "unsupported_unclear"),
+                    t_meta=route_t_meta,
+                    branch=f"router_{direct_route}",
+                )
+                try:
+                    log_usage(
+                        username=(user or {}).get("username", "unknown"),
+                        user_role=(user or {}).get("role", "unknown"),
+                        query_text=text,
+                        response_status="success",
+                        error_message=None,
+                        response_time_ms=int((time.perf_counter() - route_t0) * 1000),
+                        rag_docs_found=0,
+                        query_length=len(str(text or "").strip()),
+                        response_length=len(direct_answer or ""),
+                    )
+                except Exception:
+                    pass
+                _emit_perf_report(route_t_meta, route_t0, text, direct_answer, connection_id)
+                return
+    except Exception:
+        logger.exception("[ROUTER] defensive direct route failed; continuing")
+
+    # ---- DEFENSIVE FOLLOW-UP GUARD (after direct router) -----------------
     # If a follow-up query somehow reached call_llm_streaming despite the
     # WS entrypoint routing, intercept here BEFORE the [FLOW] entering log
     # is emitted, so the log can never falsely indicate that a follow-up
@@ -32084,30 +32750,109 @@ STRICT BEHAVIOR:
 
 
 # ========== QUERY ENDPOINT ==========
+class ConversationMessageRequest(BaseModel):
+    role: str
+    text: str
+
+
+class ConversationRenameRequest(BaseModel):
+    title: str
+
+
 class QueryRequest(BaseModel):
     text: str
+    conversation_id: Optional[str] = None
+
+
+@app.get("/conversations")
+async def get_conversations(user=Depends(require_login())):
+    return {"conversations": list_conversations_summary()}
+
+
+@app.get("/conversations/{conversation_id}")
+async def get_conversation(conversation_id: str, user=Depends(require_login())):
+    data = _load_conversation_store()
+    conversation = _find_conversation(data, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=404, detail="Conversation not found.")
+    logger.info("[CONV] loaded id=%s", conversation_id)
+    return conversation
+
+
+@app.post("/conversations")
+async def post_conversation(user=Depends(require_login())):
+    return create_conversation()
+
+
+@app.patch("/conversations/{conversation_id}")
+async def patch_conversation(
+    conversation_id: str,
+    data: ConversationRenameRequest,
+    user=Depends(require_login()),
+):
+    try:
+        return rename_conversation(conversation_id, data.title)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+
+@app.delete("/conversations/{conversation_id}")
+async def delete_conversation_endpoint(conversation_id: str, user=Depends(require_login())):
+    try:
+        delete_conversation(conversation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+    return {"success": True, "id": conversation_id}
+
+
+@app.post("/conversations/{conversation_id}/message")
+async def post_conversation_message(
+    conversation_id: str,
+    data: ConversationMessageRequest,
+    user=Depends(require_login()),
+):
+    try:
+        conversation = append_conversation_message(conversation_id, data.role, data.text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+    return conversation
 
 @app.post("/query")
 async def query_rag(data: QueryRequest, request: Request, user=Depends(require_login())):
     logger.info("[FLOW] entering query_rag")
     logger.info("[FLOW] query_before = %s", (data.text or "")[:400])
-    # Stable per-user connection_id so follow-up state persists across HTTP
-    # requests for the same user (was generating a fresh uuid per request,
-    # which orphaned every saved answer state).
-    _uname = (user or {}).get("username") if isinstance(user, dict) else None
-    if _uname:
-        connection_id = f"http_user_{_uname}"
+    persistent_conversation_id: str | None = None
+    if data.conversation_id:
+        conversation = get_or_create_conversation(data.conversation_id)
+        persistent_conversation_id = str(conversation["id"])
+        connection_id = persistent_conversation_id
+        append_conversation_message(persistent_conversation_id, "user", data.text)
+        bind_conversation_memory(connection_id, persistent_conversation_id)
     else:
-        try:
-            _tok = request.cookies.get(SESSION_COOKIE)
-        except Exception:
-            _tok = None
-        if _tok:
-            import hashlib as _hashlib
-            connection_id = "http_sess_" + _hashlib.sha1(_tok.encode("utf-8", errors="ignore")).hexdigest()[:12]
+        # Stable per-user connection_id so follow-up state persists across HTTP
+        # requests for the same user (was generating a fresh uuid per request,
+        # which orphaned every saved answer state).
+        _uname = (user or {}).get("username") if isinstance(user, dict) else None
+        if _uname:
+            connection_id = f"http_user_{_uname}"
         else:
-            connection_id = "http_anon"
+            try:
+                _tok = request.cookies.get(SESSION_COOKIE)
+            except Exception:
+                _tok = None
+            if _tok:
+                import hashlib as _hashlib
+                connection_id = "http_sess_" + _hashlib.sha1(_tok.encode("utf-8", errors="ignore")).hexdigest()[:12]
+            else:
+                connection_id = "http_anon"
     ai_response, retrieved_docs = await call_llm_with_rag(data.text, connection_id, user)
+    if persistent_conversation_id:
+        append_conversation_message(persistent_conversation_id, "assistant", ai_response)
+        persist_runtime_memory(connection_id, persistent_conversation_id)
     # Skip definition/cleanup post-processing for follow-up clarifications:
     # those answers are already finalized inside _handle_followup_query and
     # would otherwise be reshaped by definition-style cleaners that expect a
@@ -33797,13 +34542,27 @@ async def rag_ws_endpoint(websocket: WebSocket):
     silence_threshold_energy = 0.008    # Strict: only truly quiet audio counts as silence
     # Per-connection language setting (can be updated by set_language control message)
     session_language = "en"
+    active_conversation_id: str | None = None
+    current_ws_conversation_id: str | None = None
     stt_disabled_notified = False
+
+    def _activate_conversation(requested_id: str | None = None) -> str:
+        nonlocal active_conversation_id
+        clean_requested = str(requested_id or "").strip() or active_conversation_id
+        conversation = get_or_create_conversation(clean_requested)
+        conversation_id = str(conversation["id"])
+        active_conversation_id = conversation_id
+        bind_conversation_memory(connection_id, conversation_id)
+        return conversation_id
+
+    def _conversation_ws(conversation_id: str) -> WebSocket:
+        return cast(WebSocket, ConversationCaptureWebSocket(websocket, conversation_id, connection_id))
 
     # ========== STABILIZED auto_transcribe ==========
     # Defined here (not inside the conditional) so it is always in scope when
     # stop_recording or any other handler calls it.
     async def auto_transcribe(data_bytes: bytes, ws, conn_id, t_meta=None, lang="en") -> None:
-        nonlocal user
+        nonlocal user, active_conversation_id
         global _active_voice_task, _active_voice_conn_id
         global _pipeline_run_count, _last_gpu_reserved_mb
         global _consecutive_gpu_growth, _consecutive_cpu_growth, _sessions_blocked, _sessions_blocked_since
@@ -33971,6 +34730,13 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         "timing": t_meta,
                     })
 
+                    conversation_id_for_voice = _activate_conversation(active_conversation_id)
+                    conversation_ws = _conversation_ws(conversation_id_for_voice)
+                    try:
+                        append_conversation_message(conversation_id_for_voice, "user", full_text)
+                    except Exception:
+                        logger.exception("[CONV] failed to persist voice user message id=%s", conversation_id_for_voice)
+
                     cancel_evt = interrupt_events.get(conn_id)
                     if cancel_evt:
                         cancel_evt.clear()
@@ -34012,7 +34778,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 fu_text,
                                 "ar" if lang == "ar" else XTTS_LANGUAGE,
                                 not EFFECTIVE_DISABLE_TTS,
-                                websocket=ws,
+                                websocket=conversation_ws,
                                 sources=0,
                                 arabic_mode=(lang == "ar"),
                                 t_meta=fu_t_meta,
@@ -34026,12 +34792,13 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         return
 
                     await call_llm_streaming(
-                        ws, full_text, conn_id,
+                        conversation_ws, full_text, conn_id,
                         user or {"username": "anon", "role": "user"},
                         cancel_evt,
                         t_meta,
                         language=lang,
                     )
+                    persist_runtime_memory(conn_id, conversation_id_for_voice)
                 except RuntimeError as re:
                     logger.debug(f"{conn_id} WebSocket closed: {re}")
         except asyncio.CancelledError:
@@ -34219,30 +34986,99 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 if new_lang in ("en", "ar", "auto"):
                                     session_language = new_lang
                                     logger.info(f"{connection_id} Language set to: {session_language}")
+
+                            elif action == "set_conversation_id":
+                                requested_conversation_id = str(payload.get("conversation_id") or "").strip()
+                                if requested_conversation_id and requested_conversation_id == current_ws_conversation_id:
+                                    logger.info("[CONV] duplicate set_conversation ignored id=%s", requested_conversation_id)
+                                    continue
+                                conversation_id = _activate_conversation(requested_conversation_id)
+                                current_ws_conversation_id = conversation_id
+                                await websocket.send_json({
+                                    "type": "conversation",
+                                    "conversation_id": conversation_id,
+                                })
                         
                         elif "text" in payload:
                             # Handle typed text queries with streaming
                             text = payload["text"].strip()
-                            # Generic conversational definition normalization
-                            # (e.g. "ok so what about the definition of X?" ->
-                            # "what is X?"). Done BEFORE follow-up detection
-                            # so a definition re-ask routes to full RAG, not
-                            # follow-up.
-                            try:
-                                _norm_text = _normalize_conversational_definition_query(text)
-                            except Exception:
-                                _norm_text = text
-                            if _norm_text and _norm_text != text:
-                                logger.info(
-                                    "[CONV NORM] '%s' -> '%s'",
-                                    text[:160], _norm_text[:160],
-                                )
-                                text = _norm_text
+                            stored_user_text = text
                             # Allow per-message language override; fall back to session setting
                             msg_lang = payload.get("language", session_language)
                             if msg_lang in ("en", "ar", "auto"):
                                 session_language = msg_lang  # update session preference
                             if text:
+                                conversation_id_for_text = _activate_conversation(payload.get("conversation_id"))
+                                conversation_ws = _conversation_ws(conversation_id_for_text)
+                                try:
+                                    append_conversation_message(conversation_id_for_text, "user", stored_user_text)
+                                except Exception:
+                                    logger.exception("[CONV] failed to persist user message id=%s", conversation_id_for_text)
+
+                                route = classify_query_route(text)
+                                if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
+                                    route_lang = _route_response_language(text, msg_lang)
+                                    direct_answer = _direct_route_answer(text, route, route_lang)
+                                    _log_direct_route_handled(route, text, route_lang)
+                                    try:
+                                        _append_conversation_turn(connection_id, stored_user_text, direct_answer)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        route_t0 = time.perf_counter()
+                                        route_t_meta = {"request_start": route_t0}
+                                        response_tts_lang = "ar" if (route_lang == "ar" and route != "unsupported_unclear") else XTTS_LANGUAGE
+                                        await send_final_response(
+                                            connection_id,
+                                            direct_answer,
+                                            response_tts_lang,
+                                            not EFFECTIVE_DISABLE_TTS,
+                                            websocket=conversation_ws,
+                                            sources=0,
+                                            arabic_mode=(route_lang == "ar" and route != "unsupported_unclear"),
+                                            t_meta=route_t_meta,
+                                            branch=f"router_{route}",
+                                        )
+                                        _emit_perf_report(route_t_meta, route_t0, text, direct_answer, connection_id)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        log_usage(
+                                            username=(user or {}).get("username", "unknown"),
+                                            user_role=(user or {}).get("role", "unknown"),
+                                            query_text=stored_user_text,
+                                            response_status="success",
+                                            error_message=None,
+                                            response_time_ms=0,
+                                            rag_docs_found=0,
+                                            query_length=len(stored_user_text),
+                                            response_length=len(direct_answer or ""),
+                                        )
+                                    except Exception:
+                                        pass
+                                    persist_runtime_memory(connection_id, conversation_id_for_text)
+                                    continue
+
+                                # Generic conversational definition normalization
+                                # (e.g. "ok so what about the definition of X?" ->
+                                # "what is X?"). Run only for document questions so
+                                # meta/smalltalk is never typo-corrected into RAG.
+                                try:
+                                    _norm_text = _normalize_conversational_definition_query(text)
+                                except Exception:
+                                    _norm_text = text
+                                if _norm_text and _norm_text != text:
+                                    logger.info(
+                                        "[CONV NORM] '%s' -> '%s'",
+                                        text[:160], _norm_text[:160],
+                                    )
+                                    text = _norm_text
+                                try:
+                                    _spell_norm_text = _lightweight_spelling_correction(text)
+                                except Exception:
+                                    _spell_norm_text = text
+                                if _spell_norm_text and _spell_norm_text.strip().lower() != (text or "").strip().lower():
+                                    text = _spell_norm_text
                                 # ---- KB READY GATE (must be before follow-up or RAG) ----
                                 # Block all queries while a new document is being indexed
                                 # so no old-document content leaks and no answer is given
@@ -34261,7 +35097,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                             _loading_msg,
                                             XTTS_LANGUAGE,
                                             not EFFECTIVE_DISABLE_TTS,
-                                            websocket=websocket,
+                                            websocket=conversation_ws,
                                             sources=0,
                                             arabic_mode=False,
                                             t_meta={"request_start": time.perf_counter()},
@@ -34315,7 +35151,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                             fu_text,
                                             "ar" if msg_lang == "ar" else XTTS_LANGUAGE,
                                             not EFFECTIVE_DISABLE_TTS,
-                                            websocket=websocket,
+                                            websocket=conversation_ws,
                                             sources=0,
                                             arabic_mode=(msg_lang == "ar"),
                                             t_meta=fu_t_meta,
@@ -34329,12 +35165,13 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     continue
                                 _ws_perf_t_meta = {"request_start": time.perf_counter()}
                                 await call_llm_streaming(
-                                    websocket, text, connection_id,
+                                    conversation_ws, text, connection_id,
                                     user or {"username": "anon", "role": "user"},
                                     cancel_evt,
                                     t_meta=_ws_perf_t_meta,
                                     language=msg_lang,
                                 )
+                                persist_runtime_memory(connection_id, conversation_id_for_text)
             
             elif msg["type"] == "websocket.disconnect":
                 logger.info(f"Websocket {connection_id} disconnected")
