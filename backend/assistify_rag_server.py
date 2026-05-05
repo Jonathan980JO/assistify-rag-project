@@ -924,6 +924,180 @@ def _normalize_conversational_definition_query(text: str) -> str:
     return t
 
 
+# ---- About-entity standalone-question rewrite ----
+# Detects "what about X / how about X / and X / tell me about X / explain X"
+# (and Arabic equivalents) where X clearly introduces a NEW content phrase
+# rather than referring back to the previous answer. When detected, the
+# query is rewritten into a canonical standalone form ("What is X?" / "ما
+# هي X؟") so it goes through normal RAG retrieval instead of being
+# inherited by the contextual follow-up router.
+#
+# Strictly generic — no domain word lists, no document-specific terms.
+_ABOUT_ENTITY_VAGUE_TOKENS = {
+    # Anaphoric pronouns / demonstratives
+    "it", "this", "that", "these", "those", "them", "they", "there",
+    "above", "previous", "last", "next", "one", "ones", "another",
+    "thing", "things",
+    # Ordinals commonly used to pick from a previously listed set
+    "first", "second", "third", "fourth", "fifth", "sixth", "seventh",
+    "eighth", "ninth", "tenth",
+    # Assistant / meta references
+    "help", "ability", "abilities", "capability", "capabilities",
+    "support", "assistance", "feature", "features", "function",
+    "functions", "you", "yourself", "yours", "your", "me", "myself",
+    "us", "we",
+    # Document-meta references that ask for "more of the same" rather
+    # than a brand-new entity (kept short and generic — no domain words).
+    "more", "other", "others", "rest", "remainder", "details", "detail",
+    "information", "info", "summary", "list", "lists", "items", "item",
+    "parts", "part", "section", "sections", "step", "steps", "point",
+    "points", "example", "examples",
+    # Pure quantifiers
+    "anything", "something", "nothing", "everything", "all", "some",
+    "any", "many", "much", "few", "several",
+}
+
+_ABOUT_ENTITY_STOPWORDS = {
+    "the", "a", "an", "of", "and", "or", "but", "to", "for",
+    "in", "on", "at", "by", "with", "is", "are", "was", "were",
+    "be", "been", "being", "do", "does", "did", "have", "has", "had",
+    "what", "why", "how", "when", "where", "who", "which",
+    "about", "please", "just", "really", "exactly",
+}
+
+_ABOUT_ENTITY_EN_PATTERNS = [
+    _re_followup.compile(
+        r"^\s*(?:and\s+)?what\s+about\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
+        _re_followup.IGNORECASE,
+    ),
+    _re_followup.compile(
+        r"^\s*how\s+about\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
+        _re_followup.IGNORECASE,
+    ),
+    _re_followup.compile(
+        r"^\s*tell\s+me\s+(?:more\s+)?about\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
+        _re_followup.IGNORECASE,
+    ),
+    _re_followup.compile(
+        r"^\s*explain\s+(?:to\s+me\s+)?(?:the\s+)?(.+?)\s*[?.!]*\s*$",
+        _re_followup.IGNORECASE,
+    ),
+    # Bare "and X?" pivot — kept last so the more specific patterns above
+    # win. Constrained to <= 4 trailing tokens by the post-validation step
+    # below (token count + vague-word filter).
+    _re_followup.compile(
+        r"^\s*and\s+(?:the\s+)?(.+?)\s*[?.!]*\s*$",
+        _re_followup.IGNORECASE,
+    ),
+]
+
+_ABOUT_ENTITY_AR_PATTERNS = [
+    # وماذا عن X / ماذا عن X
+    _re_followup.compile(r"^\s*و?\s*ماذا\s+عن\s+(.+?)\s*[؟?.!]*\s*$"),
+    # طب و X / طيب و X (with space)
+    _re_followup.compile(r"^\s*(?:طب|طيب)\s+و\s+(.+?)\s*[؟?.!]*\s*$"),
+    # طب والX / طيب والX (و prefix attached)
+    _re_followup.compile(r"^\s*(?:طب|طيب)\s+و(\S.+?)\s*[؟?.!]*\s*$"),
+    # اشرح X / اشرح لي X
+    _re_followup.compile(r"^\s*اشرح\s+(?:لي\s+)?(.+?)\s*[؟?.!]*\s*$"),
+]
+
+_ARABIC_CHAR_RE = _re_followup.compile(r"[\u0600-\u06FF]")
+_NEW_QUESTION_HEAD_RE = _re_followup.compile(
+    r"^\s*(?:"
+    r"(?:what|which)\s+(?:is|are|was|were|'?s)\b"
+    r"|why\b|when\b|where\b|who\b"
+    r"|how\s+(?:do|does|did|can|could|should|would|will|is|are|much|many|long|often)\b"
+    r"|list\b|name\b|enumerate\b|define\b|definition\s+of\b"
+    r"|give\s+me\s+(?:a\s+)?(?:list|definition|example)\b"
+    r")",
+    _re_followup.IGNORECASE,
+)
+
+
+def _extract_about_entity_question(query: str) -> Optional[str]:
+    """Detect a "what about X / how about X / and X / tell me about X /
+    explain X" style query that introduces a NEW entity, and return a
+    normalized standalone question for X ("What is X?" / "ما هي X؟").
+
+    Returns ``None`` when X is missing, vague (pronoun / meta /
+    document-relative), or otherwise not a content phrase. Strictly
+    generic — no domain word lists.
+    """
+    raw = (query or "").strip()
+    if not raw:
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=empty")
+        return None
+    # Skip clear standalone question shapes — they don't need rewriting.
+    if _NEW_QUESTION_HEAD_RE.match(raw):
+        return None
+    # Skip weak generic / meta-help phrasings ("tell me about help").
+    if _is_weak_generic_request(raw):
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=weak_generic query=%s", raw[:120])
+        return None
+    is_arabic = bool(_ARABIC_CHAR_RE.search(raw))
+    patterns = _ABOUT_ENTITY_AR_PATTERNS if is_arabic else _ABOUT_ENTITY_EN_PATTERNS
+    entity = None
+    for pat in patterns:
+        m = pat.match(raw)
+        if not m:
+            continue
+        entity = (m.group(1) or "").strip().strip(" \t\n\r\"'`.,;:!?-؟،")
+        if entity:
+            break
+    if not entity:
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=no_pattern query=%s", raw[:120])
+        return None
+    tokens = [tok for tok in _re_followup.split(r"\s+", entity) if tok]
+    if not tokens or len(tokens) > 6:
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=bad_token_count entity=%s", entity)
+        return None
+    lowered = [tok.lower().strip(" \t\n\r\"'`.,;:!?-؟،") for tok in tokens]
+    # Reject if every token is either vague/meta or a stopword.
+    if all((tok in _ABOUT_ENTITY_VAGUE_TOKENS or tok in _ABOUT_ENTITY_STOPWORDS) for tok in lowered):
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=vague_or_stopword entity=%s", entity)
+        return None
+    # Reject if any vague/meta pronoun is mixed in — ambiguous reference.
+    if any(tok in _ABOUT_ENTITY_VAGUE_TOKENS for tok in lowered):
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=contains_vague entity=%s", entity)
+        return None
+    # Require at least one real word token (>=3 chars, contains a letter).
+    if not any(
+        len(tok) >= 3 and _re_followup.search(r"[A-Za-z\u0600-\u06FF]", tok)
+        for tok in lowered
+    ):
+        logger.info("[ABOUT ENTITY ROUTE] detected=False reason=no_word_token entity=%s", entity)
+        return None
+    rewritten = f"ما هي {entity}؟" if is_arabic else f"What is {entity}?"
+    logger.info(
+        "[ABOUT ENTITY ROUTE] detected=True entity=%s rewritten_query=%s",
+        entity,
+        rewritten,
+    )
+    return rewritten
+
+
+def _maybe_rewrite_about_entity_question(text: str) -> str:
+    """Apply the about-entity rewrite if it fires; otherwise return
+    ``text`` unchanged. Shared preprocessing helper used by both the
+    typed WebSocket path and the voice transcript path so the logic
+    cannot drift between them.
+    """
+    try:
+        rewritten = _extract_about_entity_question(text)
+    except Exception:
+        logger.exception("[ABOUT ENTITY ROUTE] extractor raised — leaving query unchanged")
+        return text
+    if not rewritten or rewritten == text:
+        return text
+    logger.info(
+        "[ABOUT ENTITY ROUTE] applied original=%r rewritten=%r",
+        (text or "")[:160],
+        rewritten[:160],
+    )
+    return rewritten
+
+
 def _is_followup_query(text: str, connection_id=None) -> bool:
     """Generic follow-up intent detector. Domain-agnostic.
 
@@ -8382,6 +8556,30 @@ def _detect_language(text: str) -> str:
     """Heuristic language detection: returns 'ar' if Arabic chars dominate, else 'en'."""
     arabic_chars = sum(1 for c in text if '\u0600' <= c <= '\u06FF')
     return "ar" if arabic_chars > len(text) * 0.2 else "en"
+
+
+def _resolve_user_language(query_text: str, ui_language: str | None) -> str:
+    """Resolve the user's effective language for both answer-generation and TTS.
+
+    The script of the user's actual query is the source of truth; the UI/session
+    language is only a hint. This is intentionally generic — it never inspects
+    document content or domain words and works for any Arabic / English text.
+
+    Returns "ar" or "en". Falls back to the UI language only when the query
+    itself contains no Arabic and no Latin letters.
+    """
+    s = str(query_text or "")
+    has_arabic = any('\u0600' <= c <= '\u06FF' for c in s)
+    has_latin = any(('a' <= c.lower() <= 'z') for c in s)
+    if has_arabic and not has_latin:
+        return "ar"
+    if has_latin and not has_arabic:
+        return "en"
+    if has_arabic:
+        # Mixed: use the same proportion rule as _detect_language.
+        return _detect_language(s)
+    ui = str(ui_language or "").strip().lower()
+    return ui if ui in ("ar", "en") else "en"
 
 
 def _split_text_into_sentences(text: str) -> list[str]:
@@ -27711,6 +27909,12 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     if not text or len(text.strip()) < 2:
         return ("I didn't catch that. Could you repeat?", [])
 
+    # ---- ABOUT-ENTITY STANDALONE REWRITE (HTTP path, pre-router) -------
+    # Run BEFORE the direct router so shapes like "What about X?" /
+    # "وماذا عن X" with a real new entity X aren't mis-classified as
+    # `unsupported_unclear`.
+    text = _maybe_rewrite_about_entity_question(text)
+
     route = classify_query_route(text)
     if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
         route_lang = _route_response_language(text)
@@ -27765,6 +27969,12 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             rewritten_comparison_query[:160],
         )
         text = rewritten_comparison_query
+
+    # ---- ABOUT-ENTITY STANDALONE REWRITE (HTTP path) -------------------
+    # Catch "what about X / how about X / and X / tell me about X / explain
+    # X" with a real new entity X BEFORE follow-up routing so we don't
+    # inherit the previous answer's topic.
+    text = _maybe_rewrite_about_entity_question(text)
 
     # ---- FOLLOW-UP / EXPLANATION MODE (HTTP path) -----------------------
     # Detect generic clarification intents ("what do you mean?", "explain more",
@@ -29927,6 +30137,193 @@ async def send_final_response(
         return
 
     clean_text = response_text.strip()
+    _raw_text_for_translation = clean_text
+
+    def _has_arabic_latin_contamination(value: str) -> bool:
+        s = str(value or "")
+        if not s or not any("\u0600" <= ch <= "\u06FF" for ch in s):
+            return False
+        for token in re.findall(r"\S+", s):
+            has_ar = any("\u0600" <= ch <= "\u06FF" for ch in token)
+            has_latin = any(("a" <= ch.lower() <= "z") for ch in token)
+            if has_ar and has_latin:
+                return True
+        return False
+
+    def _pre_language_clean(value: str) -> tuple[str, bool]:
+        s = str(value or "").strip()
+        if not s:
+            return "", False
+        had_contamination = _has_arabic_latin_contamination(s)
+        s = s.replace("\ufffd", " ")
+        s = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", s)
+        s = re.sub(r"[\ud800-\udfff]", " ", s)
+        s = re.sub(r"[\u2e80-\u2fff\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]+", " ", s)
+        if any("\u0600" <= ch <= "\u06FF" for ch in s):
+            s = re.sub(r"(?<=[\u0600-\u06FF])[A-Za-z]+|[A-Za-z]+(?=[\u0600-\u06FF])", "", s)
+            try:
+                s = _sanitize_arabic_text(s)
+            except Exception:
+                pass
+        else:
+            try:
+                s = _cleanup_final_answer_text(s)
+            except Exception:
+                s = re.sub(r"\s+", " ", s).strip()
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r" *\n *", "\n", s).strip()
+        return s, bool(had_contamination)
+
+    def _finalize_arabic_only(value: str) -> str:
+        s = str(value or "").strip()
+        if not s:
+            return s
+        try:
+            s = _sanitize_arabic_text(s)
+        except Exception:
+            pass
+        s = re.sub(r"[A-Za-z]+", " ", s)
+        s = re.sub(r"\s+([،؛؟.!?,;:])", r"\1", s)
+        s = re.sub(r"([،؛؟.!?,;:])\s*([،؛؟.!?,;:])", r"\1", s)
+        s = re.sub(r"[ \t]+", " ", s)
+        s = re.sub(r" *\n *", "\n", s).strip(" \t\r\n-،,.;:")
+        return s
+
+    async def _translate_to_arabic_external(value: str, source_lang: str) -> str:
+        source_text = str(value or "").strip()
+        if not source_text:
+            return ""
+        try:
+            translator_cls = __import__("deep_translator", fromlist=["GoogleTranslator"]).GoogleTranslator
+            source_code = "ar" if str(source_lang or "").lower() == "ar" else "en"
+            translated = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: translator_cls(source=source_code, target="ar").translate(source_text),
+            )
+            translated = str(translated or "").strip()
+            if not translated:
+                return ""
+            if re.search(r"[A-Za-z]", translated) or _has_arabic_latin_contamination(translated):
+                return ""
+            if sum(1 for c in translated if "\u0600" <= c <= "\u06FF") < 3:
+                return ""
+            return translated
+        except Exception as exc:
+            logger.info("[FINAL ANSWER TRANSLATION] external_fallback_failed err=%s branch=%s", exc, branch)
+            return ""
+
+    clean_text, _mixed_alpha_contamination = _pre_language_clean(clean_text)
+    response_text = clean_text
+    if _raw_text_for_translation and clean_text != _raw_text_for_translation:
+        logger.info(
+            "[OCR CLEANUP APPLIED] branch=%s before=%s | after=%s",
+            branch,
+            _raw_text_for_translation[:180],
+            clean_text[:180],
+        )
+
+    # ---- FINAL ANSWER TRANSLATION GATE (Phase 7C — TASK 4) ----------------
+    # Centralized post-processing: every final answer destined for an Arabic
+    # user (`language == "ar"` or `arabic_mode=True`) must be in Arabic before
+    # it is sent or spoken. Deterministic routes (definition / list /
+    # comparison / follow-up / generation extractor) often produce English
+    # text from English-translated retrieval queries; without this gate they
+    # reach the WS as English even though the user typed Arabic.
+    #
+    # Rules (do not change):
+    # - Translate ONLY when target language is "ar" and detected text is
+    #   non-Arabic.
+    # - Never translate the canonical sentinel "Not found in the document.";
+    #   the existing Arabic fallback path handles its localized form.
+    # - Translation runs through the existing `translate_with_llm` helper
+    #   (no new model, no new prompt). Failure leaves the original text and
+    #   logs `applied=False`.
+    # - When translation succeeds, the WS chunk is sent with `replace=True`
+    #   so any previously streamed English fragments from the LLM streaming
+    #   branch are overwritten on the frontend.
+    _translation_target = "ar" if (arabic_mode or str(language or "").lower() == "ar") else None
+    _translation_applied = False
+    if _translation_target == "ar" and clean_text:
+        try:
+            _pre_lang = _detect_language(clean_text)
+        except Exception:
+            _pre_lang = "en"
+        _is_sentinel = clean_text == "Not found in the document."
+        _needs_arabic_rewrite = bool(
+            _pre_lang != "ar"
+            or _mixed_alpha_contamination
+            or _has_arabic_latin_contamination(clean_text)
+        )
+        if _needs_arabic_rewrite and not _is_sentinel:
+            try:
+                _translation_input = _raw_text_for_translation or clean_text
+                _translated = await translate_with_llm(_translation_input, _pre_lang, "ar")
+                _translated = (_translated or "").strip()
+                _local_mixed_translation = bool(
+                    re.search(r"[A-Za-z]", _translated)
+                    or _has_arabic_latin_contamination(_translated)
+                )
+                if _local_mixed_translation:
+                    _external_translated = await _translate_to_arabic_external(_translation_input, _pre_lang)
+                    if _external_translated:
+                        _translated = _external_translated
+                        logger.info("[FINAL ANSWER TRANSLATION] external_fallback_applied=True branch=%s", branch)
+                _ar_chars = sum(1 for c in _translated if "\u0600" <= c <= "\u06FF")
+                if (
+                    _translated
+                    and _ar_chars >= 3
+                    and _translated != clean_text
+                    and not re.search(r"[A-Za-z]", _translated)
+                    and not _has_arabic_latin_contamination(_translated)
+                ):
+                    try:
+                        _translated = _sanitize_arabic_text(_translated)
+                    except Exception:
+                        pass
+                    _translated = _finalize_arabic_only(_translated)
+                    _ar_chars = sum(1 for c in _translated if "\u0600" <= c <= "\u06FF")
+                    if _ar_chars < 3:
+                        raise ValueError("arabic_translation_cleaned_empty")
+                    response_text = _translated
+                    clean_text = _translated.strip()
+                    replace = True  # overwrite any prior streamed English
+                    # Force chunk emission so the LLM-streaming path
+                    # (which calls us with send_chunk=False because it
+                    # streams its own English chunks live) still gets the
+                    # corrected Arabic text on the frontend.
+                    send_chunk = True
+                    _translation_applied = True
+                    logger.info(
+                        "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=True branch=%s",
+                        _pre_lang, branch,
+                    )
+                else:
+                    logger.info(
+                        "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=False reason=invalid_translation branch=%s",
+                        _pre_lang, branch,
+                    )
+            except Exception as _tx_err:
+                logger.info(
+                    "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=False reason=exception err=%s branch=%s",
+                    _pre_lang, _tx_err, branch,
+                )
+        else:
+            logger.info(
+                "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=False reason=%s branch=%s",
+                _pre_lang,
+                ("sentinel" if _is_sentinel else "already_arabic"),
+                branch,
+            )
+
+    if _translation_target == "ar" and clean_text and clean_text != "Not found in the document.":
+        _arabic_only = _finalize_arabic_only(clean_text)
+        if _arabic_only and _arabic_only != clean_text:
+            response_text = _arabic_only
+            clean_text = _arabic_only
+            replace = True
+            send_chunk = True
+            logger.info("[ARABIC FINAL CLEAN] applied=True branch=%s", branch)
+
     already_triggered = bool(timing.get("xtts_send"))
     should_trigger = bool(tts_enabled and clean_text and not already_triggered)
     if should_trigger:
@@ -29959,12 +30356,32 @@ async def send_final_response(
 
     if should_trigger:
         timing.setdefault("xtts_send", time.perf_counter())
+        # ---- TTS LANGUAGE GATE (Phase 7C — TASK 3) ----
+        # The voice used to read the answer must follow the actual answer-text
+        # script, never the UI flag. Otherwise the Arabic Piper voice ends up
+        # reading English (or vice versa). Generic — no domain content.
+        try:
+            _detected_answer_lang = _detect_language(clean_text)
+        except Exception:
+            _detected_answer_lang = language
+        _tts_voice_language = language
+        if _detected_answer_lang in ("ar", "en") and _detected_answer_lang != language:
+            _tts_voice_language = _detected_answer_lang
+            logger.info(
+                "[TTS LANG CHECK] answer_language=%s requested_voice=%s selected_voice=%s overridden=True branch=%s",
+                _detected_answer_lang, language, _tts_voice_language, branch,
+            )
+        else:
+            logger.info(
+                "[TTS LANG CHECK] answer_language=%s selected_voice=%s overridden=False branch=%s",
+                _detected_answer_lang, _tts_voice_language, branch,
+            )
         try:
             await _tts_single_response(
                 response_text,
                 ws,
                 connection_id,
-                language=language,
+                language=_tts_voice_language,
                 t_meta=timing,
             )
         except Exception as tts_err:
@@ -30012,21 +30429,32 @@ def _emit_perf_report(t_meta: dict, perf_start: float, query_text: str, answer_t
         _xs_first  = t_meta.get("first_tts_chunk")
         _xs_last   = t_meta.get("xtts_last_chunk")
 
-        def _ms(a, b):
+        def _ms(a, b, label="?"):
+            """Compute (b-a) ms. Negative or invalid intervals → None + guard log."""
             if a is None or b is None:
                 return None
-            return int(round((b - a) * 1000))
+            try:
+                delta = (b - a) * 1000
+            except Exception:
+                return None
+            if delta < 0:
+                logger.warning(
+                    "[PERF TIMER GUARD] corrected_negative_metric=%s value_ms=%.1f reason=end_before_start",
+                    label, delta,
+                )
+                return None
+            return int(round(delta))
 
-        _p_routing   = _ms(_rt_start, _rt_end)
-        _p_retrieval = _ms(_rv_start, _rv_end)
-        _p_rerank    = _ms(_rk_start, _rk_end)
-        _p_focus     = _ms(_cf_start, _cf_end)
+        _p_routing   = _ms(_rt_start, _rt_end, "routing")
+        _p_retrieval = _ms(_rv_start, _rv_end, "retrieval")
+        _p_rerank    = _ms(_rk_start, _rk_end, "rerank")
+        _p_focus     = _ms(_cf_start, _cf_end, "context_focus")
         _p_llm_ft    = None   # no LLM streaming on this path
         _p_llm_tot   = None   # no LLM streaming on this path
-        _p_xtts_ft   = _ms(_req_start, _xs_first) if _xs_first else None
-        _p_xtts_tot  = _ms(_req_start, _xs_last) if _xs_last else None
-        _p_total_be  = _ms(_req_start, t_now)
-        _p_total_au  = _ms(_req_start, _xs_last) if _xs_last else None
+        _p_xtts_ft   = _ms(_req_start, _xs_first, "xtts_first") if _xs_first else None
+        _p_xtts_tot  = _ms(_req_start, _xs_last, "xtts_total") if _xs_last else None
+        _p_total_be  = _ms(_req_start, t_now, "total_backend")
+        _p_total_au  = _ms(_req_start, _xs_last, "total_audio") if _xs_last else None
 
         def _fmt(v):
             return f"{v} ms" if v is not None else "N/A"
@@ -30085,6 +30513,12 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     the first sentence is ready, while LLM continues generating more text.
     """
     import time
+    # ---- ABOUT-ENTITY STANDALONE REWRITE (run BEFORE the direct router) --
+    # The direct router can mis-classify shapes like "وماذا عن X" or
+    # "What about X?" as `unsupported_unclear` and short-circuit them. We
+    # rewrite first so a real-entity question reaches the direct router (and
+    # the follow-up router below) in canonical "What is X?" / "ما هي X؟" form.
+    text = _maybe_rewrite_about_entity_question(text)
     # ---- PRE-RAG ROUTER (defensive for voice / non-typed callers) --------
     try:
         if text and len(str(text).strip()) >= 2:
@@ -30181,12 +30615,23 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         vram_llm_before = torch.cuda.memory_reserved(0) / 1024**2
     
     t_meta = t_meta or {}
+    _forced_final_language = str(t_meta.get("force_final_language") or "").strip().lower()
     t_meta["routing_start"] = perf_start  # routing starts at function entry
     t_meta["llm_send"] = perf_start
     t_meta["vram_llm_before"] = vram_llm_before
     if not text or len(text.strip()) < 2:
         try:
-            await websocket.send_json({"type": "aiResponse", "text": "I didn't catch that. Could you repeat?", "sources": 0})
+            await send_final_response(
+                connection_id,
+                "I didn't catch that. Could you repeat?",
+                XTTS_LANGUAGE,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=False,
+                t_meta=t_meta,
+                branch="empty_query",
+            )
         except Exception:
             pass
         return
@@ -30247,14 +30692,29 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     history = conversation_history[connection_id]
     doc_dicts: List[Dict[str, Any]] = []
 
-    # ===== ARABIC LANGUAGE HANDLING =====
-    # Auto-detect if caller passed "auto"
-    if language == "auto":
-        language = _detect_language(text)
+    def _ws_counted_list_context_rescue(current_docs: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
+        return None
 
+    # ===== ARABIC LANGUAGE HANDLING =====
+    # Source-of-truth for answer/TTS language is the script of the actual user
+    # query. UI language is only a hint — it must never force an Arabic answer
+    # for an English question or vice versa. (Phase 7C — TASK 1)
+    _ui_language_in = language
+    language = _resolve_user_language(text, language)
+    if _forced_final_language in {"ar", "en"}:
+        logger.info(
+            "[LANG ROUTE] forced_final_language=%s original_resolved=%s branch=ws_rewrite",
+            _forced_final_language,
+            language,
+        )
+        language = _forced_final_language
     arabic_mode = (language == "ar")
     xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
     original_arabic_text = text  # preserve for later use
+    logger.info(
+        "[LANG ROUTE] original_language=%s ui_language=%s retrieval_query_language=%s final_language=%s",
+        language, _ui_language_in, ("en" if arabic_mode else language), language,
+    )
     _prefetched_rag_docs = None  # cached from Arabic guard check to avoid double RAG search
 
     # Track translation time separately so it does not inflate LLM latency
@@ -31179,6 +31639,72 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
+        def _ws_counted_list_context_rescue(current_docs: Optional[List[Dict[str, Any]]] = None) -> Optional[str]:
+            if not _is_targeted_list_question(text):
+                return None
+            query_info = _detect_short_symbolic_list_query(text)
+            if not query_info:
+                return None
+            source_docs: List[Dict[str, Any]] = []
+            for doc in list(current_docs or doc_dicts or []) + list(relevant_docs or []):
+                if isinstance(doc, dict):
+                    source_docs.append(doc)
+            if not source_docs:
+                return None
+
+            def _doc_text(doc: Dict[str, Any]) -> str:
+                return str(
+                    (doc or {}).get("page_content")
+                    or (doc or {}).get("text")
+                    or (doc or {}).get("content")
+                    or ""
+                )
+
+            def _items_supported(answer_text: str, evidence_text: str) -> bool:
+                evidence_norm = _normalize_symbolic_list_surface(evidence_text)
+                if not evidence_norm:
+                    return False
+                rows = [
+                    re.sub(r"^\s*(?:[-•*]|\d+[.)])\s+", "", line).strip()
+                    for line in str(answer_text or "").splitlines()
+                    if line.strip()
+                ]
+                if len(rows) < 2:
+                    return False
+                for row in rows:
+                    tokens = [tok for tok in re.findall(r"[a-z0-9']+", _normalize_symbolic_list_surface(row)) if len(tok) >= 3]
+                    if not tokens or not all(tok in evidence_norm for tok in tokens):
+                        return False
+                return True
+
+            evidence_blocks: List[str] = []
+            for doc in source_docs[:12]:
+                body = _doc_text(doc)
+                if body.strip():
+                    evidence_blocks.append(body)
+            combined_evidence = "\n\n".join(evidence_blocks)
+            search_blocks = list(evidence_blocks) + ([combined_evidence] if combined_evidence else [])
+            local_support = _collect_local_window_support(source_docs)
+            for block in search_blocks:
+                rescued = _extract_counted_list_labels_from_context(text, block, query_info)
+                if not rescued or not _items_supported(rescued, block):
+                    continue
+                list_ok, list_reason, shaped = _assess_list_coherence(
+                    text,
+                    rescued,
+                    strict_fast=False,
+                    local_support=local_support,
+                )
+                if list_ok and shaped:
+                    logger.info("[WS COUNTED LIST RESCUE] accepted=true reason=%s", list_reason)
+                    return shaped
+                count_target = query_info.get("count")
+                item_count = len([line for line in rescued.splitlines() if line.strip()])
+                if isinstance(count_target, int) and item_count == count_target:
+                    logger.info("[WS COUNTED LIST RESCUE] accepted=true reason=count_grounded count=%s", count_target)
+                    return rescued
+            return None
+
         # Fast/simple early selector for definition/list/overview queries.
         stream_pre_simple = {"used_llm": True, "answer_type": "doc_router_multi_source"}
         if doc_router_mode != "multi_source_synthesis":
@@ -31188,6 +31714,8 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             logger.info("[DOC ROUTER] deterministic_bypass=pre_simple reason=multi_source_synthesis")
         if not stream_pre_simple.get("used_llm", True):
             short_answer = _apply_not_found_ux(text, str(stream_pre_simple.get("answer") or RAG_NO_MATCH_RESPONSE), doc_dicts)
+            if short_answer == RAG_NO_MATCH_RESPONSE:
+                short_answer = _ws_counted_list_context_rescue(doc_dicts) or short_answer
             short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
             _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
             try:
@@ -31963,6 +32491,8 @@ STRICT BEHAVIOR:
             (text or "")[:120],
         )
         _mpc11_answer = _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, doc_dicts)
+        if _mpc11_answer == RAG_NO_MATCH_RESPONSE:
+            _mpc11_answer = _ws_counted_list_context_rescue(doc_dicts) or _mpc11_answer
         try:
             await send_final_response(
                 connection_id,
@@ -32012,6 +32542,8 @@ STRICT BEHAVIOR:
             short_answer = _smalltalk_response(text)
         else:
             short_answer = _apply_not_found_ux(text, short_answer, doc_dicts)
+        if short_answer == RAG_NO_MATCH_RESPONSE:
+            short_answer = _ws_counted_list_context_rescue(doc_dicts) or short_answer
         short_answer = _ws_fix_explanation_answer(text, short_answer, doc_dicts)
         _log_answer_mode_markers(text, doc_dicts, short_answer, source_mode="extractor")
         try:
@@ -32108,10 +32640,11 @@ STRICT BEHAVIOR:
                 f"{context_block}{format_extra_rules}"
             )
     # Pick a varied opener phrase for this query (round-robin across the pool)
+    prefinal_tts_enabled_for_query = False
     global _arabic_opener_counter
     _chosen_opener: str = _ARABIC_OPENER_PHRASE      # fallback default
     _chosen_opener_pcm: bytes = _arabic_opener_pcm   # fallback default PCM
-    if arabic_mode and _arabic_opener_pool:
+    if arabic_mode and prefinal_tts_enabled_for_query and _arabic_opener_pool:
         _pool_ready = [p for p in _ARABIC_OPENER_PHRASES if _arabic_opener_pool.get(p)]
         if _pool_ready:
             _chosen_opener = _pool_ready[_arabic_opener_counter % len(_pool_ready)]
@@ -32139,7 +32672,7 @@ STRICT BEHAVIOR:
     # Arabic assistant prefill — steers qwen2.5 (a Chinese-first model) to begin
     # its response in Arabic rather than defaulting to Chinese when the KB context
     # is in English.  Ollama supports the 'assistant' partial-response pattern.
-    if arabic_mode:
+    if arabic_mode and prefinal_tts_enabled_for_query:
         messages.append({"role": "assistant", "content": _chosen_opener + " "})
     
     username = user.get("username", "unknown")
@@ -32150,6 +32683,8 @@ STRICT BEHAVIOR:
     deterministic_decision = _enforce_runtime_answer_acceptance(text, deterministic_decision, doc_dicts)
     if not deterministic_decision.get("used_llm", True):
         deterministic_answer = (deterministic_decision.get("answer") or RAG_NO_MATCH_RESPONSE).strip()
+        if deterministic_answer == RAG_NO_MATCH_RESPONSE:
+            deterministic_answer = _ws_counted_list_context_rescue(doc_dicts) or deterministic_answer
         if not arabic_mode:
             if _is_smalltalk(text):
                 deterministic_answer = _smalltalk_response(text)
@@ -32235,7 +32770,7 @@ STRICT BEHAVIOR:
     # Arabic: pre-seed the accumulated response with the opener phrase so that
     # arabic_chars counting is not fooled by a short LLM continuation that starts
     # mid-sentence (after the prefill) and so the final fullText includes the opener.
-    if arabic_mode:
+    if arabic_mode and prefinal_tts_enabled_for_query:
         full_response = _chosen_opener + " "
         sentence_index = 1  # opener occupies index 0
 
@@ -32254,9 +32789,11 @@ STRICT BEHAVIOR:
     logger.info(f"{connection_id} Adaptive TTS: words_per_chunk={adaptive_words} buffer={adaptive_buffer:.2f}s")
     tts_chunk_count = 0
     tts_total_time = 0.0
+    final_replace_chunk = False
 
     # ---- Producer-Consumer Pipeline: LLM → Queue → TTS ----
     tts_enabled_for_query = not EFFECTIVE_DISABLE_TTS
+    streaming_tts_enabled_for_query = bool(tts_enabled_for_query and prefinal_tts_enabled_for_query)
     sentence_queue = asyncio.Queue()
     # Reuse the per-connection lock so _tts_arabic_response background tasks
     # and this function never write to the socket concurrently.
@@ -32373,7 +32910,7 @@ STRICT BEHAVIOR:
                     return
 
             # In text-first safe mode, skip all audio queueing for text queries.
-            if tts_enabled_for_query and (not stream_guard_list_mode):
+            if streaming_tts_enabled_for_query and (not stream_guard_list_mode):
                 await sentence_queue.put(_normalize_digits_for_tts(chunk_text))
             first_chunk_sent = True
 
@@ -32400,10 +32937,7 @@ STRICT BEHAVIOR:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"Ollama streaming error {resp.status}: {error_text}")
-                        try:
-                            await _safe_ws_json({"type": "aiResponse", "text": "The AI service is temporarily unavailable.", "sources": 0})
-                        except Exception:
-                            pass
+                        full_response = "The AI service is temporarily unavailable."
                         return
 
                     # Read lines with explicit timeouts
@@ -32455,7 +32989,7 @@ STRICT BEHAVIOR:
 
                         full_response += token
 
-                        if not tts_enabled_for_query:
+                        if not streaming_tts_enabled_for_query:
                             if first_sentence_time is None:
                                 first_sentence_time = now
                                 t_meta["first_sentence_ready"] = first_sentence_time
@@ -32566,32 +33100,16 @@ STRICT BEHAVIOR:
                                 data = await fallback_resp.json()
                                 fallback_text = data.get("message", {}).get("content", "")
                                 full_response += fallback_text
-                                # Push all text to user
-                                await _safe_ws_json({
-                                    "type": "aiResponseChunk",
-                                    "text": full_response,
-                                    "index": sentence_index,
-                                    "done": True,
-                                    "timing": t_meta
-                                })
-                                # Push to TTS if needed
-                                if tts_enabled_for_query:
+                                if streaming_tts_enabled_for_query:
                                     await sentence_queue.put(_normalize_digits_for_tts(full_response))
                             else:
                                 raise ValueError(f"Fallback API returned {fallback_resp.status}")
                 except Exception as fb_err:
                     logger.exception(f"{connection_id} Fallback LLM failed: {fb_err} | GPU={mem['gpu_reserved_mb']:.0f}MB CPU={mem['cpu_rss_mb']:.0f}MB")
                     if not full_response: full_response = "Sorry, I am having trouble processing your query."
-                    try:
-                        await _safe_ws_json({"type": "aiResponseChunk", "text": full_response, "index": 0, "done": True})
-                    except: pass
             else:
                 logger.exception(f"LLM producer error: {e} | GPU={mem['gpu_reserved_mb']:.0f}MB CPU={mem['cpu_rss_mb']:.0f}MB")
                 if not full_response: full_response = "Sorry, I encountered an issue."
-                try:
-                    await _safe_ws_json({"type": "aiResponseChunk", "text": full_response, "index": 0, "done": True})
-                except Exception:
-                    pass
         finally:
             # Signal TTS consumer to stop
             await sentence_queue.put(None)
@@ -32616,7 +33134,7 @@ STRICT BEHAVIOR:
                 timeout=aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None)
             )
             _tts_sess = _local_tts_session
-        if not tts_enabled_for_query:
+        if not streaming_tts_enabled_for_query:
             return
 
         try:
@@ -32637,7 +33155,7 @@ STRICT BEHAVIOR:
                 if cancel_event and cancel_event.is_set():
                     break
 
-                if not tts_enabled_for_query:
+                if not streaming_tts_enabled_for_query:
                     # Skip TTS entirely in safe mode
                     continue
 
@@ -32768,7 +33286,7 @@ STRICT BEHAVIOR:
         # the first visible chunk (index 0) BEFORE the LLM generates any tokens.
         # This fills the ~2-3s XTTS synthesis gap so the user hears audio within
         # ~200ms of the query, not 5-6s later.
-        if arabic_mode and _chosen_opener_pcm:
+        if streaming_tts_enabled_for_query and arabic_mode and _chosen_opener_pcm:
             try:
                 await _safe_ws_json({"type": "aiResponseChunk", "text": _chosen_opener,
                                      "index": 0, "done": False, "timing": t_meta})
@@ -32884,36 +33402,25 @@ STRICT BEHAVIOR:
                         )
                     ar_check = sum(1 for c in ar_fallback if '\u0600' <= c <= '\u06FF')
                     if ar_check >= 3:
+                        logger.info(
+                            "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=True branch=arabic_post_llm",
+                            _src_lang,
+                        )
                         full_response = ar_fallback
                         # Sanitize the fallback Arabic text before displaying / playing
                         ar_fallback_clean = _sanitize_arabic_text(ar_fallback)
-                        # Send corrected Arabic text as a replacement chunk
-                        try:
-                            await websocket.send_json({
-                                "type": "aiResponseChunk",
-                                "text": ar_fallback_clean,
-                                "index": 0,
-                                "done": True,
-                                "replace": True,  # signal frontend to replace previous English text
-                            })
-                        except Exception:
-                            pass
-                        # Synthesize Arabic TTS for the corrected text and track timing
-                        _fb_tts_start = time.perf_counter()
-                        _fb_first, _fb_chunks, _fb_total = await _tts_arabic_response(
-                            ar_fallback_clean, websocket, connection_id,
-                            perf_start=perf_start,
-                        )
-                        if _fb_first is not None and first_tts_chunk_time is None:
-                            first_tts_chunk_time = _fb_first
-                            tts_chunk_count = _fb_chunks
-                            tts_total_time  = _fb_total
+                        full_response = ar_fallback_clean
+                        final_replace_chunk = True
                         logger.info(
-                            f"{connection_id} Arabic fallback: sent translated response "
-                            f"({len(ar_fallback)} chars) TTS chunks={_fb_chunks}"
+                            f"{connection_id} Arabic fallback: prepared translated final response "
+                            f"({len(ar_fallback_clean)} chars)"
                         )
                 except Exception as _fb_e:
                     logger.warning(f"{connection_id} Arabic fallback translation failed: {_fb_e}")
+                    logger.info(
+                        "[FINAL ANSWER TRANSLATION] source=%s target=ar applied=False reason=exception",
+                        _src_lang,
+                    )
 
         stream_post_decision = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=full_response.strip())
         stream_post_decision = _enforce_runtime_answer_acceptance(text, stream_post_decision, doc_dicts)
@@ -32925,17 +33432,10 @@ STRICT BEHAVIOR:
                 replacement_answer = _smalltalk_response(text)
             else:
                 replacement_answer = _apply_not_found_ux(text, replacement_answer, doc_dicts)
+            if replacement_answer == RAG_NO_MATCH_RESPONSE:
+                replacement_answer = _ws_counted_list_context_rescue(doc_dicts) or replacement_answer
             full_response = replacement_answer
-            try:
-                await websocket.send_json({
-                    "type": "aiResponseChunk",
-                    "text": replacement_answer,
-                    "index": 0,
-                    "done": True,
-                    "replace": True,
-                })
-            except Exception:
-                pass
+            final_replace_chunk = True
 
         # Validate the full response (skip for Arabic — validator is not Arabic-aware)
         if full_response.strip() and not arabic_mode:
@@ -32943,8 +33443,10 @@ STRICT BEHAVIOR:
             if not validation_result.is_valid:
                 logger.warning(f"Streaming response validation FAILED - Severity: {validation_result.severity}")
                 full_response = validation_result.modified_response
+                final_replace_chunk = True
             elif validation_result.modified_response:
                 full_response = validation_result.modified_response
+                final_replace_chunk = True
 
         if not arabic_mode and full_response.strip():
             if _is_smalltalk(text):
@@ -33099,7 +33601,8 @@ STRICT BEHAVIOR:
                 arabic_mode=arabic_mode,
                 t_meta=t_meta,
                 branch="llm_streaming_final",
-                send_chunk=False,
+                send_chunk=final_replace_chunk,
+                replace=final_replace_chunk,
                 extra_payload={
                     "latency": {
                     "first_token_ms": round(first_token_ms) if first_token_ms else None,
@@ -33138,13 +33641,18 @@ STRICT BEHAVIOR:
         mem = _get_memory_snapshot()
         logger.exception(f"Streaming pipeline error: {e} | GPU={mem['gpu_reserved_mb']:.0f}MB CPU={mem['cpu_rss_mb']:.0f}MB")
         try:
-            # Must send aiResponseDone to unblock the frontend UI
-            await websocket.send_json({
-                "type": "aiResponseDone", 
-                "fullText": "Sorry, I encountered an issue. Let's continue.", 
-                "sources": 0,
-                "error": True
-            })
+            await send_final_response(
+                connection_id,
+                "Sorry, I encountered an issue. Let's continue.",
+                XTTS_LANGUAGE,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=False,
+                t_meta=t_meta,
+                branch="streaming_pipeline_error",
+                extra_payload={"error": True},
+            )
         except Exception:
             pass
 
@@ -33249,7 +33757,11 @@ async def query_rag(data: QueryRequest, request: Request, user=Depends(require_l
                 connection_id = "http_sess_" + _hashlib.sha1(_tok.encode("utf-8", errors="ignore")).hexdigest()[:12]
             else:
                 connection_id = "http_anon"
-    ai_response, retrieved_docs = await call_llm_with_rag(data.text, connection_id, user)
+    # Apply about-entity rewrite up-front so downstream follow-up post-checks
+    # and definition cleanup see the same standalone-question form that
+    # call_llm_with_rag will use internally.
+    _post_text = _maybe_rewrite_about_entity_question(data.text)
+    ai_response, retrieved_docs = await call_llm_with_rag(_post_text, connection_id, user)
     if persistent_conversation_id:
         append_conversation_message(persistent_conversation_id, "assistant", ai_response)
         persist_runtime_memory(connection_id, persistent_conversation_id)
@@ -33257,12 +33769,12 @@ async def query_rag(data: QueryRequest, request: Request, user=Depends(require_l
     # those answers are already finalized inside _handle_followup_query and
     # would otherwise be reshaped by definition-style cleaners that expect a
     # fresh retrieval, not a clarification.
-    if _is_followup_query(data.text, connection_id):
+    if _is_followup_query(_post_text, connection_id):
         logger.info("[HTTP FINAL ANSWER BEFORE RETURN] (followup) %s", str(ai_response or "")[:320])
         return {"answer": ai_response}
-    if _classify_query_family_v2(data.text) != "fact_entity":
-        normalized_query_for_output, _ = _normalize_definition_query_before_retrieval(data.text)
-        ai_response = _force_clean_definition_sentence(normalized_query_for_output or data.text, ai_response, retrieved_docs)
+    if _classify_query_family_v2(_post_text) != "fact_entity":
+        normalized_query_for_output, _ = _normalize_definition_query_before_retrieval(_post_text)
+        ai_response = _force_clean_definition_sentence(normalized_query_for_output or _post_text, ai_response, retrieved_docs)
     ai_response = _cleanup_final_answer_text(ai_response)
     logger.info("[HTTP FINAL ANSWER BEFORE RETURN] %s", str(ai_response or "")[:320])
     return {"answer": ai_response}
@@ -34991,7 +35503,18 @@ async def rag_ws_endpoint(websocket: WebSocket):
         if _sessions_blocked:
             logger.error(f"MEMORY LEAK SUSPECTED — refusing new voice session [{conn_id}]")
             try:
-                await ws.send_json({"type": "aiResponse", "text": "System is stabilizing memory. Please try again in a few seconds.", "sources": 0})
+                await send_final_response(
+                    conn_id,
+                    "System is stabilizing memory. Please try again in a few seconds.",
+                    XTTS_LANGUAGE,
+                    False,
+                    websocket=ws,
+                    sources=0,
+                    arabic_mode=False,
+                    t_meta={"request_start": time.perf_counter()},
+                    branch="voice_memory_guard",
+                    extra_payload={"error": True},
+                )
             except Exception:
                 pass
             return
@@ -35003,6 +35526,10 @@ async def rag_ws_endpoint(websocket: WebSocket):
 
         # Cancel any previously-active voice task (Part 1 — only 1 at a time)
         if _active_voice_task and not _active_voice_task.done():
+            logger.warning(
+                "[VOICE PERF] duplicate_session_blocked=True prev_conn=%s current_conn=%s",
+                _active_voice_conn_id, conn_id,
+            )
             logger.warning(f"Cancelling previous voice session [{_active_voice_conn_id}]")
             _active_voice_task.cancel()
             try:
@@ -35023,6 +35550,11 @@ async def rag_ws_endpoint(websocket: WebSocket):
                 pcm16 = np.frombuffer(data_bytes, dtype=np.int16).astype(np.float32) / 32768.0
 
                 if len(pcm16) < 8000:
+                    _short_dur = len(pcm16) / float(SAMPLE_RATE)
+                    logger.info(
+                        "[VOICE PERF] skipped_short_audio=True duration=%.3fs samples=%d",
+                        _short_dur, len(pcm16),
+                    )
                     logger.debug(f"{conn_id} Audio too short ({len(pcm16)} samples), skipping")
                     return
 
@@ -35095,7 +35627,18 @@ async def rag_ws_endpoint(websocket: WebSocket):
                 except Exception as e:
                     logger.error(f"{conn_id} STT Error: {e}")
                     try:
-                        await ws.send_json({"type": "aiResponseDone", "fullText": "Speech to text is currently disabled.", "sources": 0, "error": True})
+                        await send_final_response(
+                            conn_id,
+                            "Speech to text is currently disabled.",
+                            XTTS_LANGUAGE,
+                            False,
+                            websocket=ws,
+                            sources=0,
+                            arabic_mode=False,
+                            t_meta={"request_start": time.perf_counter()},
+                            branch="stt_error",
+                            extra_payload={"error": True},
+                        )
                     except: pass
                     return
 
@@ -35141,6 +35684,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     if cancel_evt:
                         cancel_evt.clear()
 
+                    voice_force_final_language_for_rewrite = None
                     voice_history_snapshot = list(conversation_history.get(conn_id, []) or [])
                     rewritten_voice_comparison = _rewrite_bare_comparison_query_from_history(full_text, voice_history_snapshot, conn_id)
                     if rewritten_voice_comparison and rewritten_voice_comparison != full_text:
@@ -35149,7 +35693,26 @@ async def rag_ws_endpoint(websocket: WebSocket):
                             (full_text or "")[:160],
                             rewritten_voice_comparison[:160],
                         )
+                        if lang in {"ar", "en"}:
+                            voice_force_final_language_for_rewrite = lang
                         full_text = rewritten_voice_comparison
+
+                    # ---- ABOUT-ENTITY STANDALONE REWRITE (voice path) ----
+                    # Same shared helper as the typed-text path so behavior
+                    # cannot drift between voice and text.
+                    full_text = _maybe_rewrite_about_entity_question(full_text)
+
+                    # ---- LANGUAGE RESOLUTION (Phase 7C — TASK 1, voice path) ----
+                    # Trust the script of the actual transcript so an Arabic
+                    # spoken question never gets answered in English (and vice
+                    # versa) just because the UI flag was different.
+                    _voice_resolved_lang = _resolve_user_language(full_text, lang)
+                    if _voice_resolved_lang != lang:
+                        logger.info(
+                            "[LANG ROUTE] original_language=%s ui_language=%s overriding=True branch=ws_voice",
+                            _voice_resolved_lang, lang,
+                        )
+                    lang = _voice_resolved_lang
 
                     # ---- FOLLOW-UP ROUTING (voice path) ----
                     # Bypass full RAG retrieval/LLM pipeline for clarification
@@ -35172,7 +35735,12 @@ async def rag_ws_endpoint(websocket: WebSocket):
                         except Exception:
                             pass
                         try:
-                            fu_t_meta = t_meta or {"request_start": time.perf_counter()}
+                            # Phase 7B: ensure request_start exists & is monotonic so
+                            # downstream perf metrics never go negative.
+                            fu_t_meta = t_meta if isinstance(t_meta, dict) else {}
+                            if not fu_t_meta.get("request_start"):
+                                fu_t_meta["request_start"] = time.perf_counter()
+                            fu_perf_start = fu_t_meta["request_start"]
                             await send_final_response(
                                 conn_id,
                                 fu_text,
@@ -35184,13 +35752,15 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 t_meta=fu_t_meta,
                                 branch="followup_voice",
                             )
-                            _emit_perf_report(fu_t_meta, fu_t_meta.get("request_start", time.perf_counter()), full_text, fu_text, conn_id)
+                            _emit_perf_report(fu_t_meta, fu_perf_start, full_text, fu_text, conn_id)
                         except Exception:
                             pass
                         logger.info("[FOLLOWUP ROUTE] complete for query=%s", full_text)
                         logger.error("🔥 FOLLOWUP ROUTE COMPLETE (voice)")
                         return
 
+                    if voice_force_final_language_for_rewrite in {"ar", "en"}:
+                        t_meta["force_final_language"] = voice_force_final_language_for_rewrite
                     await call_llm_streaming(
                         conversation_ws, full_text, conn_id,
                         user or {"username": "anon", "role": "user"},
@@ -35272,12 +35842,18 @@ async def rag_ws_endpoint(websocket: WebSocket):
                             stt_disabled_notified = True
                             logger.warning(f"{connection_id} received audio while STT is disabled/unavailable")
                             try:
-                                await websocket.send_json({
-                                    "type": "aiResponseDone",
-                                    "fullText": "Speech to text is currently disabled.",
-                                    "sources": 0,
-                                    "error": True,
-                                })
+                                await send_final_response(
+                                    connection_id,
+                                    "Speech to text is currently disabled.",
+                                    XTTS_LANGUAGE,
+                                    False,
+                                    websocket=websocket,
+                                    sources=0,
+                                    arabic_mode=False,
+                                    t_meta={"request_start": time.perf_counter()},
+                                    branch="stt_disabled",
+                                    extra_payload={"error": True},
+                                )
                             except Exception:
                                 pass
                         continue
@@ -35415,6 +35991,27 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 except Exception:
                                     logger.exception("[CONV] failed to persist user message id=%s", conversation_id_for_text)
 
+                                # ---- ABOUT-ENTITY STANDALONE REWRITE (typed WS, pre-router) ----
+                                # Run BEFORE the direct router so shapes like
+                                # "What about X?" / "وماذا عن X" with a real new
+                                # entity X are normalized to "What is X?" /
+                                # "ما هي X؟" and don't get mis-classified as
+                                # `unsupported_unclear`.
+                                text = _maybe_rewrite_about_entity_question(text)
+
+                                # ---- LANGUAGE RESOLUTION (Phase 7C — TASK 1) ----
+                                # Always trust the actual script of the user's
+                                # query over the UI/session language flag so the
+                                # router/follow-up/RAG branches all agree on the
+                                # answer language. UI language remains a hint only.
+                                _resolved_msg_lang = _resolve_user_language(text, msg_lang)
+                                if _resolved_msg_lang != msg_lang:
+                                    logger.info(
+                                        "[LANG ROUTE] original_language=%s ui_language=%s overriding=True branch=ws_typed",
+                                        _resolved_msg_lang, msg_lang,
+                                    )
+                                msg_lang = _resolved_msg_lang
+
                                 route = classify_query_route(text)
                                 if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
                                     route_lang = _route_response_language(text, msg_lang)
@@ -35547,6 +36144,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     except Exception:
                                         pass
                                     continue
+                                force_final_language_for_rewrite = None
                                 history_snapshot = list(conversation_history.get(connection_id, []) or [])
                                 rewritten_comparison_query = _rewrite_bare_comparison_query_from_history(text, history_snapshot, connection_id)
                                 if rewritten_comparison_query and rewritten_comparison_query != text:
@@ -35555,6 +36153,8 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                         (text or "")[:160],
                                         rewritten_comparison_query[:160],
                                     )
+                                    if msg_lang in {"ar", "en"}:
+                                        force_final_language_for_rewrite = msg_lang
                                     text = rewritten_comparison_query
 
                                 # ---- HARD DEBUG: prove the WS entrypoint is reached ----
@@ -35604,7 +36204,9 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     logger.info("[FOLLOWUP ROUTE] complete for query=%s", text)
                                     logger.error("🔥 FOLLOWUP ROUTE COMPLETE")
                                     continue
-                                _ws_perf_t_meta = {"request_start": time.perf_counter()}
+                                _ws_perf_t_meta: Dict[str, Any] = {"request_start": time.perf_counter()}
+                                if force_final_language_for_rewrite in {"ar", "en"}:
+                                    _ws_perf_t_meta["force_final_language"] = force_final_language_for_rewrite
                                 await call_llm_streaming(
                                     conversation_ws, text, connection_id,
                                     user or {"username": "anon", "role": "user"},

@@ -584,6 +584,270 @@
         box-sizing: border-box;
       }
     }
+
+    /* =========================================================
+       PHASE 7 — VOICE / CALL MODE STYLES
+       Restyling tip: change the CSS variables below to retheme.
+       ========================================================= */
+    :root {
+      --voice-bg: rgba(15, 17, 22, 0.92);
+      --voice-overlay-blur: 14px;
+      --voice-text-color: #fafaff;
+      --voice-subtext-color: #b8c0d0;
+      --voice-accent: #10a37f;
+      --voice-accent-soft: rgba(16, 163, 127, 0.35);
+      --voice-error: #ef4444;
+      --voice-warn: #f59e0b;
+      --voice-circle-size: 220px;
+      --voice-circle-color: #10a37f;
+      --voice-circle-glow: 0 0 60px rgba(16, 163, 127, 0.55);
+      --voice-circle-bg: radial-gradient(circle at 30% 30%, #1ec998, #0d8a68 70%, #075c47 100%);
+      --voice-modal-radius: 22px;
+      --voice-button-radius: 999px;
+    }
+    .voice-open-btn {
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px 14px;
+      background: linear-gradient(135deg, #6c63ff 0%, #2575fc 100%);
+      color: #fff;
+      border: none;
+      border-radius: 10px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      box-shadow: 0 2px 10px rgba(108, 99, 255, 0.35);
+      transition: transform 0.15s ease, box-shadow 0.2s ease;
+    }
+    .voice-open-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 14px rgba(108, 99, 255, 0.5);
+    }
+    .voice-open-btn:active { transform: translateY(0); }
+
+    .voice-overlay {
+      position: fixed;
+      inset: 0;
+      background: var(--voice-bg);
+      backdrop-filter: blur(var(--voice-overlay-blur));
+      -webkit-backdrop-filter: blur(var(--voice-overlay-blur));
+      display: none;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+      color: var(--voice-text-color);
+      padding: 24px;
+      box-sizing: border-box;
+    }
+    .voice-overlay.open { display: flex; }
+
+    .voice-modal {
+      width: 100%;
+      max-width: 520px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 24px;
+      background: rgba(30, 33, 40, 0.55);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: var(--voice-modal-radius);
+      padding: 32px 24px 28px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+    }
+
+    .voice-close-btn {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--voice-text-color);
+      border: none;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      cursor: pointer;
+      font-size: 1.1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s ease;
+    }
+    .voice-close-btn:hover { background: rgba(255, 255, 255, 0.18); }
+
+    .voice-circle-wrap {
+      position: relative;
+      width: var(--voice-circle-size);
+      height: var(--voice-circle-size);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .voice-circle {
+      width: 100%;
+      height: 100%;
+      border-radius: 50%;
+      background: var(--voice-circle-bg);
+      box-shadow: var(--voice-circle-glow);
+      transition: transform 0.25s ease, box-shadow 0.25s ease, background 0.25s ease;
+    }
+    .voice-circle-ring {
+      position: absolute;
+      inset: -14px;
+      border-radius: 50%;
+      border: 2px solid var(--voice-accent-soft);
+      opacity: 0;
+      transition: opacity 0.25s ease;
+    }
+
+    /* ---- Per-state circle behavior ---- */
+    .voice-state-idle .voice-circle {
+      animation: voicePulseSoft 4s ease-in-out infinite;
+    }
+    .voice-state-listening .voice-circle {
+      animation: voicePulseStrong 1.2s ease-in-out infinite;
+    }
+    .voice-state-listening .voice-circle-ring {
+      opacity: 1;
+      animation: voiceRingPulse 1.4s ease-out infinite;
+    }
+    .voice-state-transcribing .voice-circle {
+      animation: voicePulseSoft 1.6s ease-in-out infinite;
+    }
+    .voice-state-thinking .voice-circle {
+      animation: voiceGlowSlow 2.4s ease-in-out infinite;
+    }
+    .voice-state-speaking .voice-circle {
+      animation: voicePulseStrong 0.9s ease-in-out infinite;
+      box-shadow: 0 0 80px rgba(16, 163, 127, 0.85);
+    }
+    .voice-state-error .voice-circle {
+      background: radial-gradient(circle at 30% 30%, #ff6b6b, #c0392b 70%, #7a1f14 100%);
+      box-shadow: 0 0 50px rgba(239, 68, 68, 0.55);
+      animation: voicePulseSoft 2.2s ease-in-out infinite;
+    }
+
+    @keyframes voicePulseSoft {
+      0%, 100% { transform: scale(1.0); }
+      50%      { transform: scale(1.04); }
+    }
+    @keyframes voicePulseStrong {
+      0%, 100% { transform: scale(1.0); box-shadow: var(--voice-circle-glow); }
+      50%      { transform: scale(1.08); box-shadow: 0 0 90px rgba(16, 163, 127, 0.8); }
+    }
+    @keyframes voiceGlowSlow {
+      0%, 100% { box-shadow: 0 0 40px rgba(16, 163, 127, 0.4); }
+      50%      { box-shadow: 0 0 90px rgba(16, 163, 127, 0.85); }
+    }
+    @keyframes voiceRingPulse {
+      0%   { transform: scale(0.95); opacity: 0.7; }
+      100% { transform: scale(1.25); opacity: 0; }
+    }
+
+    .voice-status {
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--voice-text-color);
+      text-align: center;
+      min-height: 1.4em;
+    }
+    .voice-state-error .voice-status { color: var(--voice-error); }
+
+    .voice-transcript {
+      width: 100%;
+      min-height: 56px;
+      max-height: 110px;
+      overflow-y: auto;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      color: var(--voice-subtext-color);
+      font-size: 0.92rem;
+      line-height: 1.4;
+      text-align: center;
+      box-sizing: border-box;
+    }
+    .voice-transcript:empty::before {
+      content: attr(data-placeholder);
+      color: rgba(255, 255, 255, 0.35);
+    }
+
+    /* User + Assistant bubbles inside the overlay */
+    .voice-conversation {
+      width: 100%;
+      max-height: 220px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      box-sizing: border-box;
+      padding: 4px 2px;
+    }
+    .voice-bubble {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 10px 14px;
+      border-radius: 14px;
+      font-size: 0.95rem;
+      line-height: 1.45;
+      color: var(--voice-text-color);
+      word-wrap: break-word;
+      max-width: 100%;
+      box-sizing: border-box;
+    }
+    .voice-bubble[hidden] { display: none !important; }
+    .voice-bubble-label {
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--voice-subtext-color);
+      opacity: 0.85;
+    }
+    .voice-bubble-text { white-space: pre-wrap; }
+    .voice-bubble-user {
+      align-self: flex-end;
+      background: rgba(108, 99, 255, 0.22);
+      border: 1px solid rgba(108, 99, 255, 0.35);
+    }
+    .voice-bubble-assistant {
+      align-self: flex-start;
+      background: rgba(16, 163, 127, 0.18);
+      border: 1px solid rgba(16, 163, 127, 0.35);
+    }
+    .voice-bubble.arabic { direction: rtl; text-align: right; }
+
+    .voice-controls {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+    .voice-btn-mic, .voice-btn-stop {
+      border: none;
+      cursor: pointer;
+      font-size: 1.0rem;
+      font-weight: 600;
+      padding: 12px 22px;
+      border-radius: var(--voice-button-radius);
+      color: #fff;
+      transition: transform 0.15s ease, opacity 0.15s ease, background 0.2s ease;
+    }
+    .voice-btn-mic {
+      background: var(--voice-accent);
+      min-width: 160px;
+    }
+    .voice-btn-mic.recording { background: var(--voice-error); }
+    .voice-btn-mic:disabled,
+    .voice-btn-stop:disabled { opacity: 0.5; cursor: not-allowed; }
+    .voice-btn-stop {
+      background: rgba(255, 255, 255, 0.12);
+      color: var(--voice-text-color);
+    }
+    .voice-btn-stop:hover:not(:disabled) { background: rgba(255, 255, 255, 0.22); }
   </style>
 </head>
 <body>
@@ -647,7 +911,7 @@
         <input type="text" id="chatInput" autocomplete="off" placeholder="Type your question..." />
         <button type="submit">Send</button>
       </form>
-      <div style="display: flex; gap: 10px; margin-top: 10px;">
+      <div style="display: none; gap: 10px; margin-top: 10px;" data-legacy-voice-controls="true">
         <button type="button" id="btnStart" class="voice-btn" style="flex: 1; background: #10a37f;">
           🎤 Start
         </button>
@@ -658,6 +922,10 @@
           ⏹️ Stop
         </button>
       </div>
+      <!-- Phase 7 — Voice / Call Mode entry button -->
+      <button type="button" id="voiceModeOpenBtn" class="voice-open-btn">
+        🎙 Voice Mode
+      </button>
       <!-- Thinking indicator -->
       <div id="thinkingIndicator" class="thinking-indicator">
         <div class="thinking-dots"><span></span><span></span><span></span></div>
@@ -674,6 +942,32 @@
     </div>
     <audio id="audioPlayer" style="display:none"></audio>
   </main>
+
+  <!-- Phase 7 — Voice / Call Mode overlay -->
+  <div id="voiceOverlay" class="voice-overlay voice-state-idle" role="dialog" aria-modal="true" aria-label="Voice mode" aria-hidden="true">
+    <button type="button" id="voiceCloseBtn" class="voice-close-btn" title="Close voice mode" aria-label="Close voice mode">✕</button>
+    <div class="voice-modal">
+      <div class="voice-circle-wrap" id="voiceCircleWrap">
+        <div class="voice-circle-ring"></div>
+        <div class="voice-circle"></div>
+      </div>
+      <div class="voice-status" id="voiceStatusText">Tap to speak</div>
+      <div class="voice-conversation" id="voiceConversation">
+        <div class="voice-bubble voice-bubble-user" id="voiceUserBubble" hidden>
+          <span class="voice-bubble-label" id="voiceUserLabel">You</span>
+          <span class="voice-bubble-text" id="voiceUserText"></span>
+        </div>
+        <div class="voice-bubble voice-bubble-assistant" id="voiceAssistantBubble" hidden>
+          <span class="voice-bubble-label" id="voiceAssistantLabel">Assistant</span>
+          <span class="voice-bubble-text" id="voiceAssistantText"></span>
+        </div>
+      </div>
+      <div class="voice-controls">
+        <button type="button" id="voiceMicBtn" class="voice-btn-mic">🎤 Tap to speak</button>
+        <button type="button" id="voiceStopBtn" class="voice-btn-stop" disabled>⏹ Stop</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Arabic Support Download Modal -->
   <div class="ar-modal-overlay" id="arModal">
@@ -1523,6 +1817,7 @@
           full_response += chunkText;
           showAISpeaking();
           handleResponseChunk(chunkText, data.index);
+          try { window.voiceMode && window.voiceMode.updateVoiceAssistantText && window.voiceMode.updateVoiceAssistantText(full_response); } catch(e){}
 
           // Pause mic sending in live mode for barge-in detection
           if (_liveCallMode && isRecording) {
@@ -1545,6 +1840,7 @@
           let finalTtsStarted = false;
           if(finalText) {
             lastAIResponse = finalText;
+            try { window.voiceMode && window.voiceMode.updateVoiceAssistantText && window.voiceMode.updateVoiceAssistantText(finalText); } catch(e){}
             if (!data.arabic_mode) {
               finalTtsStarted = triggerFinalTTSParallel(finalText, {
                 source: 'aiResponseDone',
@@ -1587,6 +1883,7 @@
           const finalText = finalizeWsResponse(data.text || '');
           if(finalText) {
             lastAIResponse = finalText;
+            try { window.voiceMode && window.voiceMode.updateVoiceAssistantText && window.voiceMode.updateVoiceAssistantText(finalText); } catch(e){}
 
             if (_liveCallMode && isRecording) {
               pauseAudioSending = true;
@@ -1609,6 +1906,7 @@
             lastTranscript = data.text;
             resetWsResponseBuffer('voice_transcript', data.text);
             lastUserMsgEl = appendMsg('user', data.text, detectArabicText(data.text));
+            try { window.voiceMode && window.voiceMode.onTranscript && window.voiceMode.onTranscript(data.text); } catch(e){}
             showThinking();
           }
         } else if(data.type === 'transcriptCorrection') {
@@ -1630,6 +1928,7 @@
           setTextSubmitLock(false);
           hideThinking();
           appendMsg('system', '[Error] ' + (data.message || 'Connection error'));
+          try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('error', data.message); } catch(e){}
         } else if(data.type === 'info') {
           appendMsg('system', data.message);
         } else if(data.type === 'conversation') {
@@ -2072,10 +2371,12 @@
     function showThinking() {
       isThinking = true;
       setActivityIndicator('thinking');
+      try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('thinking'); } catch(e){}
     }
     function showListening() {
       isThinking = false;
       setActivityIndicator('listening');
+      try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('listening'); } catch(e){}
     }
     function hideThinking() {
       isThinking = false;
@@ -2094,10 +2395,12 @@
     function showAISpeaking() {
       const el = document.getElementById('aiSpeakingGlow');
       if (el) el.classList.add('active');
+      try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('speaking'); } catch(e){}
     }
     function hideAISpeaking() {
       const el = document.getElementById('aiSpeakingGlow');
       if (el) el.classList.remove('active');
+      try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('speaking_end'); } catch(e){}
     }
 
     // ---- Streaming Response Display ----
@@ -2755,6 +3058,548 @@
       
       return result;
     }
+
+    /* =========================================================
+       PHASE 7 — VOICE / CALL MODE CONTROLLER
+       Modular layer that reuses existing /ws + startRecording()
+       + stopRecording() + TTS pipeline. Does NOT duplicate RAG
+       logic, retrieval, or answer generation.
+
+       Architecture
+       ------------
+       1) Voice state    : idle | listening | transcribing | thinking | speaking | error
+       2) Controllers    : openVoiceMode / closeVoiceMode / start* / stop* / setVoiceState
+       3) UI rendering   : circle, status text, transcript preview, mic/stop/close
+       4) Styling        : driven by CSS variables + .voice-state-* classes
+       ========================================================= */
+    (function initVoiceMode() {
+      const overlay      = document.getElementById('voiceOverlay');
+      const openBtn      = document.getElementById('voiceModeOpenBtn');
+      const closeBtn     = document.getElementById('voiceCloseBtn');
+      const micBtn       = document.getElementById('voiceMicBtn');
+      const stopBtn      = document.getElementById('voiceStopBtn');
+      const statusEl     = document.getElementById('voiceStatusText');
+      const circleWrap   = document.getElementById('voiceCircleWrap');
+      const userBubble   = document.getElementById('voiceUserBubble');
+      const userTextEl   = document.getElementById('voiceUserText');
+      const userLabelEl  = document.getElementById('voiceUserLabel');
+      const asstBubble   = document.getElementById('voiceAssistantBubble');
+      const asstTextEl   = document.getElementById('voiceAssistantText');
+      const asstLabelEl  = document.getElementById('voiceAssistantLabel');
+
+      if (!overlay || !openBtn) return; // markup missing
+
+      const STATES = ['idle', 'listening', 'transcribing', 'thinking', 'speaking', 'error'];
+      let currentState = 'idle';
+      let isOpen = false;
+      let openerSpokenInSession = false;
+      let amplitudeFrame = null;
+      let analyser = null;
+      let analyserData = null;
+
+      // ---- Phase 7C: silence-driven auto-stop while listening ----
+      const SILENCE_RMS_THRESHOLD = 0.015;   // below = silence
+      const SILENCE_AUTO_STOP_MS  = 1000;    // sustained silence to auto-stop
+      const MIN_LISTEN_MS         = 1500;    // ignore silence before this
+      let listeningStartTime = 0;
+      let lastVoiceTime      = 0;
+      let autoStopTriggered  = false;
+
+      // ---- Phase 7C: dedicated low-power analyser for speaking-state interrupt ----
+      const INTERRUPT_RMS_THRESHOLD = 0.05;
+      const INTERRUPT_FRAMES_NEEDED = 4;     // ~60-100ms of sustained voice
+      let interruptStream   = null;
+      let interruptCtx      = null;
+      let interruptAnalyser = null;
+      let interruptData     = null;
+      let interruptFrame    = null;
+      let interruptVoiceFrames = 0;
+
+      // ---- Phase 7C: idle-after-speaking timer (debounced) ----
+      let idleAfterSpeakingTimer = null;
+
+      function isArabic() {
+        return ((typeof currentLanguage !== 'undefined') ? currentLanguage : 'en') === 'ar';
+      }
+      function detectArabicSafe(text) {
+        try {
+          if (typeof detectArabicText === 'function') return detectArabicText(text);
+        } catch (e) {}
+        return /[\u0600-\u06FF]/.test(String(text || ''));
+      }
+
+      // ---- Localised labels ----
+      function statusFor(state) {
+        const ar = isArabic();
+        switch (state) {
+          case 'idle':         return ar ? 'اضغط للتحدث' : 'Tap to speak';
+          case 'listening':    return ar ? 'الاستماع...' : 'Listening...';
+          case 'transcribing': return ar ? 'جاري التحويل...' : 'Transcribing...';
+          case 'thinking':     return ar ? 'جاري التفكير...' : 'Thinking...';
+          case 'speaking':     return ar ? 'يتحدث...' : 'Speaking...';
+          case 'error':        return ar ? 'خطأ' : 'Error';
+          default:             return '';
+        }
+      }
+      function localizedLabels() {
+        const ar = isArabic();
+        return {
+          user:      ar ? 'أنت' : 'You',
+          assistant: ar ? 'المساعد' : 'Assistant',
+          tap:       ar ? '🎤 اضغط للتحدث' : '🎤 Tap to speak',
+          stopMic:   ar ? '⏸ إيقاف الاستماع' : '⏸ Stop listening',
+          interrupt: ar ? '✋ مقاطعة' : '✋ Interrupt',
+        };
+      }
+      function updateMicButtonLabel() {
+        const L = localizedLabels();
+        if (currentState === 'listening') {
+          micBtn.textContent = L.stopMic;
+          micBtn.classList.add('recording');
+        } else if (currentState === 'speaking') {
+          micBtn.textContent = L.interrupt;
+          micBtn.classList.remove('recording');
+        } else {
+          micBtn.textContent = L.tap;
+          micBtn.classList.remove('recording');
+        }
+      }
+      function refreshLabels() {
+        const L = localizedLabels();
+        if (userLabelEl) userLabelEl.textContent = L.user;
+        if (asstLabelEl) asstLabelEl.textContent = L.assistant;
+      }
+
+      // ---- Conversation preview API ----
+      function updateVoiceUserText(text) {
+        const safe = String(text || '').trim();
+        if (!userBubble || !userTextEl) return;
+        if (!safe) { userBubble.hidden = true; userTextEl.textContent = ''; return; }
+        userTextEl.textContent = safe;
+        userBubble.hidden = false;
+        userBubble.classList.toggle('arabic', detectArabicSafe(safe));
+      }
+      function updateVoiceAssistantText(text) {
+        const safe = String(text || '').trim();
+        if (!asstBubble || !asstTextEl) return;
+        if (!safe) { asstBubble.hidden = true; asstTextEl.textContent = ''; return; }
+        asstTextEl.textContent = safe;
+        asstBubble.hidden = false;
+        asstBubble.classList.toggle('arabic', detectArabicSafe(safe));
+      }
+      function clearVoiceConversationPreview() {
+        updateVoiceUserText('');
+        updateVoiceAssistantText('');
+      }
+
+      // ---- State + status ----
+      function setVoiceState(state) {
+        if (!STATES.includes(state)) return;
+        // Phase 7C: reject duplicate transitions to prevent ghost listening/speaking loops.
+        if (currentState === state) {
+          return;
+        }
+        const fromState = currentState;
+        currentState = state;
+        STATES.forEach(s => overlay.classList.remove('voice-state-' + s));
+        overlay.classList.add('voice-state-' + state);
+        updateVoiceStatus(statusFor(state));
+        updateMicButtonLabel();
+        // Mic button is enabled in idle/listening/error AND speaking (tap-to-interrupt).
+        const safeForMic = (state === 'idle' || state === 'listening' || state === 'error' || state === 'speaking');
+        micBtn.disabled = !safeForMic;
+        stopBtn.disabled = (state !== 'speaking');
+
+        // Cancel any pending auto-idle when leaving the speaking state via another path.
+        if (state !== 'speaking' && idleAfterSpeakingTimer) {
+          clearTimeout(idleAfterSpeakingTimer);
+          idleAfterSpeakingTimer = null;
+        }
+
+        // Drive the reactive analyser only when needed.
+        if (state === 'listening') {
+          listeningStartTime = Date.now();
+          lastVoiceTime      = Date.now();
+          autoStopTriggered  = false;
+          startMicAnalyser();
+        } else {
+          stopMicAnalyser();
+        }
+
+        // Phase 7C: speech-detection interrupt only while AI is speaking.
+        if (state === 'speaking') {
+          startInterruptAnalyser();
+        } else {
+          stopInterruptAnalyser();
+        }
+
+        if (state !== 'speaking' && state !== 'listening') resetCircleAmplitude();
+
+        const lang = isArabic() ? 'ar' : 'en';
+        console.log('[VOICE STATE] from=' + fromState + ' to=' + state);
+        console.log('[VOICE MODE] state=' + state + ' lang=' + lang);
+      }
+      function updateVoiceStatus(text) {
+        if (statusEl) statusEl.textContent = text || '';
+      }
+
+      // ---- Reactive circle (amplitude-driven) ----
+      function applyCircleAmplitude(level) {
+        // level in [0, 1] — combines with CSS keyframe scale
+        if (!circleWrap) return;
+        const scale = 1 + Math.min(0.35, Math.max(0, level) * 0.35);
+        circleWrap.style.transform = 'scale(' + scale.toFixed(3) + ')';
+      }
+      function resetCircleAmplitude() {
+        if (circleWrap) circleWrap.style.transform = '';
+      }
+      function startMicAnalyser() {
+        try {
+          // Reuse the existing audioContext + mediaStream that startRecording set up.
+          const ctx = (typeof audioContext !== 'undefined') ? audioContext : null;
+          const stream = (typeof mediaStream !== 'undefined') ? mediaStream : null;
+          if (!ctx || !stream) return;
+          if (analyser) return;
+          const src = ctx.createMediaStreamSource(stream);
+          analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          analyserData = new Uint8Array(analyser.frequencyBinCount);
+          src.connect(analyser);
+          const tick = () => {
+            if (!analyser) return;
+            analyser.getByteTimeDomainData(analyserData);
+            let sum = 0;
+            for (let i = 0; i < analyserData.length; i++) {
+              const v = (analyserData[i] - 128) / 128;
+              sum += v * v;
+            }
+            const rms = Math.sqrt(sum / analyserData.length);
+            applyCircleAmplitude(rms * 2.0);
+
+            // Phase 7C: silence-driven auto-stop while actively listening.
+            if (currentState === 'listening' && !autoStopTriggered) {
+              const now = Date.now();
+              if (rms > SILENCE_RMS_THRESHOLD) {
+                lastVoiceTime = now;
+              }
+              const sinceVoice = now - lastVoiceTime;
+              const sinceStart = now - listeningStartTime;
+              if (sinceStart > MIN_LISTEN_MS && sinceVoice > SILENCE_AUTO_STOP_MS) {
+                autoStopTriggered = true;
+                console.log('[VOICE AUTO STOP] silence_detected=True duration=' + sinceVoice + 'ms');
+                try { stopVoiceListening(); } catch (e) { console.warn('[VOICE MODE] auto-stop failed', e); }
+                return;
+              }
+            }
+
+            amplitudeFrame = requestAnimationFrame(tick);
+          };
+          tick();
+        } catch (e) {
+          // Analyser is purely cosmetic — never break voice flow.
+          console.warn('[VOICE MODE] mic analyser unavailable', e);
+        }
+      }
+      function stopMicAnalyser() {
+        if (amplitudeFrame) { cancelAnimationFrame(amplitudeFrame); amplitudeFrame = null; }
+        analyser = null;
+        analyserData = null;
+      }
+
+      // ---- Phase 7C: speech-detection interrupt while AI is speaking ----
+      async function startInterruptAnalyser() {
+        if (interruptStream || interruptAnalyser) return;
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+        try {
+          interruptStream = await navigator.mediaDevices.getUserMedia({
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+          });
+          // If the speaking state ended while we awaited the mic, abort silently.
+          if (currentState !== 'speaking') {
+            try { interruptStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+            interruptStream = null;
+            return;
+          }
+          interruptCtx = new (window.AudioContext || window.webkitAudioContext)();
+          const src = interruptCtx.createMediaStreamSource(interruptStream);
+          interruptAnalyser = interruptCtx.createAnalyser();
+          interruptAnalyser.fftSize = 256;
+          interruptData = new Uint8Array(interruptAnalyser.frequencyBinCount);
+          src.connect(interruptAnalyser);
+          interruptVoiceFrames = 0;
+          const tick = () => {
+            if (!interruptAnalyser) return;
+            interruptAnalyser.getByteTimeDomainData(interruptData);
+            let sum = 0;
+            for (let i = 0; i < interruptData.length; i++) {
+              const v = (interruptData[i] - 128) / 128;
+              sum += v * v;
+            }
+            const rms = Math.sqrt(sum / interruptData.length);
+            if (rms > INTERRUPT_RMS_THRESHOLD) {
+              interruptVoiceFrames++;
+              if (interruptVoiceFrames >= INTERRUPT_FRAMES_NEEDED) {
+                console.log('[VOICE INTERRUPT] user_interrupted_ai=True');
+                stopInterruptAnalyser();
+                try { stopVoicePlayback(); } catch (_) {}
+                try { startVoiceListening(); } catch (_) {}
+                return;
+              }
+            } else {
+              interruptVoiceFrames = 0;
+            }
+            interruptFrame = requestAnimationFrame(tick);
+          };
+          tick();
+        } catch (e) {
+          // Mic permission may be denied or device busy — fall back to tap-to-interrupt.
+          console.warn('[VOICE MODE] interrupt analyser unavailable', e);
+          stopInterruptAnalyser();
+        }
+      }
+      function stopInterruptAnalyser() {
+        if (interruptFrame) { cancelAnimationFrame(interruptFrame); interruptFrame = null; }
+        interruptAnalyser = null;
+        interruptData = null;
+        interruptVoiceFrames = 0;
+        if (interruptStream) {
+          try { interruptStream.getTracks().forEach(t => t.stop()); } catch (_) {}
+          interruptStream = null;
+        }
+        if (interruptCtx) {
+          try { interruptCtx.close(); } catch (_) {}
+          interruptCtx = null;
+        }
+      }
+
+      // ---- Opener (TTS only — never RAG) ----
+      function openerText() {
+        return isArabic()
+          ? 'أهلاً، كيف يمكنني مساعدتك اليوم؟'
+          : 'Hello, how can I help you today?';
+      }
+      function speakOpener() {
+        const text = openerText();
+        const lang = isArabic() ? 'ar' : 'en';
+        console.log('[VOICE MODE] opener_started language=' + lang);
+        updateVoiceAssistantText(text);
+        // Show speaking visual immediately so the user gets feedback.
+        setVoiceState('speaking');
+        let started = false;
+        try {
+          if (typeof triggerFinalTTSParallel === 'function') {
+            // Note: triggerFinalTTSParallel calls /tts (pure synthesis) — no RAG, no history.
+            started = triggerFinalTTSParallel(text, { source: 'voice_opener', language: lang });
+          }
+        } catch (e) { started = false; }
+        if (!started) {
+          // Fall back to the browser SpeechSynthesis API.
+          try {
+            if (typeof _speakBrowser === 'function') {
+              _speakBrowser(text, lang).then(() => {
+                console.log('[VOICE MODE] opener_done');
+                if (isOpen) setVoiceState('idle');
+              });
+              return;
+            }
+          } catch (e) {}
+          // No TTS available — stay visible as text only and drop to idle.
+          console.log('[VOICE MODE] opener_done (no_tts)');
+          if (isOpen) setVoiceState('idle');
+          return;
+        }
+        // Server TTS: when audio ends the existing pipeline emits speaking_end via hideAISpeaking.
+        // We log opener_done from there — but also schedule a fallback log so it always appears.
+        setTimeout(() => { console.log('[VOICE MODE] opener_done'); }, 50);
+      }
+
+      // ---- Open / Close ----
+      function openVoiceMode() {
+        isOpen = true;
+        overlay.classList.add('open');
+        overlay.setAttribute('aria-hidden', 'false');
+        refreshLabels();
+        // Keep previous transcript empty for a clean greeting.
+        clearVoiceConversationPreview();
+        const lang = isArabic() ? 'ar' : 'en';
+        console.log('[VOICE MODE] opened lang=' + lang);
+
+        // If the assistant is already speaking from a prior interaction reflect that.
+        if (typeof isTTSPlaying !== 'undefined' && isTTSPlaying) {
+          setVoiceState('speaking');
+          return;
+        }
+        if (typeof isRecording !== 'undefined' && isRecording) {
+          setVoiceState('listening');
+          return;
+        }
+        // Greet on first open in this session, otherwise just go idle/ready.
+        if (!openerSpokenInSession) {
+          openerSpokenInSession = true;
+          speakOpener();
+        } else {
+          setVoiceState('idle');
+        }
+      }
+      function closeVoiceMode() {
+        isOpen = false;
+        if (idleAfterSpeakingTimer) { clearTimeout(idleAfterSpeakingTimer); idleAfterSpeakingTimer = null; }
+        try {
+          if (typeof isRecording !== 'undefined' && isRecording &&
+              typeof stopRecording === 'function') {
+            stopRecording(true);
+          }
+        } catch (e) { console.warn('[VOICE MODE] stopRecording on close failed', e); }
+        stopMicAnalyser();
+        stopInterruptAnalyser();
+        resetCircleAmplitude();
+        overlay.classList.remove('open');
+        overlay.setAttribute('aria-hidden', 'true');
+        setVoiceState('idle');
+        console.log('[VOICE MODE] closed');
+      }
+
+      // ---- Recording wrappers ----
+      async function startVoiceListening() {
+        if (typeof startRecording !== 'function') {
+          setVoiceState('error');
+          updateVoiceStatus('Recording not supported');
+          return;
+        }
+        if (typeof isTTSPlaying !== 'undefined' && isTTSPlaying) {
+          stopVoicePlayback();
+        }
+        if (typeof isRecording !== 'undefined' && isRecording) {
+          setVoiceState('listening');
+          return;
+        }
+        try {
+          await startRecording(true);
+          setVoiceState('listening');
+        } catch (e) {
+          console.error('[VOICE MODE] startRecording failed', e);
+          setVoiceState('error');
+        }
+      }
+      function stopVoiceListening() {
+        try {
+          if (typeof isRecording !== 'undefined' && isRecording &&
+              typeof stopRecording === 'function') {
+            stopRecording(true);
+          }
+        } catch (e) { console.warn('[VOICE MODE] stopRecording failed', e); }
+        // Phase 7C: instant UX feedback — never leave the user staring at silence.
+        setVoiceState('transcribing');
+      }
+      function stopVoicePlayback() {
+        try {
+          if (typeof _stopAllTTS === 'function') { _stopAllTTS(); }
+          else if (typeof stopAllTTS === 'function') { stopAllTTS(); }
+        } catch (e) {}
+        try {
+          if (Array.isArray(window._ttsSources)) {
+            window._ttsSources.forEach(s => { try { s.stop(); } catch(_){} });
+            window._ttsSources = [];
+          }
+        } catch (e) {}
+        try {
+          if ('speechSynthesis' in window) { window.speechSynthesis.cancel(); }
+        } catch (e) {}
+        if (typeof isTTSPlaying !== 'undefined') {
+          try { window.isTTSPlaying = false; } catch(_) {}
+        }
+        setVoiceState('idle');
+        console.log('[VOICE MODE] tts_started=False (playback stopped by user)');
+      }
+
+      // ---- Public hook: react to events from the existing pipeline ----
+      function notify(kind, payload) {
+        if (!isOpen) return;
+        switch (kind) {
+          case 'thinking':
+            if (currentState !== 'speaking') setVoiceState('thinking');
+            break;
+          case 'listening':
+            if (currentState !== 'speaking') setVoiceState('listening');
+            break;
+          case 'speaking':
+            console.log('[VOICE MODE] tts_started=True');
+            setVoiceState('speaking');
+            break;
+          case 'speaking_end':
+            // Phase 7C: short debounced delay so trailing audio settles before we re-arm the mic.
+            if (idleAfterSpeakingTimer) { clearTimeout(idleAfterSpeakingTimer); idleAfterSpeakingTimer = null; }
+            idleAfterSpeakingTimer = setTimeout(() => {
+              idleAfterSpeakingTimer = null;
+              if (!isOpen) return;
+              if (currentState === 'speaking') {
+                setVoiceState('idle');
+                console.log('[VOICE FLOW] returned_to_idle_after_speaking');
+              }
+            }, 500);
+            break;
+          case 'error':
+            setVoiceState('error');
+            updateVoiceStatus(payload || statusFor('error'));
+            break;
+        }
+      }
+
+      function onTranscript(text) {
+        if (!isOpen) return;
+        const safe = String(text || '').trim();
+        const lang = isArabic() ? 'ar' : 'en';
+        console.log('[VOICE MODE] transcript=' + JSON.stringify(safe) + ' lang=' + lang);
+        // Show user transcript inside the overlay; clear stale assistant text.
+        updateVoiceUserText(safe);
+        updateVoiceAssistantText('');
+        setVoiceState('thinking');
+      }
+
+      // ---- Wire up DOM events ----
+      openBtn.addEventListener('click', openVoiceMode);
+      closeBtn.addEventListener('click', closeVoiceMode);
+      micBtn.addEventListener('click', () => {
+        if (currentState === 'listening') {
+          stopVoiceListening();
+        } else if (currentState === 'speaking') {
+          // Phase 7C: tap-to-interrupt while AI is speaking.
+          console.log('[VOICE INTERRUPT] user_interrupted_ai=True');
+          try { stopVoicePlayback(); } catch (_) {}
+          startVoiceListening();
+        } else if (currentState === 'idle' || currentState === 'error') {
+          startVoiceListening();
+        }
+      });
+      stopBtn.addEventListener('click', stopVoicePlayback);
+      document.addEventListener('keydown', (e) => {
+        if (isOpen && e.key === 'Escape') { closeVoiceMode(); }
+      });
+
+      // Reset the once-per-session opener gate when the user starts a brand-new chat.
+      try {
+        const _newChat = document.getElementById('newChatBtn');
+        if (_newChat) _newChat.addEventListener('click', () => { openerSpokenInSession = false; });
+      } catch (e) {}
+
+      // ---- Expose modular API ----
+      window.voiceMode = {
+        openVoiceMode,
+        closeVoiceMode,
+        startVoiceListening,
+        stopVoiceListening,
+        stopVoicePlayback,
+        setVoiceState,
+        updateVoiceStatus,
+        updateVoiceUserText,
+        updateVoiceAssistantText,
+        clearVoiceConversationPreview,
+        notify,
+        onTranscript,
+        isOpen: () => isOpen,
+        currentState: () => currentState,
+      };
+    })();
   </script>
 </body>
 </html>
