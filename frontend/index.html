@@ -717,9 +717,24 @@
     .voice-state-thinking .voice-circle {
       animation: voiceGlowSlow 2.4s ease-in-out infinite;
     }
-    .voice-state-speaking .voice-circle {
+    .voice-state-speaking .voice-circle,
+    .voice-state-assistant_speaking .voice-circle {
       animation: voicePulseStrong 0.9s ease-in-out infinite;
       box-shadow: 0 0 80px rgba(16, 163, 127, 0.85);
+    }
+    .voice-state-interrupted .voice-circle {
+      background: radial-gradient(circle at 30% 30%, #fbbf24, #d97706 70%, #92400e 100%);
+      box-shadow: 0 0 58px rgba(245, 158, 11, 0.62);
+      animation: voicePulseSoft 1.0s ease-in-out infinite;
+    }
+    .voice-overlay.voice-paused .voice-circle {
+      background: radial-gradient(circle at 30% 30%, #94a3b8, #64748b 70%, #334155 100%);
+      box-shadow: 0 0 36px rgba(148, 163, 184, 0.38);
+      animation: none;
+    }
+    .voice-overlay.voice-paused .voice-circle-ring {
+      opacity: 0;
+      animation: none;
     }
     .voice-state-error .voice-circle {
       background: radial-gradient(circle at 30% 30%, #ff6b6b, #c0392b 70%, #7a1f14 100%);
@@ -841,6 +856,7 @@
       min-width: 160px;
     }
     .voice-btn-mic.recording { background: var(--voice-error); }
+    .voice-btn-mic.paused { background: var(--voice-warn); }
     .voice-btn-mic:disabled,
     .voice-btn-stop:disabled { opacity: 0.5; cursor: not-allowed; }
     .voice-btn-stop {
@@ -1461,6 +1477,29 @@
 
       localStorage.setItem('assistify_lang', lang);
       updateGreetingLanguage();
+      sendActiveLanguageToWebSocket('ui_language_change');
+    }
+
+    function getActiveVoiceLanguage() {
+      const arBtn = document.getElementById('langAr');
+      const enBtn = document.getElementById('langEn');
+      if (arBtn && arBtn.classList.contains('active')) return 'ar';
+      if (enBtn && enBtn.classList.contains('active')) return 'en';
+      return ['en', 'ar'].includes(currentLanguage) ? currentLanguage : 'en';
+    }
+
+    function sendActiveLanguageToWebSocket(reason = 'language_sync') {
+      const language = getActiveVoiceLanguage();
+      currentLanguage = language;
+      if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+      try {
+        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language }));
+        console.log(`[VOICE LANGUAGE SYNC] reason=${reason} language=${language}`);
+        return true;
+      } catch (err) {
+        console.warn('[VOICE LANGUAGE SYNC] failed', err);
+        return false;
+      }
     }
 
     async function checkArabicModels() {
@@ -1716,16 +1755,20 @@
         for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
         _ttsSources = [];
 
-        // Resume mic in live call mode
-        if (_liveCallMode) {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
-          }
-          if (!isRecording) {
-            startRecording(true);
-          }
-        }
+        resumeLiveCallListening('ws_tts_complete');
       }, remaining * 1000 + 300);
+    }
+
+    function resumeLiveCallListening(reason = 'assistant_audio_complete') {
+      if (!_liveCallMode) return false;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+      }
+      if (window.voiceMode && typeof window.voiceMode.resumeAfterAssistant === 'function') {
+        return window.voiceMode.resumeAfterAssistant(reason) !== false;
+      }
+      if (!isRecording) startRecording(true);
+      return true;
     }
 
     function connectWebSocket() {
@@ -1734,6 +1777,7 @@
 
       ws.onopen = () => {
         console.log("[DEBUG] WebSocket connected successfully");
+        sendActiveLanguageToWebSocket('ws_open');
         notifyConversationSelection();
         ensureGreetingMessage();
         if (!chatHasConversationContent()) {
@@ -1953,13 +1997,7 @@
             hideAISpeaking();
             for (const s of _ttsSources) { try { s.disconnect(); } catch(e) {} }
             _ttsSources = [];
-            // Resume live call recording if active
-            if (_liveCallMode) {
-              if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
-              }
-              if (!isRecording) startRecording(true);
-            }
+            resumeLiveCallListening('arabic_tts_complete');
           }, _rem * 1000 + 300);
         }
       } catch(e) {
@@ -2128,10 +2166,7 @@
       console.log("[DEBUG] btnStart clicked");
       _unlockAudio();
       _liveCallMode = true;
-      // Inform the server of the current language for STT + LLM routing
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'control', action: 'set_language', language: currentLanguage }));
-      }
+      sendActiveLanguageToWebSocket('legacy_voice_start');
       await startRecording();
     };
     
@@ -2714,16 +2749,7 @@
         pauseAudioSending = false;
         hideAISpeaking();
 
-        // Resume recording after all TTS finishes
-        if (_liveCallMode) {
-          // Clear backend audio buffer to discard stale audio captured during TTS
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
-          }
-          if (!isRecording) {
-            startRecording(true);
-          }
-        }
+        resumeLiveCallListening('tts_queue_complete');
         return;
       }
 
@@ -2862,6 +2888,7 @@
     // ---- Barge-in: Interrupt AI when user starts speaking ----
     function bargeIn(silent) {
       console.log('[Barge-in] User speaking — interrupting AI');
+      console.log('[VOICE UX] barge_in_detected=true');
       consecutiveVoiceFrames = 0;
 
       // Stop WebSocket-streamed audio pipeline
@@ -2883,6 +2910,7 @@
       audioPlayer.onerror = null;
       // Also cancel browser speech synthesis
       if (window.speechSynthesis) speechSynthesis.cancel();
+      console.log('[VOICE UX] assistant_audio_stopped=true');
 
       // Clear TTS queue and prefetch cache
       ttsQueue = [];
@@ -2894,6 +2922,7 @@
       // Send interrupt to backend (cancel LLM streaming)
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+        ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
       }
 
       // Resume audio sending
@@ -2901,6 +2930,7 @@
       pauseAudioSending = false;
       hideThinking();
       hideAISpeaking();
+      try { window.voiceMode && window.voiceMode.notify && window.voiceMode.notify('barge_in'); } catch(e){}
 
       if (!silent) {
         showListening();
@@ -2924,6 +2954,7 @@
         console.error("[ERROR] getUserMedia not available");
         return;
       }
+      sendActiveLanguageToWebSocket('start_recording');
       
       try {
         console.log("[DEBUG] Requesting audio stream...");
@@ -2992,14 +3023,15 @@
       }
     }
 
-    function stopRecording(silent = false) {
+    function stopRecording(silent = false, options = {}) {
       isRecording = false;
       pauseAudioSending = false;
       consecutiveVoiceFrames = 0;
       
-      // Send control message to backend to clear buffers
+      // Send control message to backend to either transcribe or discard buffers.
       if(ws && ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'control', action: 'stop_recording' }));
+        const action = options && options.discard ? 'clear_audio_buffer' : 'stop_recording';
+        ws.send(JSON.stringify({ type: 'control', action }));
       }
       
       // Fully release audio input device
@@ -3089,9 +3121,11 @@
 
       if (!overlay || !openBtn) return; // markup missing
 
-      const STATES = ['idle', 'listening', 'transcribing', 'thinking', 'speaking', 'error'];
+      const STATES = ['idle', 'listening', 'transcribing', 'assistant_speaking', 'interrupted', 'error'];
       let currentState = 'idle';
       let isOpen = false;
+      let voicePaused = false;
+      let listenStartPromise = null;
       let openerSpokenInSession = false;
       let amplitudeFrame = null;
       let analyser = null;
@@ -3131,12 +3165,13 @@
       // ---- Localised labels ----
       function statusFor(state) {
         const ar = isArabic();
+        if (voicePaused) return ar ? 'الميكروفون متوقف مؤقتًا' : 'Microphone paused';
         switch (state) {
-          case 'idle':         return ar ? 'اضغط للتحدث' : 'Tap to speak';
+          case 'idle':         return ar ? 'جاهز للاستماع' : 'Ready to listen';
           case 'listening':    return ar ? 'الاستماع...' : 'Listening...';
-          case 'transcribing': return ar ? 'جاري التحويل...' : 'Transcribing...';
-          case 'thinking':     return ar ? 'جاري التفكير...' : 'Thinking...';
-          case 'speaking':     return ar ? 'يتحدث...' : 'Speaking...';
+          case 'transcribing': return ar ? 'جاري التفكير...' : 'Thinking...';
+          case 'assistant_speaking': return ar ? 'يتحدث...' : 'Speaking...';
+          case 'interrupted':  return ar ? 'تمت المقاطعة...' : 'Interrupted...';
           case 'error':        return ar ? 'خطأ' : 'Error';
           default:             return '';
         }
@@ -3146,17 +3181,22 @@
         return {
           user:      ar ? 'أنت' : 'You',
           assistant: ar ? 'المساعد' : 'Assistant',
-          tap:       ar ? '🎤 اضغط للتحدث' : '🎤 Tap to speak',
-          stopMic:   ar ? '⏸ إيقاف الاستماع' : '⏸ Stop listening',
+          tap:       ar ? '🎤 استئناف' : '🎤 Resume',
+          pauseMic:  ar ? '⏸ إيقاف الميكروفون' : '⏸ Pause mic',
+          resumeMic: ar ? '🎤 استئناف الميكروفون' : '🎤 Resume mic',
           interrupt: ar ? '✋ مقاطعة' : '✋ Interrupt',
         };
       }
       function updateMicButtonLabel() {
         const L = localizedLabels();
-        if (currentState === 'listening') {
-          micBtn.textContent = L.stopMic;
+        micBtn.classList.toggle('paused', voicePaused);
+        if (voicePaused) {
+          micBtn.textContent = L.resumeMic;
+          micBtn.classList.remove('recording');
+        } else if (currentState === 'listening') {
+          micBtn.textContent = L.pauseMic;
           micBtn.classList.add('recording');
-        } else if (currentState === 'speaking') {
+        } else if (currentState === 'assistant_speaking') {
           micBtn.textContent = L.interrupt;
           micBtn.classList.remove('recording');
         } else {
@@ -3203,15 +3243,16 @@
         currentState = state;
         STATES.forEach(s => overlay.classList.remove('voice-state-' + s));
         overlay.classList.add('voice-state-' + state);
+        overlay.classList.toggle('voice-paused', voicePaused);
         updateVoiceStatus(statusFor(state));
         updateMicButtonLabel();
-        // Mic button is enabled in idle/listening/error AND speaking (tap-to-interrupt).
-        const safeForMic = (state === 'idle' || state === 'listening' || state === 'error' || state === 'speaking');
+        // Mic button is enabled in idle/listening/error and assistant speech (tap-to-interrupt).
+        const safeForMic = (state === 'idle' || state === 'listening' || state === 'error' || state === 'assistant_speaking');
         micBtn.disabled = !safeForMic;
-        stopBtn.disabled = (state !== 'speaking');
+        stopBtn.disabled = (state !== 'assistant_speaking');
 
         // Cancel any pending auto-idle when leaving the speaking state via another path.
-        if (state !== 'speaking' && idleAfterSpeakingTimer) {
+        if (state !== 'assistant_speaking' && idleAfterSpeakingTimer) {
           clearTimeout(idleAfterSpeakingTimer);
           idleAfterSpeakingTimer = null;
         }
@@ -3227,13 +3268,13 @@
         }
 
         // Phase 7C: speech-detection interrupt only while AI is speaking.
-        if (state === 'speaking') {
+        if (state === 'assistant_speaking') {
           startInterruptAnalyser();
         } else {
           stopInterruptAnalyser();
         }
 
-        if (state !== 'speaking' && state !== 'listening') resetCircleAmplitude();
+        if (state !== 'assistant_speaking' && state !== 'listening') resetCircleAmplitude();
 
         const lang = isArabic() ? 'ar' : 'en';
         console.log('[VOICE STATE] from=' + fromState + ' to=' + state);
@@ -3315,7 +3356,7 @@
             audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
           });
           // If the speaking state ended while we awaited the mic, abort silently.
-          if (currentState !== 'speaking') {
+          if (currentState !== 'assistant_speaking') {
             try { interruptStream.getTracks().forEach(t => t.stop()); } catch (_) {}
             interruptStream = null;
             return;
@@ -3340,9 +3381,10 @@
               interruptVoiceFrames++;
               if (interruptVoiceFrames >= INTERRUPT_FRAMES_NEEDED) {
                 console.log('[VOICE INTERRUPT] user_interrupted_ai=True');
+                console.log('[VOICE UX] barge_in_detected=true');
                 stopInterruptAnalyser();
-                try { stopVoicePlayback(); } catch (_) {}
-                try { startVoiceListening(); } catch (_) {}
+                try { stopVoicePlayback('barge_in'); } catch (_) {}
+                try { startVoiceListening('barge_in'); } catch (_) {}
                 return;
               }
             } else {
@@ -3384,7 +3426,7 @@
         console.log('[VOICE MODE] opener_started language=' + lang);
         updateVoiceAssistantText(text);
         // Show speaking visual immediately so the user gets feedback.
-        setVoiceState('speaking');
+        setVoiceState('assistant_speaking');
         let started = false;
         try {
           if (typeof triggerFinalTTSParallel === 'function') {
@@ -3398,14 +3440,14 @@
             if (typeof _speakBrowser === 'function') {
               _speakBrowser(text, lang).then(() => {
                 console.log('[VOICE MODE] opener_done');
-                if (isOpen) setVoiceState('idle');
+                resumeAfterAssistant('opener_browser_complete');
               });
               return;
             }
           } catch (e) {}
           // No TTS available — stay visible as text only and drop to idle.
           console.log('[VOICE MODE] opener_done (no_tts)');
-          if (isOpen) setVoiceState('idle');
+          resumeAfterAssistant('opener_no_tts');
           return;
         }
         // Server TTS: when audio ends the existing pipeline emits speaking_end via hideAISpeaking.
@@ -3416,21 +3458,28 @@
       // ---- Open / Close ----
       function openVoiceMode() {
         isOpen = true;
+        voicePaused = false;
+        _liveCallMode = true;
         overlay.classList.add('open');
+        overlay.classList.remove('voice-paused');
         overlay.setAttribute('aria-hidden', 'false');
         refreshLabels();
+        updateVoiceStatus(statusFor(currentState));
+        updateMicButtonLabel();
         // Keep previous transcript empty for a clean greeting.
         clearVoiceConversationPreview();
         const lang = isArabic() ? 'ar' : 'en';
         console.log('[VOICE MODE] opened lang=' + lang);
+        sendActiveLanguageToWebSocket('voice_mode_open');
 
         // If the assistant is already speaking from a prior interaction reflect that.
         if (typeof isTTSPlaying !== 'undefined' && isTTSPlaying) {
-          setVoiceState('speaking');
+          setVoiceState('assistant_speaking');
           return;
         }
         if (typeof isRecording !== 'undefined' && isRecording) {
           setVoiceState('listening');
+          console.log('[VOICE UX] auto_listen_started=true language=' + lang + ' reason=already_recording');
           return;
         }
         // Greet on first open in this session, otherwise just go idle/ready.
@@ -3439,47 +3488,71 @@
           speakOpener();
         } else {
           setVoiceState('idle');
+          startVoiceListening('open');
         }
       }
       function closeVoiceMode() {
         isOpen = false;
+        voicePaused = false;
+        _liveCallMode = false;
         if (idleAfterSpeakingTimer) { clearTimeout(idleAfterSpeakingTimer); idleAfterSpeakingTimer = null; }
         try {
           if (typeof isRecording !== 'undefined' && isRecording &&
               typeof stopRecording === 'function') {
-            stopRecording(true);
+            stopRecording(true, { discard: true });
           }
         } catch (e) { console.warn('[VOICE MODE] stopRecording on close failed', e); }
         stopMicAnalyser();
         stopInterruptAnalyser();
         resetCircleAmplitude();
         overlay.classList.remove('open');
+        overlay.classList.remove('voice-paused');
         overlay.setAttribute('aria-hidden', 'true');
         setVoiceState('idle');
+        updateVoiceStatus(statusFor(currentState));
+        updateMicButtonLabel();
         console.log('[VOICE MODE] closed');
       }
 
       // ---- Recording wrappers ----
-      async function startVoiceListening() {
+      async function startVoiceListening(reason = 'manual') {
+        if (!isOpen) return false;
+        if (voicePaused) return false;
+        if (listenStartPromise) return listenStartPromise;
         if (typeof startRecording !== 'function') {
           setVoiceState('error');
           updateVoiceStatus('Recording not supported');
-          return;
+          return false;
         }
         if (typeof isTTSPlaying !== 'undefined' && isTTSPlaying) {
-          stopVoicePlayback();
+          stopVoicePlayback('listen_start_interrupt');
         }
         if (typeof isRecording !== 'undefined' && isRecording) {
           setVoiceState('listening');
-          return;
+          console.log('[VOICE UX] auto_listen_started=true language=' + (isArabic() ? 'ar' : 'en') + ' reason=' + reason);
+          return true;
         }
-        try {
-          await startRecording(true);
-          setVoiceState('listening');
-        } catch (e) {
-          console.error('[VOICE MODE] startRecording failed', e);
-          setVoiceState('error');
-        }
+        listenStartPromise = (async () => {
+          try {
+            sendActiveLanguageToWebSocket('voice_mode_listen_' + reason);
+            await startRecording(true);
+            if (!isOpen || voicePaused) return false;
+            if (typeof isRecording !== 'undefined' && isRecording) {
+              setVoiceState('listening');
+              console.log('[VOICE UX] auto_listen_started=true language=' + (isArabic() ? 'ar' : 'en') + ' reason=' + reason);
+              return true;
+            }
+            setVoiceState('error');
+            return false;
+          } catch (e) {
+            console.error('[VOICE MODE] startRecording failed', e);
+            setVoiceState('error');
+            return false;
+          } finally {
+            listenStartPromise = null;
+          }
+        })();
+        return listenStartPromise;
       }
       function stopVoiceListening() {
         try {
@@ -3491,25 +3564,77 @@
         // Phase 7C: instant UX feedback — never leave the user staring at silence.
         setVoiceState('transcribing');
       }
-      function stopVoicePlayback() {
+      function pauseVoiceListening() {
+        voicePaused = true;
+        overlay.classList.add('voice-paused');
         try {
-          if (typeof _stopAllTTS === 'function') { _stopAllTTS(); }
-          else if (typeof stopAllTTS === 'function') { stopAllTTS(); }
-        } catch (e) {}
-        try {
-          if (Array.isArray(window._ttsSources)) {
-            window._ttsSources.forEach(s => { try { s.stop(); } catch(_){} });
-            window._ttsSources = [];
+          if (typeof isRecording !== 'undefined' && isRecording &&
+              typeof stopRecording === 'function') {
+            stopRecording(true, { discard: true });
+          } else if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
           }
+        } catch (e) { console.warn('[VOICE MODE] pause listening failed', e); }
+        stopMicAnalyser();
+        resetCircleAmplitude();
+        setVoiceState('idle');
+        updateVoiceStatus(statusFor(currentState));
+        updateMicButtonLabel();
+        console.log('[VOICE UX] mic_paused=true');
+      }
+      function resumeVoiceListening() {
+        voicePaused = false;
+        overlay.classList.remove('voice-paused');
+        updateMicButtonLabel();
+        console.log('[VOICE UX] mic_paused=false');
+        return startVoiceListening('resume');
+      }
+      function resumeAfterAssistant(reason = 'assistant_audio_complete') {
+        if (!isOpen || voicePaused) return false;
+        if (idleAfterSpeakingTimer) { clearTimeout(idleAfterSpeakingTimer); idleAfterSpeakingTimer = null; }
+        setVoiceState('listening');
+        startVoiceListening(reason);
+        return true;
+      }
+      function stopVoicePlayback(reason = 'manual_stop') {
+        try {
+          _wsAudioState = 'idle';
+          _wsPendingChunks = [];
+          _wsPendingDuration = 0;
+          if (typeof _stopStreamingAudio === 'function') _stopStreamingAudio();
+          if (_currentTTSAudio) {
+            try { _currentTTSAudio.pause(); _currentTTSAudio.currentTime = 0; } catch(_) {}
+            _currentTTSAudio = null;
+          }
+          try { audioPlayer.pause(); audioPlayer.src = ''; audioPlayer.onended = null; audioPlayer.onerror = null; } catch(_) {}
+          for (const source of _ttsSources) {
+            try { source.stop(); } catch(_) {}
+            try { source.disconnect(); } catch(_) {}
+          }
+          _ttsSources = [];
+          ttsQueue = [];
+          for (const key of Object.keys(ttsPrefetchCache)) {
+            URL.revokeObjectURL(ttsPrefetchCache[key]);
+          }
+          ttsPrefetchCache = {};
         } catch (e) {}
         try {
           if ('speechSynthesis' in window) { window.speechSynthesis.cancel(); }
         } catch (e) {}
-        if (typeof isTTSPlaying !== 'undefined') {
-          try { window.isTTSPlaying = false; } catch(_) {}
-        }
-        setVoiceState('idle');
+        isTTSPlaying = false;
+        pauseAudioSending = false;
+        hideThinking();
+        hideAISpeaking();
+        console.log('[VOICE UX] assistant_audio_stopped=true');
+        try {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'control', action: 'interrupt' }));
+            ws.send(JSON.stringify({ type: 'control', action: 'clear_audio_buffer' }));
+          }
+        } catch (_) {}
+        setVoiceState('interrupted');
         console.log('[VOICE MODE] tts_started=False (playback stopped by user)');
+        setTimeout(() => { if (isOpen && !voicePaused) startVoiceListening(reason); }, 120);
       }
 
       // ---- Public hook: react to events from the existing pipeline ----
@@ -3517,26 +3642,32 @@
         if (!isOpen) return;
         switch (kind) {
           case 'thinking':
-            if (currentState !== 'speaking') setVoiceState('thinking');
+            if (currentState !== 'assistant_speaking') {
+              setVoiceState('transcribing');
+              updateVoiceStatus(isArabic() ? 'جاري التفكير...' : 'Thinking...');
+            }
             break;
           case 'listening':
-            if (currentState !== 'speaking') setVoiceState('listening');
+            if (currentState !== 'assistant_speaking' && !voicePaused) setVoiceState('listening');
             break;
           case 'speaking':
             console.log('[VOICE MODE] tts_started=True');
-            setVoiceState('speaking');
+            setVoiceState('assistant_speaking');
             break;
           case 'speaking_end':
-            // Phase 7C: short debounced delay so trailing audio settles before we re-arm the mic.
             if (idleAfterSpeakingTimer) { clearTimeout(idleAfterSpeakingTimer); idleAfterSpeakingTimer = null; }
             idleAfterSpeakingTimer = setTimeout(() => {
               idleAfterSpeakingTimer = null;
               if (!isOpen) return;
-              if (currentState === 'speaking') {
-                setVoiceState('idle');
-                console.log('[VOICE FLOW] returned_to_idle_after_speaking');
-              }
-            }, 500);
+              resumeAfterAssistant('speaking_end');
+              console.log('[VOICE FLOW] returned_to_listening_after_speaking');
+            }, 300);
+            break;
+          case 'barge_in':
+            voicePaused = false;
+            overlay.classList.remove('voice-paused');
+            setVoiceState('interrupted');
+            setTimeout(() => { if (isOpen && !voicePaused) startVoiceListening('barge_in'); }, 120);
             break;
           case 'error':
             setVoiceState('error');
@@ -3553,25 +3684,27 @@
         // Show user transcript inside the overlay; clear stale assistant text.
         updateVoiceUserText(safe);
         updateVoiceAssistantText('');
-        setVoiceState('thinking');
+        setVoiceState('transcribing');
+        updateVoiceStatus(isArabic() ? 'جاري التفكير...' : 'Thinking...');
       }
 
       // ---- Wire up DOM events ----
       openBtn.addEventListener('click', openVoiceMode);
       closeBtn.addEventListener('click', closeVoiceMode);
       micBtn.addEventListener('click', () => {
-        if (currentState === 'listening') {
-          stopVoiceListening();
-        } else if (currentState === 'speaking') {
-          // Phase 7C: tap-to-interrupt while AI is speaking.
+        if (voicePaused) {
+          resumeVoiceListening();
+        } else if (currentState === 'listening') {
+          pauseVoiceListening();
+        } else if (currentState === 'assistant_speaking') {
           console.log('[VOICE INTERRUPT] user_interrupted_ai=True');
-          try { stopVoicePlayback(); } catch (_) {}
-          startVoiceListening();
+          console.log('[VOICE UX] barge_in_detected=true');
+          try { stopVoicePlayback('manual_barge_in'); } catch (_) {}
         } else if (currentState === 'idle' || currentState === 'error') {
-          startVoiceListening();
+          resumeVoiceListening();
         }
       });
-      stopBtn.addEventListener('click', stopVoicePlayback);
+      stopBtn.addEventListener('click', () => stopVoicePlayback('manual_stop_button'));
       document.addEventListener('keydown', (e) => {
         if (isOpen && e.key === 'Escape') { closeVoiceMode(); }
       });
@@ -3588,6 +3721,9 @@
         closeVoiceMode,
         startVoiceListening,
         stopVoiceListening,
+        pauseVoiceListening,
+        resumeVoiceListening,
+        resumeAfterAssistant,
         stopVoicePlayback,
         setVoiceState,
         updateVoiceStatus,
