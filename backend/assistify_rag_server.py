@@ -1370,6 +1370,18 @@ def _limit_memory_lines(text: str, max_lines: int = 3) -> str:
     return "\n".join(lines[:max_lines]).strip()
 
 
+def _limit_memory_rewrite_text(text: str, answer_is_arabic: bool, max_lines: int = 3) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+    if answer_is_arabic:
+        cleaned = _clean_arabic_final_text(cleaned)
+        if not _is_structured_bullet_answer(cleaned) and len(cleaned) > 220:
+            cleaned = _shorten_arabic_spoken_answer("", cleaned)
+        return _limit_memory_lines(cleaned, min(2, max_lines))
+    return _limit_memory_lines(_polish_final_response_text("", cleaned), max_lines)
+
+
 def _rewrite_previous_answer_from_memory(previous_answer: str, action: str) -> str:
     answer_text = re.sub(r"[ \t]+", " ", str(previous_answer or "")).strip()
     if not answer_text or answer_text.lower() == RAG_NO_MATCH_RESPONSE.lower():
@@ -1399,8 +1411,8 @@ def _rewrite_previous_answer_from_memory(previous_answer: str, action: str) -> s
             return RAG_NO_MATCH_RESPONSE
         prefix = "ببساطة: " if answer_is_arabic else "In simple terms: "
         if re.sub(r"\W+", "", simple_text.lower()) == re.sub(r"\W+", "", answer_text.lower()):
-            return _limit_memory_lines(prefix + simple_text, 2)
-        return _limit_memory_lines(prefix + simple_text, 2)
+            return _limit_memory_rewrite_text(prefix + simple_text, answer_is_arabic, 2)
+        return _limit_memory_rewrite_text(prefix + simple_text, answer_is_arabic, 2)
 
     answer_is_list, answer_items = _extract_followup_items_from_answer(answer_text)
     if answer_is_list and answer_items:
@@ -1414,20 +1426,20 @@ def _rewrite_previous_answer_from_memory(previous_answer: str, action: str) -> s
         if action in {"summary", "shorten"}:
             if joined_items and not re.search(r"[.!?؟]$", joined_items):
                 joined_items += "."
-            return _limit_memory_lines(joined_items, 3)
+            return _limit_memory_rewrite_text(joined_items, answer_is_arabic, 2 if answer_is_arabic else 3)
         if action == "simple":
             prefix = "ببساطة: " if answer_is_arabic else "In simple terms: "
-            return _limit_memory_lines(f"{prefix}{joined_items}.", 2)
-        return _limit_memory_lines(joined_items, 3)
+            return _limit_memory_rewrite_text(f"{prefix}{joined_items}.", answer_is_arabic, 2)
+        return _limit_memory_rewrite_text(joined_items, answer_is_arabic, 2 if answer_is_arabic else 3)
 
     units = _split_memory_answer_units(answer_text)
     if not units:
         return RAG_NO_MATCH_RESPONSE
     if action in {"summary", "shorten"}:
-        return _limit_memory_lines("\n".join(units[:2]), 3)
+        return _limit_memory_rewrite_text("\n".join(units[:2]), answer_is_arabic, 2 if answer_is_arabic else 3)
     if action == "simple":
         return _simple_memory_rewrite(units)
-    return _limit_memory_lines("\n".join(units[:3]), 3)
+    return _limit_memory_rewrite_text("\n".join(units[:3]), answer_is_arabic, 2 if answer_is_arabic else 3)
 
 
 async def _handle_memory_rewrite_query(text: str, connection_id: str):
@@ -1463,7 +1475,7 @@ async def _handle_memory_rewrite_query(text: str, connection_id: str):
     if not memory_answer or memory_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
         logger.info("[MEMORY SUMMARY MODE] rejected reason=empty_rewrite action=%s", action)
         return (RAG_NO_MATCH_RESPONSE, [])
-    memory_answer = _limit_memory_lines(memory_answer, 3)
+    memory_answer = _limit_memory_rewrite_text(memory_answer, _is_arabic_text(memory_answer), 3)
     next_state = dict(state)
     next_state.update({
         "query": (text or "").strip(),
@@ -25561,6 +25573,167 @@ def _cleanup_final_answer_text(answer_text: str) -> str:
     return txt
 
 
+_AR_FINAL_POLISH_STOPWORDS: set[str] = {
+    "ما", "ماذا", "من", "كيف", "لماذا", "هل", "هذا", "هذه", "ذلك", "تلك", "بين", "في", "من", "عن", "على", "علي",
+    "إلى", "الى", "و", "او", "أو", "هي", "هو", "هم", "هن", "يكون", "تكون", "يمكن", "يمكنك", "اشرح", "وضح", "لخص",
+    "اختصر", "العلاقة", "العلاقه", "مهم", "مهمة", "مهمه",
+}
+
+
+def _is_structured_bullet_answer(value: str) -> bool:
+    lines = [line for line in str(value or "").splitlines() if line.strip()]
+    if len(lines) < 2:
+        return False
+    bullet_lines = sum(1 for line in lines if re.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", line))
+    return bullet_lines >= 2
+
+
+def _normalize_final_bullet_format(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines() if line.strip()]
+    if len(lines) >= 2 and sum(1 for line in lines if re.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", line)) >= 2:
+        out_lines: list[str] = []
+        for line in lines:
+            line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "- ", line)
+            line = re.sub(r"\s+([,.;:!?؟،؛])", r"\1", line).strip()
+            out_lines.append(line)
+        return "\n".join(out_lines).strip()
+
+    if re.match(r"^\s*[-*\u2022]\s+\S", text) and len(re.findall(r"\s[-*\u2022]\s+", text)) >= 2:
+        body = re.sub(r"^\s*[-*\u2022]\s+", "", text).strip()
+        parts = [part.strip(" \t\r\n-•*.,;:،؛") for part in re.split(r"\s+[-*\u2022]\s+", body) if part.strip(" \t\r\n-•*.,;:،؛")]
+        if len(parts) >= 2:
+            return "\n".join(f"- {part}" for part in parts)
+
+    return text
+
+
+def _normalize_arabic_readability_terms(value: str) -> str:
+    text = str(value or "")
+    if not _is_arabic_text(text):
+        return text
+    replacements = [
+        (r"\b(?:السيطرة|التحكم)\b", "الرقابة"),
+        (r"(?<![\u0621-\u064A])(?:و?رقابة)(?![\u0621-\u064A])", "الرقابة"),
+        (r"(?<![\u0621-\u064A])(?:و?ضبط\s+الجودة)(?![\u0621-\u064A])", "الرقابة"),
+        (r"\b(?:القيادة)\b", "التوجيه"),
+        (r"(?<![\u0621-\u064A])(?:و?الإشراف|و?اشراف|و?إشراف|و?إرشاد|و?ارشاد)(?![\u0621-\u064A])", "التوجيه"),
+        (r"\b(?:التعيين|استقطاب\s+العاملين)\b", "التوظيف"),
+        (r"\b(?:الترتيب\s+الإداري|الترتيب\s+الاداري)\b", "التنظيم"),
+        (r"(?<![\u0621-\u064A])تخطيط(?![\u0621-\u064A])", "التخطيط"),
+        (r"(?<![\u0621-\u064A])تنظيم(?![\u0621-\u064A])", "التنظيم"),
+        (r"(?<![\u0621-\u064A])توظيف(?![\u0621-\u064A])", "التوظيف"),
+        (r"(?<![\u0621-\u064A])توجيه(?![\u0621-\u064A])", "التوجيه"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+    return text
+
+
+def _arabic_final_query_tokens(query: str) -> list[str]:
+    tokens: list[str] = []
+    for token in re.findall(r"[\u0600-\u06FF]{3,}", str(query or "")):
+        normalized = token.strip()
+        if not normalized or normalized in _AR_FINAL_POLISH_STOPWORDS:
+            continue
+        if normalized not in tokens:
+            tokens.append(normalized)
+    return tokens[:8]
+
+
+def _split_arabic_answer_units(value: str) -> list[str]:
+    text = re.sub(r"[ \t]+", " ", str(value or "")).strip()
+    if not text:
+        return []
+    line_units = [line.strip(" \t\r\n-•*،؛.,;:") for line in text.splitlines() if line.strip()]
+    if len(line_units) >= 2:
+        return [line for line in line_units if line]
+    units = [part.strip(" \t\r\n-•*،؛.,;:") for part in re.split(r"(?<=[.!؟])\s+|[؛;]\s+", text) if part.strip(" \t\r\n-•*،؛.,;:")]
+    if len(units) >= 2:
+        return units
+    comma_units = [part.strip(" \t\r\n-•*،؛.,;:") for part in re.split(r"\s+،\s+", text) if part.strip(" \t\r\n-•*،؛.,;:")]
+    return comma_units if len(comma_units) >= 2 else ([text] if text else [])
+
+
+def _clean_arabic_final_text(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    text = text.replace("\ufffd", " ")
+    text = re.sub(r"[\ud800-\udfff]", " ", text)
+    text = re.sub(r"[\u2e80-\u2fff\u3000-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]+", " ", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\s+([،؛؟.!?,;:])", r"\1", text)
+    text = re.sub(r"([،؛؟.!?,;:])(?:\s*\1)+", r"\1", text)
+    text = re.sub(r"\s*\n\s*", "\n", text)
+    text = _normalize_final_bullet_format(text)
+    text = _normalize_arabic_readability_terms(text)
+    if _is_structured_bullet_answer(text):
+        return text.strip(" \t\r\n،,.;:")
+    return text.strip(" \t\r\n-،,.;:")
+
+
+def _shorten_arabic_spoken_answer(query: str, answer: str) -> str:
+    text = _clean_arabic_final_text(answer)
+    if not text or len(text) <= 350 or _is_structured_bullet_answer(text):
+        return text
+    units = _split_arabic_answer_units(text)
+    if len(units) <= 1:
+        return text
+    query_tokens = _arabic_final_query_tokens(query)
+    scored_units: list[tuple[float, int, str]] = []
+    seen: set[str] = set()
+    for idx, unit in enumerate(units):
+        cleaned = _clean_arabic_final_text(unit)
+        if not cleaned or len(cleaned) < 18:
+            continue
+        key = re.sub(r"[^\u0600-\u06FF0-9]+", " ", cleaned).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        score = 0.0
+        if query_tokens:
+            score += 2.0 * sum(1 for token in query_tokens if token in cleaned)
+        if re.search(r"\b(?:لذلك|لأن|لان|يساعد|يدعم|يوضح|يرتبط|العلاقة|أهمية|اهمية|ضروري|مهم)\b", cleaned):
+            score += 1.0
+        if re.search(r"\b(?:مثال|صفحة|الشكل|الجدول|الفصل|المصدر)\b", cleaned):
+            score -= 0.8
+        score += max(0.0, 0.6 - (len(cleaned) / 700.0))
+        scored_units.append((score, idx, cleaned))
+    if not scored_units:
+        return text
+    scored_units.sort(key=lambda item: (-item[0], item[1]))
+    selected = sorted(scored_units[:3], key=lambda item: item[1])
+    out_lines: list[str] = []
+    total_chars = 0
+    for _score, _idx, unit in selected:
+        if len(out_lines) >= 3:
+            break
+        if total_chars and total_chars + len(unit) > 360:
+            continue
+        out_lines.append(unit)
+        total_chars += len(unit)
+    if not out_lines:
+        out_lines = [scored_units[0][2]]
+    shortened = "\n".join(out_lines[:3]).strip()
+    return shortened if shortened and len(shortened) < len(text) else text
+
+
+def _polish_final_response_text(query: str, answer: str) -> str:
+    raw = str(answer or "").strip()
+    if not raw or raw.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        return RAG_NO_MATCH_RESPONSE if raw.lower() == RAG_NO_MATCH_RESPONSE.lower() else raw
+    if _is_arabic_text(raw):
+        return _shorten_arabic_spoken_answer(query, raw)
+    polished = _normalize_final_bullet_format(raw)
+    polished = re.sub(r"([.!?,;:])(?:\s*\1)+", r"\1", polished)
+    polished = re.sub(r"[ \t]+", " ", polished)
+    polished = re.sub(r"\s+([,.;:!?])", r"\1", polished)
+    return polished.strip('"\'“”‘’')
+
+
 def _extract_fallback_list(query_text: str, docs: list[dict]) -> str | None:
     return None
 
@@ -26192,7 +26365,13 @@ def _apply_not_found_ux(query: str, answer: str, doc_dicts: List[Dict[str, Any]]
 
     def _finalize(a: str) -> str:
         raw = str(a or "").strip()
-        cleaned = _cleanup_final_answer_text(raw)
+        if raw.lower() == RAG_NO_MATCH_RESPONSE.lower():
+            return RAG_NO_MATCH_RESPONSE
+        if _is_arabic_text(raw):
+            cleaned = _polish_final_response_text(query, raw)
+        else:
+            cleaned = _cleanup_final_answer_text(raw)
+            cleaned = _polish_final_response_text(query, cleaned)
         if cleaned != raw:
             logger.info("[OCR CLEANUP APPLIED] before=%s | after=%s", raw[:180], cleaned[:180])
         return cleaned
@@ -33417,6 +33596,412 @@ STREAM_MID_TOKEN_TIMEOUT_S = 5.0      # Timeout for subsequent tokens (seconds)
 # Adaptive TTS chunk sizing — adjusts words-per-chunk based on real-time perf
 from backend.adaptive_chunk_manager import adaptive_manager, chunk_text_by_words
 
+_WS_TTS_ACTIVE_RESPONSE_IDS: Dict[str, str] = {}
+_WS_TTS_ACTIVE_TASKS: Dict[str, asyncio.Task] = {}
+
+
+def _normalize_tts_chunk_cache_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _is_tts_not_found_text(value: str) -> bool:
+    return _normalize_tts_chunk_cache_text(value).lower() == RAG_NO_MATCH_RESPONSE.lower()
+
+
+def _is_tts_bullet_unit(value: str) -> bool:
+    return bool(re.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+\S", str(value or "")))
+
+
+def _join_tts_units(units: list[str]) -> str:
+    cleaned = [str(unit or "").strip() for unit in units if str(unit or "").strip()]
+    if not cleaned:
+        return ""
+    if any(_is_tts_bullet_unit(unit) for unit in cleaned):
+        return "\n".join(cleaned).strip()
+    return " ".join(cleaned).strip()
+
+
+def _split_long_tts_unit(unit: str, max_chars: int) -> list[str]:
+    text = str(unit or "").strip()
+    if len(text) <= max_chars:
+        return [text] if text else []
+    words = text.split()
+    if len(words) <= 1:
+        return [text]
+    parts: list[str] = []
+    current: list[str] = []
+    for word in words:
+        candidate = " ".join(current + [word]).strip()
+        if current and len(candidate) > max_chars:
+            parts.append(" ".join(current).strip())
+            current = [word]
+        else:
+            current.append(word)
+    if current:
+        parts.append(" ".join(current).strip())
+    return [part for part in parts if part]
+
+
+def _spoken_tts_units(text: str) -> list[str]:
+    units: list[str] = []
+    for line in re.split(r"\n+", str(text or "")):
+        line = re.sub(r"[ \t]+", " ", line).strip()
+        if not line:
+            continue
+        if _is_tts_bullet_unit(line):
+            units.extend(_split_long_tts_unit(line, 240))
+            continue
+        start = 0
+        for match in re.finditer(r"[.!?\u061f\u060c\u061b;:]+(?:\s+|$)", line):
+            piece = line[start:match.end()].strip()
+            if piece:
+                units.extend(_split_long_tts_unit(piece, 240))
+            start = match.end()
+        tail = line[start:].strip()
+        if tail:
+            units.extend(_split_long_tts_unit(tail, 240))
+    return [unit for unit in units if unit]
+
+
+def split_spoken_text_for_tts(text: str, language: str = "en") -> list[str]:
+    spoken_text = str(text or "").strip()
+    if not spoken_text:
+        return []
+    total_chars = len(spoken_text)
+    if _is_tts_not_found_text(spoken_text) or total_chars <= 150:
+        return [spoken_text]
+
+    units = _spoken_tts_units(spoken_text)
+    if not units:
+        return [spoken_text]
+    if len(units) == 1 and len(units[0]) <= 240:
+        return [spoken_text]
+
+    first_target = max(45, min(180, int(total_chars * 0.28)))
+    first_max = max(70, min(220, int(total_chars * 0.35)))
+    rest_target = 210 if str(language or "").lower() == "ar" else 230
+    rest_max = 280
+
+    chunks: list[str] = []
+    current_units: list[str] = []
+    current_limit = first_max
+    first_done = False
+
+    for unit in units:
+        candidate = _join_tts_units(current_units + [unit])
+        if current_units and len(candidate) > current_limit:
+            chunk = _join_tts_units(current_units)
+            if chunk:
+                chunks.append(chunk)
+            current_units = [unit]
+            if not first_done:
+                first_done = True
+            current_limit = rest_max
+            continue
+
+        current_units.append(unit)
+        current_text = _join_tts_units(current_units)
+        if not first_done and (len(current_text) >= first_target or len(current_text) >= first_max):
+            chunks.append(current_text)
+            current_units = []
+            first_done = True
+            current_limit = rest_max
+        elif first_done and len(current_text) >= rest_target:
+            chunks.append(current_text)
+            current_units = []
+
+    if current_units:
+        chunks.append(_join_tts_units(current_units))
+
+    merged: list[str] = []
+    for chunk in [chunk for chunk in chunks if chunk.strip()]:
+        if merged and len(chunk) < 35:
+            merged[-1] = _join_tts_units([merged[-1], chunk])
+        else:
+            merged.append(chunk)
+    if len(merged) > 1 and len(merged[-1]) < 35:
+        last = merged.pop()
+        merged[-1] = _join_tts_units([merged[-1], last])
+    return merged or [spoken_text]
+
+
+def _ws_tts_is_active(connection_id: str, response_id: str, cancel_event: Optional[asyncio.Event] = None) -> bool:
+    if cancel_event is not None and cancel_event.is_set():
+        return False
+    return _WS_TTS_ACTIVE_RESPONSE_IDS.get(connection_id) == response_id
+
+
+def _log_tts_cancelled(connection_id: str, response_id: str, reason: str) -> None:
+    logger.info(
+        "[TTS CHUNK CANCELLED] reason=%s response_id=%s connection_id=%s",
+        reason,
+        response_id,
+        connection_id,
+    )
+
+
+def _cancel_active_ws_tts(connection_id: str, reason: str) -> None:
+    response_id = _WS_TTS_ACTIVE_RESPONSE_IDS.pop(connection_id, None)
+    task = _WS_TTS_ACTIVE_TASKS.pop(connection_id, None)
+    if response_id:
+        _log_tts_cancelled(connection_id, response_id, reason)
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def _remember_ws_tts_task(connection_id: str, response_id: str, task: asyncio.Task) -> None:
+    _WS_TTS_ACTIVE_TASKS[connection_id] = task
+
+    def _cleanup(done_task: asyncio.Task) -> None:
+        if _WS_TTS_ACTIVE_TASKS.get(connection_id) is done_task:
+            _WS_TTS_ACTIVE_TASKS.pop(connection_id, None)
+        if _WS_TTS_ACTIVE_RESPONSE_IDS.get(connection_id) == response_id:
+            _WS_TTS_ACTIVE_RESPONSE_IDS.pop(connection_id, None)
+        try:
+            exc = done_task.exception()
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            return
+        if exc is not None:
+            logger.warning("[ASYNC TTS] task_error response_id=%s error=%s", response_id, exc)
+
+    task.add_done_callback(_cleanup)
+
+
+async def _tts_progressive_response(
+    text: str,
+    websocket: WebSocket,
+    connection_id: str,
+    language: str,
+    response_id: str,
+    *,
+    t_meta: Optional[dict] = None,
+    cancel_event: Optional[asyncio.Event] = None,
+) -> None:
+    spoken_text = str(text or "").strip()
+    if not spoken_text or EFFECTIVE_DISABLE_TTS:
+        return
+
+    chunks = split_spoken_text_for_tts(spoken_text, language)
+    preview = re.sub(r"\s+", " ", chunks[0] if chunks else "")[:80]
+    logger.info(
+        "[TTS CHUNKING] chunks=%s first_chars=%s total_chars=%s",
+        len(chunks),
+        preview,
+        len(spoken_text),
+    )
+    if not chunks:
+        return
+
+    if connection_id not in _ws_write_locks:
+        _ws_write_locks[connection_id] = asyncio.Lock()
+    write_lock = _ws_write_locks[connection_id]
+
+    async def _ws_send_json(payload: dict) -> None:
+        if payload.get("response_id") == response_id and not _ws_tts_is_active(connection_id, response_id, cancel_event):
+            return
+        async with write_lock:
+            if payload.get("response_id") == response_id and not _ws_tts_is_active(connection_id, response_id, cancel_event):
+                return
+            await websocket.send_json(payload)
+
+    async def _ws_send_bytes(data: bytes) -> None:
+        if not _ws_tts_is_active(connection_id, response_id, cancel_event):
+            return
+        async with write_lock:
+            if not _ws_tts_is_active(connection_id, response_id, cancel_event):
+                return
+            await websocket.send_bytes(data)
+
+    local_tts_session = None
+    tts_sess = tts_session
+    if tts_sess is None or tts_sess.closed:
+        local_tts_session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=None, sock_connect=5, sock_read=None)
+        )
+        tts_sess = local_tts_session
+
+    total_chunks = len(chunks)
+    audio_started = False
+    total_audio_bytes = 0
+    try:
+        logger.info("[ASYNC TTS] audio_continues_after_done=True response_id=%s", response_id)
+        for chunk_index, raw_chunk in enumerate(chunks, start=1):
+            if not _ws_tts_is_active(connection_id, response_id, cancel_event):
+                reason = "user_barge_in" if cancel_event is not None and cancel_event.is_set() else "stale_response"
+                _log_tts_cancelled(connection_id, response_id, reason)
+                return
+
+            clean = _normalize_tts_chunk_cache_text(raw_chunk)
+            clean = _preprocess_for_tts(clean, language=language)
+            if not clean:
+                continue
+
+            cache_key = _tts_cache_key(clean, language, XTTS_SPEAKER)
+            cached_wav = await _tts_cache_get(cache_key)
+            cache_hit = cached_wav is not None
+            logger.info(
+                "[TTS CHUNK CACHE] hit=%s index=%s/%s language=%s key=%s",
+                bool(cache_hit),
+                chunk_index,
+                total_chunks,
+                language,
+                cache_key,
+            )
+            if t_meta is not None:
+                t_meta["tts_cache_hit"] = bool(cache_hit)
+
+            chunk_start = time.perf_counter()
+            sent_start = False
+            emitted_audio = False
+            audio_bytes_sent = 0
+            wav_accum = bytearray()
+            try:
+                await _ws_send_json({
+                    "type": "ttsAudioStart",
+                    "sampleRate": 24000,
+                    "response_id": response_id,
+                    "chunk_index": chunk_index,
+                    "chunk_total": total_chunks,
+                })
+                sent_start = True
+                audio_started = True
+
+                if cached_wav is not None:
+                    pcm_data = _wav_bytes_to_pcm16(cached_wav)
+                    if pcm_data and _ws_tts_is_active(connection_id, response_id, cancel_event):
+                        if t_meta is not None and not t_meta.get("first_tts_chunk"):
+                            t_meta["first_tts_chunk"] = time.perf_counter()
+                        await _ws_send_bytes(pcm_data)
+                        emitted_audio = True
+                        audio_bytes_sent = len(pcm_data)
+                    elif not pcm_data:
+                        await _ws_send_json({"type": "ttsFallback", "text": clean})
+                else:
+                    wait_start = time.perf_counter()
+                    logger.info(
+                        "[TTS QUEUE] progressive waiting_for_synth_lock response_id=%s index=%s/%s text_len=%s lang=%s",
+                        response_id,
+                        chunk_index,
+                        total_chunks,
+                        len(clean),
+                        language,
+                    )
+                    async with _XTTS_SYNTH_SEM:
+                        wait_done = time.perf_counter()
+                        if t_meta is not None:
+                            t_meta["tts_wait_ms"] = int(round((wait_done - wait_start) * 1000))
+                        if not _ws_tts_is_active(connection_id, response_id, cancel_event):
+                            reason = "user_barge_in" if cancel_event is not None and cancel_event.is_set() else "stale_response"
+                            _log_tts_cancelled(connection_id, response_id, reason)
+                            return
+                        resp = await tts_sess.post(
+                            f"{XTTS_SERVICE_URL}/synthesize",
+                            json={"text": clean, "speaker": XTTS_SPEAKER, "language": language},
+                        )
+                        if resp.status == 200:
+                            header_skipped = False
+                            header_buf = b""
+                            pcm_remainder = b""
+                            async for chunk in resp.content.iter_chunked(4096):
+                                if not _ws_tts_is_active(connection_id, response_id, cancel_event):
+                                    reason = "user_barge_in" if cancel_event is not None and cancel_event.is_set() else "stale_response"
+                                    _log_tts_cancelled(connection_id, response_id, reason)
+                                    resp.close()
+                                    return
+                                if chunk:
+                                    wav_accum.extend(chunk)
+                                if not header_skipped:
+                                    header_buf += chunk
+                                    if len(header_buf) < 44:
+                                        continue
+                                    data = header_buf[44:]
+                                    header_skipped = True
+                                    header_buf = b""
+                                    if not data:
+                                        continue
+                                else:
+                                    data = chunk
+                                if pcm_remainder:
+                                    data = pcm_remainder + data
+                                    pcm_remainder = b""
+                                if len(data) % 2 != 0:
+                                    pcm_remainder = data[-1:]
+                                    data = data[:-1]
+                                if data:
+                                    if t_meta is not None and not t_meta.get("first_tts_chunk"):
+                                        t_meta["first_tts_chunk"] = time.perf_counter()
+                                    await _ws_send_bytes(data)
+                                    emitted_audio = True
+                                    audio_bytes_sent += len(data)
+                            resp.close()
+                            if emitted_audio and wav_accum and _ws_tts_is_active(connection_id, response_id, cancel_event):
+                                await _tts_cache_put(cache_key, bytes(wav_accum))
+                                logger.info(
+                                    "[WS TTS CACHE] stored=True language=%s key=%s bytes=%s text_len=%s",
+                                    language,
+                                    cache_key,
+                                    len(wav_accum),
+                                    len(clean),
+                                )
+                        else:
+                            detail = await resp.text()
+                            resp.close()
+                            logger.warning("Progressive TTS returned %s: %s", resp.status, detail[:100])
+                            await _ws_send_json({"type": "ttsFallback", "text": clean})
+                if emitted_audio and t_meta is not None:
+                    now = time.perf_counter()
+                    t_meta["xtts_last_chunk"] = now
+                    t_meta["audio_bytes"] = int(t_meta.get("audio_bytes") or 0) + audio_bytes_sent
+                total_audio_bytes += audio_bytes_sent
+            finally:
+                if sent_start:
+                    try:
+                        await _ws_send_json({
+                            "type": "ttsAudioEnd",
+                            "response_id": response_id,
+                            "chunk_index": chunk_index,
+                            "chunk_total": total_chunks,
+                        })
+                    except Exception:
+                        pass
+                synth_ms = int(round((time.perf_counter() - chunk_start) * 1000))
+                if t_meta is not None:
+                    t_meta["tts_ms"] = int(t_meta.get("tts_ms") or 0) + synth_ms
+                    t_meta["tts_synthesis_ms"] = int(t_meta.get("tts_synthesis_ms") or 0) + (0 if cache_hit else synth_ms)
+                logger.info("[TTS CHUNK] index=%s/%s synth_ms=%s", chunk_index, total_chunks, synth_ms)
+                await asyncio.sleep(0)
+
+        if _ws_tts_is_active(connection_id, response_id, cancel_event):
+            await _ws_send_json({
+                "type": "ttsComplete",
+                "response_id": response_id,
+                "chunks": total_chunks,
+                "audio_bytes": total_audio_bytes,
+            })
+            logger.info(
+                "[ASYNC TTS] complete response_id=%s chunks=%s audio_bytes=%s audio_started=%s",
+                response_id,
+                total_chunks,
+                total_audio_bytes,
+                bool(audio_started),
+            )
+    except asyncio.CancelledError:
+        _log_tts_cancelled(connection_id, response_id, "user_barge_in" if cancel_event is not None and cancel_event.is_set() else "task_cancelled")
+        raise
+    except Exception as exc:
+        logger.warning("[ASYNC TTS] error response_id=%s error=%s", response_id, exc)
+        if _ws_tts_is_active(connection_id, response_id, cancel_event):
+            try:
+                await _ws_send_json({"type": "ttsComplete", "response_id": response_id, "error": True})
+            except Exception:
+                pass
+    finally:
+        if local_tts_session is not None and not local_tts_session.closed:
+            await local_tts_session.close()
+
+
 async def _tts_arabic_response(
     arabic_text: str,
     websocket: WebSocket,
@@ -33848,18 +34433,35 @@ async def send_final_response(
                         ar_lines.append(cleaned_line)
                 s = "\n".join(ar_lines)
             else:
-                s = _sanitize_arabic_text(s)
+                if _is_structured_bullet_answer(s):
+                    ar_lines = []
+                    for line in re.split(r"\n+", s):
+                        prefix = "- " if re.match(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", line) else ""
+                        body = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "", line).strip()
+                        cleaned_line = _sanitize_arabic_text(body)
+                        cleaned_line = re.sub(r"\s+", " ", cleaned_line).strip(" \t\r\n-،,.;:")
+                        if cleaned_line:
+                            ar_lines.append(f"{prefix}{cleaned_line}".strip())
+                    s = "\n".join(ar_lines) if ar_lines else _sanitize_arabic_text(s)
+                else:
+                    s = _sanitize_arabic_text(s)
         except Exception:
             pass
         s = re.sub(r"[A-Za-z]+", " ", s)
         s = re.sub(r"\s+([،؛؟.!?,;:])", r"\1", s)
         s = re.sub(r"([،؛؟.!?,;:])\s*([،؛؟.!?,;:])", r"\1", s)
         s = re.sub(r"[ \t]+", " ", s)
-        s = re.sub(r" *\n *", "\n", s).strip(" \t\r\n-،,.;:")
+        s = re.sub(r" *\n *", "\n", s)
+        if _is_structured_bullet_answer(s):
+            s = s.strip(" \t\r\n،,.;:")
+        else:
+            s = s.strip(" \t\r\n-،,.;:")
         if branch == "controlled_explanation" and "\n" not in s and len(s) > 180:
             parts = [part.strip() for part in re.split(r"(?<=[.!?\u061f])\s+", s) if part.strip()]
             if len(parts) >= 2:
                 s = "\n".join(parts[:4])
+        if _is_arabic_text(s):
+            s = _shorten_arabic_spoken_answer("", s)
         return s
 
     async def _translate_to_arabic_external(value: str, source_lang: str) -> str:
@@ -33963,6 +34565,7 @@ async def send_final_response(
                 branch,
             )
             if _cached_ar_list and _parse_bullet_list_items(_cached_ar_list):
+                _cached_ar_list = _polish_final_response_text("", _cached_ar_list)
                 response_text = _cached_ar_list
                 clean_text = _cached_ar_list
                 replace = True
@@ -34061,6 +34664,7 @@ async def send_final_response(
                     _ar_item_translation_cache_put(_item, _ar_item, "ar", "deterministic_list")
                 if _all_items_ok and _translated_items:
                     _ar_bullets = "\n".join(f"- {it}" for it in _translated_items)
+                    _ar_bullets = _polish_final_response_text("", _ar_bullets)
                     response_text = _ar_bullets
                     clean_text = _ar_bullets
                     replace = True
@@ -34146,6 +34750,7 @@ async def send_final_response(
                     _ar_chars = sum(1 for c in _translated if "\u0600" <= c <= "\u06FF")
                     if _ar_chars < 3:
                         raise ValueError("arabic_translation_cleaned_empty")
+                    _translated = _polish_final_response_text("", _translated)
                     response_text = _translated
                     clean_text = _translated.strip()
                     replace = True  # overwrite any prior streamed English
@@ -34199,7 +34804,6 @@ async def send_final_response(
         _translation_target == "ar"
         and clean_text
         and clean_text != "Not found in the document."
-        and not _ar_list_fast_path_applied
         and any("\u0600" <= ch <= "\u06FF" for ch in clean_text)
     ):
         _arabic_only = _finalize_arabic_only(clean_text)
@@ -34240,9 +34844,12 @@ async def send_final_response(
             chunk_payload["replace"] = True
         await ws.send_json(chunk_payload)
 
+    _tts_voice_language = language
+    _tts_response_id = ""
     if should_trigger:
         timing.setdefault("xtts_send", time.perf_counter())
         timing["answer_chars"] = len(response_text or "")
+        timing["async_tts_pending"] = True
         # ---- TTS LANGUAGE GATE (Phase 7C — TASK 3) ----
         # The voice used to read the answer must follow the actual answer-text
         # script, never the UI flag. Otherwise the Arabic Piper voice ends up
@@ -34263,21 +34870,7 @@ async def send_final_response(
                 "[TTS LANG CHECK] answer_language=%s selected_voice=%s overridden=False branch=%s",
                 _detected_answer_lang, _tts_voice_language, branch,
             )
-        try:
-            await _tts_single_response(
-                response_text,
-                ws,
-                connection_id,
-                language=_tts_voice_language,
-                t_meta=timing,
-            )
-        except Exception as tts_err:
-            logger.warning(
-                "[TTS DECISION] branch=%s tts_enabled=%s triggered=True reason=tts_error error=%s",
-                branch,
-                bool(tts_enabled),
-                tts_err,
-            )
+        _tts_response_id = f"tts_{uuid.uuid4().hex[:10]}"
 
     if _translation_target == "ar":
         _request_start = timing.get("request_start")
@@ -34365,10 +34958,44 @@ async def send_final_response(
         "arabic_mode": arabic_mode,
         "timing": timing,
     }
+    if should_trigger:
+        done_payload["server_tts_pending"] = True
+        done_payload["tts_response_id"] = _tts_response_id
     if extra_payload:
         done_payload.update(extra_payload)
     logger.info("[WS FINAL ANSWER BEFORE SEND] %s", response_text[:320])
+    if should_trigger:
+        logger.info(
+            "[ASYNC TTS] aiResponseDone_before_tts_complete=True response_id=%s branch=%s",
+            _tts_response_id,
+            branch,
+        )
     await ws.send_json(done_payload)
+
+    if should_trigger:
+        try:
+            _cancel_active_ws_tts(connection_id, "new_response")
+            _WS_TTS_ACTIVE_RESPONSE_IDS[connection_id] = _tts_response_id
+            cancel_event = interrupt_events.get(connection_id)
+            task = asyncio.create_task(
+                _tts_progressive_response(
+                    response_text,
+                    ws,
+                    connection_id,
+                    _tts_voice_language,
+                    _tts_response_id,
+                    t_meta=timing,
+                    cancel_event=cancel_event,
+                )
+            )
+            _remember_ws_tts_task(connection_id, _tts_response_id, task)
+        except Exception as tts_err:
+            logger.warning(
+                "[TTS DECISION] branch=%s tts_enabled=%s triggered=True reason=async_tts_start_error error=%s",
+                branch,
+                bool(tts_enabled),
+                tts_err,
+            )
 
 
 def _emit_perf_report(t_meta: dict, perf_start: float, query_text: str, answer_text: str, connection_id: str = "") -> None:
@@ -40111,6 +40738,7 @@ async def rag_ws_endpoint(websocket: WebSocket):  # pyright: ignore
             return
 
         session_start = _time.perf_counter()
+        _cancel_active_ws_tts(conn_id, "new_voice_query")
         mem_before = _get_memory_snapshot()
         logger.info(f"===== VOICE SESSION START  [{conn_id}] =====")
         logger.info(f"  GPU before: reserved={mem_before['gpu_reserved_mb']:.0f}MB  alloc={mem_before['gpu_allocated_mb']:.0f}MB  |  CPU RSS={mem_before['cpu_rss_mb']:.0f}MB")
@@ -40625,6 +41253,7 @@ async def rag_ws_endpoint(websocket: WebSocket):  # pyright: ignore
                                 cancel_evt = interrupt_events.get(connection_id)
                                 if cancel_evt:
                                     cancel_evt.set()
+                                _cancel_active_ws_tts(connection_id, "user_barge_in")
                                 audio_buffer.clear()
                                 silence_counter = 0
                                 logger.info(f"{connection_id} User barge-in - LLM generation interrupted")
@@ -40659,6 +41288,10 @@ async def rag_ws_endpoint(websocket: WebSocket):  # pyright: ignore
                                 session_language = msg_lang  # update session preference
                             force_final_language_for_rewrite = None
                             if text:
+                                _cancel_active_ws_tts(connection_id, "new_user_query")
+                                cancel_evt_for_new_text = interrupt_events.get(connection_id)
+                                if cancel_evt_for_new_text:
+                                    cancel_evt_for_new_text.clear()
                                 conversation_id_for_text = _activate_conversation(payload.get("conversation_id"))
                                 conversation_ws = _conversation_ws(conversation_id_for_text)
                                 try:

@@ -1655,9 +1655,21 @@
     let _wsPendingChunks = []; // Float32Array chunks before playback starts
     let _wsPendingDuration = 0;
     let _wsFirstChunkLogged = false;
+    let _wsAudioResponseId = null;
+    let _wsPendingServerTtsResponseId = null;
+    let _wsCancelledAudioResponseIds = new Set();
     const WS_PREBUFFER_SECS = 0.3; // minimum buffer before starting playback
 
+    function _cancelCurrentWsAudioResponse() {
+      if (_wsAudioResponseId) _wsCancelledAudioResponseIds.add(_wsAudioResponseId);
+      if (_wsPendingServerTtsResponseId) _wsCancelledAudioResponseIds.add(_wsPendingServerTtsResponseId);
+      _wsAudioResponseId = null;
+      _wsPendingServerTtsResponseId = null;
+    }
+
     function _handleTtsAudioStart(data) {
+      const responseId = (data && data.response_id) || _wsPendingServerTtsResponseId || null;
+      if (responseId && _wsCancelledAudioResponseIds.has(responseId)) return;
       const ctx = _getTTSAudioContext();
       if (_wsAudioState === 'idle') {
         _wsAudioState = 'buffering';
@@ -1666,6 +1678,7 @@
         _wsScheduledTime = ctx.currentTime + 0.05;
         _wsFirstChunkLogged = false;
       }
+      if (responseId) _wsAudioResponseId = responseId;
       isTTSPlaying = true;
       if (_liveCallMode && isRecording) {
         pauseAudioSending = true;
@@ -1674,6 +1687,7 @@
     }
 
     function _handleWsAudioChunk(arrayBuffer) {
+      if (_wsAudioResponseId && _wsCancelledAudioResponseIds.has(_wsAudioResponseId)) return;
       if (_wsAudioState === 'idle') return;
 
       const int16 = new Int16Array(arrayBuffer);
@@ -1747,6 +1761,8 @@
 
       setTimeout(() => {
         _wsAudioState = 'idle';
+        _wsAudioResponseId = null;
+        _wsPendingServerTtsResponseId = null;
         isTTSPlaying = false;
         pauseAudioSending = false;
         hideAISpeaking();
@@ -1881,11 +1897,15 @@
           }
           // Streaming complete
           const finalText = finalizeWsResponse(data.fullText || '');
+          const serverTtsPending = !!data.server_tts_pending;
+          if (data.tts_response_id) {
+            _wsPendingServerTtsResponseId = data.tts_response_id;
+          }
           let finalTtsStarted = false;
           if(finalText) {
             lastAIResponse = finalText;
             try { window.voiceMode && window.voiceMode.updateVoiceAssistantText && window.voiceMode.updateVoiceAssistantText(finalText); } catch(e){}
-            if (!data.arabic_mode) {
+            if (!data.arabic_mode && !serverTtsPending) {
               finalTtsStarted = triggerFinalTTSParallel(finalText, {
                 source: 'aiResponseDone',
                 language: currentLanguage,
@@ -1907,7 +1927,7 @@
           }
           // In Arabic mode, TTS is handled async by arabic_tts_complete event
           // Don't call _handleTtsComplete() now, as Arabic TTS hasn't started yet
-          if (!data.arabic_mode) {
+          if (!data.arabic_mode && !serverTtsPending) {
             if (!finalTtsStarted && responseAudioReceived) {
               _handleTtsComplete();
             }
@@ -1992,6 +2012,8 @@
           const _rem = Math.max(0, _wsScheduledTime - _ctx2.currentTime);
           setTimeout(() => {
             _wsAudioState = 'idle';
+            _wsAudioResponseId = null;
+            _wsPendingServerTtsResponseId = null;
             isTTSPlaying = false;
             pauseAudioSending = false;
             hideAISpeaking();
@@ -1999,6 +2021,10 @@
             _ttsSources = [];
             resumeLiveCallListening('arabic_tts_complete');
           }, _rem * 1000 + 300);
+        } else if(data.type === 'ttsComplete') {
+          if (!data.response_id || !_wsCancelledAudioResponseIds.has(data.response_id)) {
+            _handleTtsComplete();
+          }
         }
       } catch(e) {
         if(typeof event.data === 'string') {
@@ -2180,6 +2206,7 @@
       _liveCallMode = false; // end live-call mode — no auto-resume
       if(isRecording) stopRecording();
       // Stop WebSocket-streamed audio pipeline
+      _cancelCurrentWsAudioResponse();
       _wsAudioState = 'idle';
       _wsPendingChunks = [];
       _wsPendingDuration = 0;
@@ -2892,6 +2919,7 @@
       consecutiveVoiceFrames = 0;
 
       // Stop WebSocket-streamed audio pipeline
+      _cancelCurrentWsAudioResponse();
       _wsAudioState = 'idle';
       _wsPendingChunks = [];
       _wsPendingDuration = 0;
@@ -3599,6 +3627,7 @@
       function stopVoicePlayback(reason = 'manual_stop') {
         try {
           _wsAudioState = 'idle';
+          _cancelCurrentWsAudioResponse();
           _wsPendingChunks = [];
           _wsPendingDuration = 0;
           if (typeof _stopStreamingAudio === 'function') _stopStreamingAudio();
