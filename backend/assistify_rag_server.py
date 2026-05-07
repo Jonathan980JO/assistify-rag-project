@@ -724,6 +724,15 @@ def clear_all_conversation_history():
 # retrieval. The system stays strictly grounded in the previously
 # retrieved chunks + the previous answer text — no open-domain leakage.
 last_answer_state: dict = {}
+# P12C-1: separate stores that survive a single follow-up failure /
+# not-found turn so Arabic memory-rewrite ("طيب اختصر أكثر") can still
+# work on the previous useful grounded answer. Updated only by GROUNDED
+# answers (never by the RAG_NO_MATCH_RESPONSE path), so a not-found does
+# not destroy them. Cleared explicitly on a clear topic shift via the
+# normal save path when a NEW grounded answer overwrites the entry.
+_last_good_answer_state: dict = {}
+_last_list_state: dict = {}
+_ar_resolved_followup_queries: dict = {}
 recent_grounded_definition_concepts = defaultdict(list)
 _FOLLOWUP_STATE_TTL = 1800  # seconds (30 min)
 _FOLLOWUP_MAX_QUERY_LEN = 140
@@ -820,10 +829,298 @@ _FOLLOWUP_NEW_QUESTION_PATTERNS = [
         r"^\s*(list|name|enumerate)\b",
         r"^\s*(define|definition\s+of)\b",
         r"^\s*give\s+me\s+(a\s+)?(list|definition|example)\b",
+        r"^\s*(?:ما|ماذا|من)\s+(?:هو|هي|هى|هم|تكون|يكون|يعني|تعني)\b",
+        r"^\s*(?:لماذا|كيف|متى|اين|أين|هل)\b",
+        r"^\s*(?:اذكر|عدد|عرّف|عرف|تعريف|قارن|استخرج)\b",
     ]
 ]
 
 _FOLLOWUP_SHORT_WORD_LIMIT = 7
+
+# ---- P12C-1: Arabic follow-up detection & pronoun/ordinal resolution ----
+# Strong Arabic follow-up patterns: do not need prior state to qualify
+# as a follow-up *intent*, but the actual handler still requires a saved
+# answer to ground the response (so spurious matches without context
+# return Not found, never fabricate). Strictly generic — no domain
+# vocabulary, only pronouns / deictic / clarification verbs.
+_AR_FOLLOWUP_STRONG_RE = _re_followup.compile(
+    r"^\s*(?:طيب\s+|طيّب\s+|حسنا\s+|حسناً\s+|حسنًا\s+|اوكي\s+|أوك\s+|اوك\s+|ok\s+)?"
+    r"(?:"
+    r"(?:اشرح|وضح|بسط|بسّط|فسر|فسّر)(?:ها|ه|هما|هم)"
+    r"|(?:اشرح|وضح|بسط|بسّط|فسر|فسّر)\s+(?:ذلك|ذاك|هذا|هذه|الأمر|النقطة|إجابتك|اجابتك|كلامك|قولك)"
+    r"|(?:اشرح|وضح|بسط|بسّط|فسر|فسّر)\s+(?:أكثر|اكثر|بشكل\s+أوضح|بشكل\s+اوضح|ببساطة|ببساطه)"
+    r"|ماذا\s+(?:تقصد|تعني)"
+    r"|ما\s+(?:قصدك|تعنيه|الذي\s+تعني|الذي\s+تقصد|تعني\s+بذلك)"
+    r")"
+    r"(?:\s|[؟?.!،,؛;]|$)",
+    _re_followup.IGNORECASE,
+)
+
+# Contextual Arabic follow-up patterns: only count as follow-up when
+# there is a recent saved answer state (caller checks). These cover
+# relationship/ordinal references back to the previous answer.
+_AR_FOLLOWUP_CONTEXT_RE = _re_followup.compile(
+    r"^\s*و?\s*(?:ما|وما)\s+علاقت(?:ها|ه|هما|هم)\b"
+    r"|^\s*و?\s*كيف\s+(?:ترتبط|يرتبط|ترتبطين|يرتبطان)\b"
+    r"|^\s*و?\s*(?:ما|وما)\s+الفرق\s+بين(?:هم|هما|ها)\b"
+    r"|^\s*و?\s*كيف\s+(?:تختلف|يختلف)\b"
+    r"|\b(?:الأولى|الاولى|الثانية|الثاني|الثالثة|الثالث|الرابعة|الرابع|الخامسة|الخامس|السادسة|السادس|السابعة|السابع|الثامنة|الثامن|التاسعة|التاسع|العاشرة|الأخيرة|الاخيرة|الأخير|الاخير|السابقة|السابق|التالية|التالي)\b",
+    _re_followup.IGNORECASE,
+)
+
+# Arabic anaphora/deictic words used by the short-utterance fallback so
+# very short Arabic clarifications ("ها؟", "وهذا؟", "ذلك؟") do not get
+# rejected when there is a real saved answer to refer to.
+_AR_ANAPHOR_RE = _re_followup.compile(
+    r"\b(?:هذا|هذه|ذلك|ذاك|تلك|هؤلاء|هم|هما|هي|هو|دي|ده|عليه|عليها|عنه|عنها|بينهم|بينهما)\b",
+    _re_followup.IGNORECASE,
+)
+
+
+def _is_arabic_followup_strong(text: str) -> bool:
+    return bool(_AR_FOLLOWUP_STRONG_RE.search(str(text or "")))
+
+
+def _is_arabic_followup_context(text: str) -> bool:
+    return bool(_AR_FOLLOWUP_CONTEXT_RE.search(str(text or "")))
+
+
+_AR_ORDINAL_TO_INDEX: dict[str, int] = {
+    "الأولى": 1, "الاولى": 1, "الأول": 1, "الاول": 1,
+    "الثانية": 2, "الثاني": 2,
+    "الثالثة": 3, "الثالث": 3,
+    "الرابعة": 4, "الرابع": 4,
+    "الخامسة": 5, "الخامس": 5,
+    "السادسة": 6, "السادس": 6,
+    "السابعة": 7, "السابع": 7,
+    "الثامنة": 8, "الثامن": 8,
+    "التاسعة": 9, "التاسع": 9,
+    "العاشرة": 10, "العاشر": 10,
+    "الأخيرة": -1, "الاخيرة": -1, "الأخير": -1, "الاخير": -1,
+    "النهائية": -1, "النهائي": -1,
+}
+
+
+def _resolve_arabic_ordinal_target_from_items(target_text: str, items: list[str]) -> str:
+    target = re.sub(r"\s+", " ", str(target_text or "").strip(" ـ؟?.،,؛;"))
+    if not target or not items:
+        return ""
+    for word, idx in _AR_ORDINAL_TO_INDEX.items():
+        if re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", target):
+            try:
+                return str(items[-1] if idx == -1 else items[idx - 1]).strip(" .;:،؛-")
+            except IndexError:
+                return ""
+    return ""
+
+
+def _build_arabic_item_explain_query(target_item: str, state: dict, list_state: dict) -> str:
+    target_clean = str(target_item or "").strip(" .;:،؛-")
+    if not target_clean:
+        return ""
+    context_query = re.sub(
+        r"\s+",
+        " ",
+        str(
+            state.get("list_query")
+            or list_state.get("query")
+            or state.get("query")
+            or ""
+        ).strip(),
+    )
+    if context_query and target_clean.lower() not in context_query.lower():
+        if re.search(r"[A-Za-z]", target_clean):
+            return f"Explain {target_clean} in context: {context_query}"
+        return f"اشرح {target_clean} ضمن سياق: {context_query}؟"
+    return f"اشرح {target_clean}؟"
+
+
+def _maybe_resolve_arabic_followup_reference(text: str, connection_id) -> tuple[str, str]:
+    """Rewrite Arabic follow-ups with pronoun/ordinal references into an
+    explicit, grounded query using the last saved answer state.
+
+    Returns ("", "") when no resolution applies. The rewritten query
+    reuses entities/items already pulled from previously retrieved
+    evidence — no domain word lists, no fabricated content. The caller
+    should send the rewritten query through normal RAG retrieval.
+    """
+    if not text or not connection_id:
+        return "", ""
+    raw_text = str(text or "")
+    if not re.search(r"[\u0600-\u06FF]", raw_text):
+        return "", ""
+    raw_text = re.sub(r"\s+", " ", raw_text).strip()
+    if not raw_text:
+        return "", ""
+    state = last_answer_state.get(connection_id) or _last_good_answer_state.get(connection_id)
+    if not state:
+        return "", ""
+    try:
+        if (time.time() - float(state.get("ts", 0))) > _FOLLOWUP_STATE_TTL:
+            state = _last_good_answer_state.get(connection_id)
+    except Exception:
+        state = _last_good_answer_state.get(connection_id)
+    if not state:
+        return "", ""
+
+    entities_raw = list(state.get("last_grounded_entities") or [])
+    list_state = _last_list_state.get(connection_id) or {}
+    items = [str(it).strip() for it in (state.get("items") or list_state.get("items") or []) if str(it).strip()]
+
+    primary = ""
+    for ent in entities_raw:
+        ent_clean = str(ent or "").strip(" .;:،؛-")
+        if ent_clean:
+            primary = ent_clean
+            break
+    if not primary:
+        try:
+            concept = _extract_definition_concept_from_query_surface(state.get("query") or "")
+        except Exception:
+            concept = ""
+        if concept:
+            primary = concept
+    if not primary:
+        try:
+            primary = _extract_arabic_concept_from_query_surface(state.get("query") or "")
+        except Exception:
+            primary = ""
+    if not primary:
+        try:
+            primary = _extract_focus_concept_from_explain_query_surface(state.get("query") or "")
+        except Exception:
+            primary = ""
+    if not primary:
+        try:
+            primary = _extract_focus_concept_from_explanatory_query_surface(state.get("query") or "")
+        except Exception:
+            primary = ""
+
+    # 1) "(و)ما علاقتها/علاقته/علاقتهما/علاقتهم بـ X؟" -> relationship.
+    m = re.match(
+        r"^و?\s*(?:ما|وما)\s+علاقت(?:ها|ه|هما|هم)\s+ب(?:ـ\s*)?(.+?)\s*[؟?.!]*\s*$",
+        raw_text,
+    )
+    if m and primary:
+        target = m.group(1).strip(" ـ؟?.،,؛;")
+        target = _resolve_arabic_ordinal_target_from_items(target, items) or target
+        if target and target != primary:
+            rewritten = f"ما العلاقة بين {primary} و{target}؟"
+            return rewritten, "ar_relation_pronoun"
+
+    # 2) "كيف ترتبط/يرتبط بـ X؟"
+    m = re.match(
+        r"^و?\s*كيف\s+(?:ترتبط|يرتبط|ترتبطين|يرتبطان)\s+ب(?:ـ\s*)?(.+?)\s*[؟?.!]*\s*$",
+        raw_text,
+    )
+    if m and primary:
+        target = m.group(1).strip(" ـ؟?.،,؛;")
+        target = _resolve_arabic_ordinal_target_from_items(target, items) or target
+        if target and target != primary:
+            return f"ما العلاقة بين {primary} و{target}؟", "ar_relation_verb"
+
+    # 3) Arabic ordinal references into the previous list.
+    found_idx = None
+    found_word = ""
+    for word, idx in _AR_ORDINAL_TO_INDEX.items():
+        if re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", raw_text):
+            found_idx = idx
+            found_word = word
+            break
+    if found_idx is not None and items:
+        try:
+            target_item = items[-1] if found_idx == -1 else items[found_idx - 1]
+        except IndexError:
+            target_item = ""
+        if target_item:
+            target_clean = str(target_item).strip(" .;:،؛-")
+            # 3a) "اشرح/وضح/فسر/بسط <ordinal>"
+            if re.search(r"^\s*(?:اشرح|وضح|فسر|فسّر|بسط|بسّط|عرف|عرّف)\b", raw_text):
+                return _build_arabic_item_explain_query(target_clean, state, list_state), "ar_ordinal_explain"
+            # 3b) relationship to ordinal: "كيف ترتبط بالأخيرة" / "وكيف ترتبط بالأخيرة"
+            if re.search(r"(?:علاقت(?:ها|ه|هما|هم)|ترتبط|يرتبط)", raw_text) and primary and primary != target_clean:
+                return f"ما العلاقة بين {primary} و{target_clean}؟", "ar_ordinal_relation"
+            # 3c) "وما الفرق بينها وبين <ord>" simple fall-through
+            if re.search(r"الفرق", raw_text) and primary and primary != target_clean:
+                return f"ما الفرق بين {primary} و{target_clean}؟", "ar_ordinal_difference"
+            # 3d) generic standalone ordinal request -> explain that item
+            if re.fullmatch(r"\s*و?\s*" + re.escape(found_word) + r"\s*[؟?.!]*\s*", raw_text):
+                return f"اشرح {target_clean}؟", "ar_ordinal_default"
+
+    # 4) "(و)ما الفرق بينهم/بينهما؟" -> compare prior entities/items.
+    if re.search(r"(?:^|\s)(?:ما|وما)\s+الفرق\b", raw_text) and re.search(r"بين(?:هم|هما|ها)", raw_text):
+        pair: list[str] = []
+        for ent in entities_raw:
+            ent_clean = str(ent or "").strip(" .;:،؛-")
+            if ent_clean and ent_clean not in pair:
+                pair.append(ent_clean)
+            if len(pair) == 2:
+                break
+        if len(pair) < 2:
+            for it in items:
+                it_clean = str(it).strip(" .;:،؛-")
+                if it_clean and it_clean not in pair:
+                    pair.append(it_clean)
+                if len(pair) == 2:
+                    break
+        if len(pair) == 2:
+            return f"ما الفرق بين {pair[0]} و{pair[1]}؟", "ar_diff_pronoun"
+
+    return "", ""
+
+
+def _mark_arabic_resolved_followup(connection_id, query: str, reason: str) -> None:
+    if not connection_id or not query:
+        return
+    _ar_resolved_followup_queries[connection_id] = {
+        "query": re.sub(r"\s+", " ", str(query or "").strip()),
+        "reason": str(reason or ""),
+        "ts": time.time(),
+    }
+
+
+def _is_marked_arabic_resolved_followup(connection_id, query: str) -> bool:
+    if not connection_id or not query:
+        return False
+    marker = _ar_resolved_followup_queries.get(connection_id)
+    if not marker:
+        return False
+    try:
+        if (time.time() - float(marker.get("ts", 0))) > _FOLLOWUP_STATE_TTL:
+            _ar_resolved_followup_queries.pop(connection_id, None)
+            return False
+    except Exception:
+        return False
+    marker_query = re.sub(r"\s+", " ", str(marker.get("query") or "").strip())
+    query_text = re.sub(r"\s+", " ", str(query or "").strip())
+    return bool(marker_query and query_text and marker_query == query_text)
+
+
+def _get_marked_arabic_resolved_followup_reason(connection_id, query: str) -> str:
+    if not _is_marked_arabic_resolved_followup(connection_id, query):
+        return ""
+    marker = _ar_resolved_followup_queries.get(connection_id) or {}
+    return str(marker.get("reason") or "")
+
+
+def _resolve_and_mark_arabic_followup_for_ws(text: str, connection_id, stage: str = "") -> tuple[str, str]:
+    if _is_memory_rewrite_query(text):
+        return text, ""
+    try:
+        resolved, reason = _maybe_resolve_arabic_followup_reference(text, connection_id)
+        if resolved and resolved != text:
+            logger.info(
+                "[AR FOLLOWUP MEMORY] resolved_query=%s reason=%s original=%s",
+                resolved[:200],
+                reason,
+                (text or "")[:200],
+            )
+            _mark_arabic_resolved_followup(connection_id, resolved, reason)
+            return resolved, reason
+    except Exception:
+        logger.exception("[AR FOLLOWUP MEMORY] %s resolution failed; continuing", stage or "ws")
+    return text, ""
+
 
 _WEAK_GENERIC_REQUEST_RE = _re_followup.compile(
     r"^\s*(?:tell\s+me\s+about|about|explain|describe|overview\s+of|talk\s+about)\s+"
@@ -834,6 +1131,357 @@ _WEAK_GENERIC_REQUEST_RE = _re_followup.compile(
 
 def _is_weak_generic_request(text: str) -> bool:
     return bool(_WEAK_GENERIC_REQUEST_RE.match(str(text or "").strip()))
+
+
+_MEMORY_REFERENCE_WORDS_RE = _re_followup.compile(
+    r"\b(?:that|this|it|what\s+you\s+(?:just\s+)?said|what\s+you\s+(?:just\s+)?explained|"
+    r"your\s+(?:answer|response)|the\s+(?:previous|last)\s+(?:answer|response)|previous\s+answer|last\s+answer|above)\b",
+    _re_followup.IGNORECASE,
+)
+
+
+def _classify_memory_rewrite_intent(text: str) -> str:
+    """Classify generic requests to rewrite the last visible answer only."""
+    raw_text = re.sub(r"\s+", " ", str(text or "").strip())
+    if not raw_text:
+        return ""
+    lowered_text = raw_text.lower()
+    has_arabic = bool(_ARABIC_CHAR_RE.search(raw_text)) if "_ARABIC_CHAR_RE" in globals() else bool(re.search(r"[\u0600-\u06FF]", raw_text))
+    if has_arabic:
+        arabic_compact = re.sub(r"[؟?.!،,؛;:\s]+", " ", raw_text).strip()
+        if re.search(r"(?:ماذا\s+تقصد|ما\s+قصدك|ما\s+الذي\s+تقصد)", arabic_compact):
+            return "simple"
+        if re.search(r"(?:أعد|اعد)\s+صياغ", arabic_compact):
+            return "rephrase"
+        if re.search(r"(?:اشرح(?:ها|ه)?\s+ببساطة|ببساطة|بشكل\s+بسيط)", arabic_compact):
+            return "simple"
+        if re.search(r"\b(?:اختصر|اختصرها|اختصره)\b", arabic_compact):
+            return "shorten"
+        if re.search(r"\b(?:لخص|لخّص|تلخيص)\b", arabic_compact):
+            if re.search(r"(?:ذلك|هذا|هذه|ما\s+قلت|ما\s+قلته|إجابتك|اجابتك|الجواب|الإجابة|الاجابة)", arabic_compact):
+                return "summary"
+            if len(arabic_compact.split()) <= 2:
+                return "summary"
+        return ""
+
+    if re.search(r"\bwhat\s+do\s+you\s+mean\b", lowered_text):
+        return "simple"
+    if re.search(r"\bwhat\s+does\s+(?:that|this|it)\s+mean\b", lowered_text):
+        return "simple"
+    if re.search(r"\b(?:explain|say)\s+(?:that|this|it)?\s*(?:more\s+)?(?:simply|in\s+simple\s+(?:terms|words))\b", lowered_text):
+        return "simple"
+    if re.search(r"\b(?:simplify|make\s+it\s+(?:simpler|easier|clearer|simple)|in\s+simpler\s+(?:terms|words)|easier\s+explanation)\b", lowered_text):
+        return "simple"
+    if re.search(r"\b(?:rephrase|reword|say\s+(?:that|this|it)\s+(?:another|a\s+different)\s+way)\b", lowered_text):
+        return "rephrase"
+    if re.search(r"\b(?:make\s+it\s+shorter|shorter|briefly|in\s+brief|short\s+version|shorten\s+(?:that|this|it)?)\b", lowered_text):
+        return "shorten"
+    if re.search(r"\b(?:summari[sz]e|sum\s+up)\b", lowered_text):
+        if _MEMORY_REFERENCE_WORDS_RE.search(lowered_text):
+            return "summary"
+        if re.fullmatch(r"(?:please\s+)?(?:can\s+you\s+|could\s+you\s+|would\s+you\s+)?(?:summari[sz]e|sum\s+up)\s*(?:please)?[?.!]*", lowered_text):
+            return "summary"
+    if re.search(r"\bsummary\s+of\s+(?:that|this|it|your\s+(?:answer|response)|what\s+you\s+(?:just\s+)?said)\b", lowered_text):
+        return "summary"
+    return ""
+
+
+def _is_memory_rewrite_query(text: str) -> bool:
+    return bool(_classify_memory_rewrite_intent(text))
+
+
+def _dedup_preserve_order(values: list[str]) -> list[str]:
+    seen_values: set[str] = set()
+    deduped_values: list[str] = []
+    for value in values:
+        cleaned_value = re.sub(r"\s+", " ", str(value or "").strip().strip(" .;:-"))
+        key = re.sub(r"[^a-z0-9\u0600-\u06FF]+", " ", cleaned_value.lower()).strip()
+        if not cleaned_value or not key or key in seen_values:
+            continue
+        seen_values.add(key)
+        deduped_values.append(cleaned_value)
+    return deduped_values
+
+
+def _extract_focus_concept_from_explain_query_surface(query: str) -> str:
+    """Extract the object from generic explain/describe-style queries.
+
+    Used only for conversation memory resolution, not for answering. It is
+    structural (verb + trailing object) and domain-agnostic.
+    """
+    raw = re.sub(r"\s+", " ", str(query or "").strip())
+    if not raw:
+        return ""
+    match = re.match(
+        r"^(?:اشرح|وضح|فسر|فسّر|بسط|بسّط|explain|describe|clarify)\s+(.+?)\s*[؟?.!]*$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    concept = match.group(1).strip(" \t\r\n\"'`.,;:!?؟،؛-")
+    concept = re.split(r"\s+(?:ضمن|في)\s+سياق\s*[:：]?|\s+in\s+context\s*[:：]?", concept, maxsplit=1, flags=re.IGNORECASE)[0]
+    concept = concept.strip(" \t\r\n\"'`.,;:!?؟،؛-")
+    if not concept:
+        return ""
+    if concept.lower() in {"ذلك", "هذا", "هذه", "it", "this", "that"}:
+        return ""
+    if len(concept.split()) > 8:
+        return ""
+    return concept
+
+
+def _extract_focus_concept_from_explanatory_query_surface(query: str) -> str:
+    """Extract the subject from generic explanatory questions.
+
+    Examples: "Why is planning important?" -> "planning" and
+    "كيف يرتبط X بـ Y؟" is deliberately not handled here because the
+    relationship resolver handles explicit pairs separately.
+    """
+    raw = re.sub(r"\s+", " ", str(query or "").strip())
+    if not raw:
+        return ""
+    lowered = raw.lower().strip(" ؟?.!")
+    match = re.match(
+        r"^(?:why\s+(?:is|are|was|were)|how\s+(?:is|are|was|were))\s+(.+?)\s+"
+        r"(?:important|needed|necessary|useful|related|connected|relevant|significant|helpful)\b",
+        lowered,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.match(r"^لماذا\s+(.+?)\s+(?:مهم|مهمة|مهمه|ضروري|ضرورية|مرتبط|مرتبطة)\b", raw)
+    if not match:
+        return ""
+    concept = re.sub(r"\b(?:the|a|an)\b", " ", match.group(1), flags=re.IGNORECASE)
+    concept = re.sub(r"\s+", " ", concept).strip(" \t\r\n\"'`.,;:!?؟،؛-")
+    if not concept or len(concept.split()) > 8:
+        return ""
+    return concept
+
+
+def _extract_last_grounded_entities(query: str, answer: str, answer_items: list[str] | None = None) -> list[str]:
+    candidates: list[str] = []
+    for item_text in answer_items or []:
+        if item_text:
+            candidates.append(str(item_text))
+    concept = _extract_definition_concept_from_query_surface(query)
+    if concept:
+        candidates.append(concept)
+    # P12C-1: also pull an Arabic-script concept when the query is Arabic so
+    # later Arabic follow-ups can resolve "ها/هي/ذلك" against it. Generic
+    # surface extraction — no domain word lists.
+    try:
+        ar_concept = _extract_arabic_concept_from_query_surface(query)
+    except Exception:
+        ar_concept = ""
+    if ar_concept:
+        candidates.append(ar_concept)
+    focus_concept = _extract_focus_concept_from_explain_query_surface(query)
+    if focus_concept:
+        candidates.append(focus_concept)
+    explanatory_concept = _extract_focus_concept_from_explanatory_query_surface(query)
+    if explanatory_concept:
+        candidates.append(explanatory_concept)
+    if not candidates:
+        answer_is_list, extracted_items = _extract_followup_items_from_answer(answer)
+        if answer_is_list:
+            candidates.extend(extracted_items)
+    return _dedup_preserve_order(candidates)[:12]
+
+
+_AR_QUERY_STOPWORDS: set[str] = {
+    "ما", "ماذا", "من", "كيف", "لماذا", "متى", "اين", "هل", "هي", "هو", "هذا", "هذه",
+    "ذلك", "في", "علي", "علا", "من", "إلى", "الي", "عن", "ب", "ل", "و", "أو", "او",
+    "مهم", "مهمة", "مهمه", "تعريف", "العلاقة", "العلاقه", "الفرق", "بين", "اذكر",
+    "عرف", "عدد", "اشرح", "وضح", "هل", "كان", "تكون", "يكون",
+}
+
+
+def _extract_arabic_concept_from_query_surface(query: str) -> str:
+    """Return a single Arabic noun-phrase concept from the surface form of
+    an Arabic question (e.g. "لماذا التخطيط مهم في الإدارة؟" -> "التخطيط").
+    Strictly generic — picks the first non-stopword Arabic token of length
+    >= 3. Returns empty string when nothing qualifies. No domain words.
+    """
+    raw = re.sub(r"\s+", " ", str(query or "").strip())
+    if not raw or not re.search(r"[\u0600-\u06FF]", raw):
+        return ""
+    tokens = re.findall(r"[\u0600-\u06FF]+", raw)
+    for tok in tokens:
+        clean = tok.strip()
+        if len(clean) < 3:
+            continue
+        if clean in _AR_QUERY_STOPWORDS:
+            continue
+        # Strip trailing question-particle artifacts (rare on tokens).
+        return clean
+    return ""
+
+
+def _split_memory_answer_units(answer: str) -> list[str]:
+    answer_text = re.sub(r"[ \t]+", " ", str(answer or "")).strip()
+    if not answer_text:
+        return []
+    units: list[str] = []
+    for line_text in answer_text.splitlines():
+        cleaned_line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+", "", line_text).strip()
+        if cleaned_line:
+            units.append(cleaned_line)
+    if len(units) >= 2:
+        return units
+    sentence_units = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?؟])\s+|\n+", answer_text)
+        if sentence and sentence.strip()
+    ]
+    return sentence_units or ([answer_text] if answer_text else [])
+
+
+def _join_memory_items(items: list[str]) -> str:
+    clean_items = _dedup_preserve_order(items)
+    if not clean_items:
+        return ""
+    if len(clean_items) == 1:
+        return clean_items[0]
+    if len(clean_items) == 2:
+        return f"{clean_items[0]} and {clean_items[1]}"
+    return ", ".join(clean_items[:-1]) + f", and {clean_items[-1]}"
+
+
+def _memory_item_summary_label(item: str) -> str:
+    item_text = re.sub(r"\s+", " ", str(item or "").strip().strip(" .;:-"))
+    if not item_text:
+        return ""
+    if ":" in item_text:
+        label_text = item_text.split(":", 1)[0].strip(" .;:-")
+        if label_text and len(label_text) <= 90 and len(label_text.split()) <= 8:
+            return label_text
+    first_unit = re.split(r"(?<=[.!?؟])\s+", item_text, maxsplit=1)[0].strip(" .;:-")
+    words = first_unit.split()
+    if len(words) > 12:
+        return " ".join(words[:12]).strip(" .;:-")
+    return first_unit
+
+
+def _limit_memory_lines(text: str, max_lines: int = 3) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    return "\n".join(lines[:max_lines]).strip()
+
+
+def _rewrite_previous_answer_from_memory(previous_answer: str, action: str) -> str:
+    answer_text = re.sub(r"[ \t]+", " ", str(previous_answer or "")).strip()
+    if not answer_text or answer_text.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        return RAG_NO_MATCH_RESPONSE
+    answer_is_arabic = _is_arabic_text(answer_text) if "_is_arabic_text" in globals() else bool(re.search(r"[\u0600-\u06FF]", answer_text))
+
+    def _simple_memory_rewrite(units: list[str]) -> str:
+        selected_units: list[str] = []
+        for unit in units[:2]:
+            cleaned_unit = re.sub(r"\s+", " ", str(unit or "")).strip(" \t\r\n-•*.,;:،؛")
+            cleaned_unit = re.sub(r"^(?:in\s+simple\s+terms|simply|briefly|ببساطه|ببساطة|باختصار)[:：,،\s-]*", "", cleaned_unit, flags=re.IGNORECASE).strip()
+            if not cleaned_unit:
+                continue
+            parts = [part.strip() for part in re.split(r"\s*[؛;]\s+", cleaned_unit) if part.strip()]
+            if parts:
+                cleaned_unit = parts[0]
+            if len(cleaned_unit.split()) > 24:
+                comma_parts = [part.strip() for part in re.split(r"\s*[,،]\s+", cleaned_unit) if part.strip()]
+                if comma_parts and len(comma_parts[0].split()) >= 5:
+                    cleaned_unit = comma_parts[0]
+            if cleaned_unit and not re.search(r"[.!?؟]$", cleaned_unit):
+                cleaned_unit += "؟" if answer_is_arabic and cleaned_unit.endswith("؟") else "."
+            if cleaned_unit:
+                selected_units.append(cleaned_unit)
+        simple_text = " ".join(selected_units[:2]).strip()
+        if not simple_text:
+            return RAG_NO_MATCH_RESPONSE
+        prefix = "ببساطة: " if answer_is_arabic else "In simple terms: "
+        if re.sub(r"\W+", "", simple_text.lower()) == re.sub(r"\W+", "", answer_text.lower()):
+            return _limit_memory_lines(prefix + simple_text, 2)
+        return _limit_memory_lines(prefix + simple_text, 2)
+
+    answer_is_list, answer_items = _extract_followup_items_from_answer(answer_text)
+    if answer_is_list and answer_items:
+        summary_items = [
+            label for label in (_memory_item_summary_label(item_text) for item_text in answer_items)
+            if label
+        ]
+        joined_items = _join_memory_items(summary_items or answer_items)
+        if action in {"summary", "shorten"} and len(joined_items) > 360:
+            joined_items = "; ".join((summary_items or answer_items)[:3]).strip()
+        if action in {"summary", "shorten"}:
+            if joined_items and not re.search(r"[.!?؟]$", joined_items):
+                joined_items += "."
+            return _limit_memory_lines(joined_items, 3)
+        if action == "simple":
+            prefix = "ببساطة: " if answer_is_arabic else "In simple terms: "
+            return _limit_memory_lines(f"{prefix}{joined_items}.", 2)
+        return _limit_memory_lines(joined_items, 3)
+
+    units = _split_memory_answer_units(answer_text)
+    if not units:
+        return RAG_NO_MATCH_RESPONSE
+    if action in {"summary", "shorten"}:
+        return _limit_memory_lines("\n".join(units[:2]), 3)
+    if action == "simple":
+        return _simple_memory_rewrite(units)
+    return _limit_memory_lines("\n".join(units[:3]), 3)
+
+
+async def _handle_memory_rewrite_query(text: str, connection_id: str):
+    action = _classify_memory_rewrite_intent(text)
+    if not action:
+        return (RAG_NO_MATCH_RESPONSE, [])
+    state = _get_last_answer_state(connection_id)
+    # P12C-1: fall back to the preserved last-good state when the active
+    # state is missing OR was wiped by an intervening not-found turn.
+    fallback_used = False
+    if not state or str(state.get("last_assistant_answer") or state.get("answer") or "").strip().lower() in {"", RAG_NO_MATCH_RESPONSE.lower()}:
+        good_state = _last_good_answer_state.get(connection_id)
+        if good_state:
+            try:
+                if (time.time() - float(good_state.get("ts", 0))) <= _FOLLOWUP_STATE_TTL:
+                    state = good_state
+                    fallback_used = True
+            except Exception:
+                pass
+    if not state:
+        logger.info("[MEMORY SUMMARY MODE] skipped reason=no_recent_answer action=%s", action)
+        return (RAG_NO_MATCH_RESPONSE, [])
+    previous_answer = str(
+        state.get("last_assistant_answer")
+        or state.get("answer")
+        or ""
+    ).strip()
+    if not previous_answer or previous_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        logger.info("[MEMORY SUMMARY MODE] skipped reason=no_grounded_answer action=%s", action)
+        return (RAG_NO_MATCH_RESPONSE, [])
+    memory_answer = _rewrite_previous_answer_from_memory(previous_answer, action)
+    memory_answer = re.sub(r"[ \t]+", " ", str(memory_answer or "")).strip()
+    if not memory_answer or memory_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+        logger.info("[MEMORY SUMMARY MODE] rejected reason=empty_rewrite action=%s", action)
+        return (RAG_NO_MATCH_RESPONSE, [])
+    memory_answer = _limit_memory_lines(memory_answer, 3)
+    next_state = dict(state)
+    next_state.update({
+        "query": (text or "").strip(),
+        "answer": memory_answer,
+        "last_assistant_answer": memory_answer,
+        "answer_type": f"memory_{action}",
+        "last_answer_type": f"memory_{action}",
+        "last_grounded_entities": list(state.get("last_grounded_entities") or state.get("items") or []),
+        "ts": time.time(),
+    })
+    last_answer_state[connection_id] = next_state
+    logger.info(
+        "[MEMORY SUMMARY MODE] language=%s retrieval_bypassed=True rerank_bypassed=True vector_db_bypassed=True action=%s lines=%d",
+        _route_response_language(text),
+        action,
+        len([line_text for line_text in memory_answer.splitlines() if line_text.strip()]),
+    )
+    return (memory_answer, [])
 
 
 def _has_recent_followup_state(connection_id) -> bool:
@@ -1123,6 +1771,16 @@ def _is_followup_query(text: str, connection_id=None) -> bool:
     if _is_weak_generic_request(t):
         logger.info("[ANSWER PERMISSION] allowed=False reason=weak_generic_followup_candidate query=%s", t[:180])
         return False
+    if _is_memory_rewrite_query(t):
+        return _has_recent_followup_state(connection_id)
+    # P12C-1: Arabic strong follow-up patterns require state to actually
+    # answer (handler still returns Not found if state missing) but they
+    # qualify as follow-up *intent* so the WS path skips the heavy
+    # router/RAG and avoids classifying them as unsupported_unclear.
+    if _is_arabic_followup_strong(t):
+        if _has_recent_followup_state(connection_id) or _last_good_answer_state.get(connection_id):
+            logger.info("[AR FOLLOWUP MEMORY] detected=True kind=strong query=%s", t[:160])
+            return True
     for pat in _FOLLOWUP_PATTERNS:
         if pat.search(t):
             return True
@@ -1131,6 +1789,9 @@ def _is_followup_query(text: str, connection_id=None) -> bool:
     for pat in _FOLLOWUP_CONTEXT_PATTERNS:
         if pat.search(t):
             return True
+    if _is_arabic_followup_context(t):
+        logger.info("[AR FOLLOWUP MEMORY] detected=True kind=context query=%s", t[:160])
+        return True
     if len(t.split()) <= _FOLLOWUP_SHORT_WORD_LIMIT:
         for pat in _FOLLOWUP_NEW_QUESTION_PATTERNS:
             if pat.search(t):
@@ -1148,6 +1809,9 @@ def _is_followup_query(text: str, connection_id=None) -> bool:
             except Exception:
                 pass
         if _re_followup.search(r"\b(?:it|this|that|these|those|them|there|above|previous|first|second|third|last|one|ones)\b", t, _re_followup.IGNORECASE):
+            return True
+        if _AR_ANAPHOR_RE.search(t):
+            logger.info("[AR FOLLOWUP MEMORY] detected=True kind=short_anaphor query=%s", t[:160])
             return True
         logger.info("[FOLLOWUP] short_fallback_rejected query=%s", t[:180])
         return False
@@ -1316,8 +1980,23 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
             return
         try:
             if ans.lower() == RAG_NO_MATCH_RESPONSE.lower():
-                # Latest turn produced a not-found result. Drop any stale
-                # prior state so follow-ups have nothing to explain.
+                # Latest turn produced a not-found result. Drop the active
+                # state so ordinary follow-ups have nothing to explain.
+                # Preserve the separate last-good store only when the failed
+                # turn itself was a follow-up; clear it for unrelated new
+                # topics so stale summaries cannot cross topic boundaries.
+                latest_query = (query or "").strip()
+                preserve_last_good = False
+                try:
+                    preserve_last_good = bool(
+                        _is_memory_rewrite_query(latest_query)
+                        or _is_arabic_followup_strong(latest_query)
+                        or _is_arabic_followup_context(latest_query)
+                        or _is_marked_arabic_resolved_followup(connection_id, latest_query)
+                        or _is_followup_query(latest_query, connection_id)
+                    )
+                except Exception:
+                    preserve_last_good = False
                 if connection_id in last_answer_state:
                     last_answer_state.pop(connection_id, None)
                     logger.info(
@@ -1326,6 +2005,13 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
                         connection_id,
                     )
                     logger.info("[SMART MEMORY] rejected_reason=not_found_clears_state")
+                if not preserve_last_good:
+                    _last_good_answer_state.pop(connection_id, None)
+                    _last_list_state.pop(connection_id, None)
+                    logger.info("[SMART MEMORY] rejected_reason=not_found_topic_shift_clears_last_good")
+                else:
+                    logger.info("[SMART MEMORY] source=last_good preserved_after_followup_not_found=True")
+                _ar_resolved_followup_queries.pop(connection_id, None)
                 recent_grounded_definition_concepts.pop(connection_id, None)
                 return
         except Exception:
@@ -1387,15 +2073,36 @@ def _save_last_answer_state(connection_id, query, answer, doc_dicts) -> None:
         next_state = {
             "query": (query or "").strip(),
             "answer": ans,
+            "last_assistant_answer": ans,
             "chunks": kept,
             "ts": time.time(),
             "answer_type": answer_type,
+            "last_answer_type": answer_type,
+            "last_grounded_entities": _extract_last_grounded_entities(query, ans, answer_items),
         }
         if answer_is_list and answer_items:
             next_state["items"] = answer_items
             next_state["list_query"] = (query or "").strip()
             next_state["list_answer"] = ans
         last_answer_state[connection_id] = next_state
+        # P12C-1: mirror grounded answers to a separate "good" store that
+        # survives a single not-found / failed follow-up turn so Arabic
+        # memory rewrites ("طيب اختصر أكثر") can still operate on the
+        # previous useful answer. Mirror only NON-not-found grounded
+        # answers (the early-return above already handled the not-found
+        # path before we get here).
+        try:
+            _last_good_answer_state[connection_id] = dict(next_state)
+            if answer_is_list and answer_items:
+                _last_list_state[connection_id] = {
+                    "items": list(answer_items),
+                    "query": (query or "").strip(),
+                    "answer": ans,
+                    "ts": time.time(),
+                }
+        except Exception:
+            logger.exception("[FOLLOWUP] failed to mirror good/list state")
+        _ar_resolved_followup_queries.pop(connection_id, None)
         if answer_type == "list":
             logger.info("[COMPARE MEMORY] ignored=list_entity")
             logger.info("[SMART MEMORY] source=last_list rejected_reason=list_does_not_overwrite_concept_pair")
@@ -2342,6 +3049,67 @@ def _extract_followup_strong_explanation(
             score_local += 1.0
         return score_local
 
+    def _labeled_item_block(section_value: str) -> str:
+        target_head = _followup_item_head(target_item)
+        if not target_head:
+            return ""
+        target_pattern = _re_followup.compile(
+            r"(?:^|\s)(?:[A-Z]\s*[\.)]\s*)?"
+            + _re_followup.escape(target_head)
+            + r"\s*[:\-]\s*",
+            _re_followup.IGNORECASE,
+        )
+        match = target_pattern.search(section_value)
+        if not match:
+            return ""
+        tail = section_value[match.end():]
+        stop_at = len(tail)
+        for other_item in previous_items or []:
+            other_head = _followup_item_head(other_item)
+            if not other_head or other_head.lower() == target_head.lower():
+                continue
+            other_pattern = _re_followup.compile(
+                r"\s+[A-Z]\s*[\.)]\s*"
+                + _re_followup.escape(other_head)
+                + r"\s*[:\-]\s*",
+                _re_followup.IGNORECASE,
+            )
+            other_match = other_pattern.search(tail)
+            if other_match:
+                stop_at = min(stop_at, other_match.start())
+        candidate = f"{target_head}: {tail[:stop_at]}"
+        candidate_sentences = _split_followup_explanation_sentences(candidate)
+        candidate = " ".join(candidate_sentences[:3]).strip()
+        if not candidate or len(_sentence_content_tokens(candidate)) < 8:
+            return ""
+        if not (_EXPLAIN_VERB_RE.search(candidate.lower()) or _FOLLOWUP_EXPLANATORY_CUE_RE.search(candidate)):
+            return ""
+        if _sentence_mentions_many_followup_items(candidate, previous_items):
+            return ""
+        clean_candidate = candidate
+        if apply_cleanup:
+            clean_candidate, cleanup_changed, reject_reason = _cleanup_followup_extracted_answer(
+                candidate, target_item
+            )
+            if reject_reason:
+                if emit_cleanup_logs:
+                    logger.info(
+                        "[FOLLOWUP NOISY SENTENCE REJECTED] reason=%s sentence=%r",
+                        reject_reason,
+                        candidate[:180],
+                    )
+                return ""
+            if emit_cleanup_logs and cleanup_changed:
+                logger.info(
+                    "[FOLLOWUP CLEANUP APPLIED] before=%r after=%r",
+                    candidate[:180],
+                    clean_candidate[:180],
+                )
+        clean_candidate = re.sub(r"\s+", " ", clean_candidate).strip(" \t\r\n-*")
+        if clean_candidate and not re.search(r"[.!?]$", clean_candidate):
+            clean_candidate += "."
+        return clean_candidate[:1000].strip()
+
     def _continuity_score(sentence_value: str, running_tokens: set[str], anchor_tokens: set[str]) -> float:
         sentence_tokens = set(_sentence_content_tokens(sentence_value))
         if not sentence_tokens:
@@ -2366,6 +3134,11 @@ def _extract_followup_strong_explanation(
         return score_local
 
     for section in sections:
+        labeled_block = _labeled_item_block(section)
+        if labeled_block:
+            if emit_cleanup_logs:
+                logger.info("[FOLLOWUP CLEAN ANSWER] %s", labeled_block[:240])
+            return labeled_block
         sentences = _split_followup_explanation_sentences(section)
         for index, sentence in enumerate(sentences):
             if not _followup_text_has_item_head_anchor(sentence, target_item):
@@ -2428,6 +3201,13 @@ def _extract_followup_strong_explanation(
                 continue
 
             raw_block = " ".join(block_sentences)
+            if _sentence_mentions_many_followup_items(raw_block, previous_items):
+                if emit_cleanup_logs:
+                    logger.info(
+                        "[FOLLOWUP NOISY SENTENCE REJECTED] reason=multi_item_enumeration sentence=%r",
+                        raw_block[:180],
+                    )
+                continue
             separators = len(_re_followup.findall(r"(?:^|\s)[-*\u2022]\s|\s[-\u2013]\s|,\s", raw_block))
             topic_consistency = 0.0
             for block_sentence in block_sentences:
@@ -3028,6 +3808,8 @@ async def _handle_followup_query(text: str, connection_id: str):
     if _is_weak_generic_request(text):
         logger.info("[ANSWER PERMISSION] allowed=False reason=weak_generic_followup_request")
         return (RAG_NO_MATCH_RESPONSE, [])
+    if _is_memory_rewrite_query(text):
+        return await _handle_memory_rewrite_query(text, connection_id)
     state = _get_last_answer_state(connection_id)
     if not state:
         logger.info("[FOLLOWUP] no prior state for connection_id=%s -> not_found", connection_id)
@@ -3113,12 +3895,19 @@ async def _handle_followup_query(text: str, connection_id: str):
         try:
             answer_is_list, answer_items = _extract_followup_items_from_answer(answer_text)
             preserved_items = list(stored_items or previous_list_items_all or [])
+            primary_entities = [targeted_item] if targeted_item else []
+            preserved_entities = _dedup_preserve_order(
+                primary_entities + list(state.get("last_grounded_entities") or []) + preserved_items
+            )
             next_state = {
                 "query": (text or "").strip(),
                 "answer": str(answer_text or "").strip(),
+                "last_assistant_answer": str(answer_text or "").strip(),
                 "chunks": last_chunks,
                 "ts": time.time(),
                 "answer_type": "followup",
+                "last_answer_type": "followup",
+                "last_grounded_entities": preserved_entities,
                 "base_answer_type": state.get("base_answer_type") or state.get("answer_type"),
             }
             if preserved_items:
@@ -3130,6 +3919,9 @@ async def _handle_followup_query(text: str, connection_id: str):
                 next_state["list_query"] = (text or "").strip()
                 next_state["list_answer"] = str(answer_text or "").strip()
                 next_state["base_answer_type"] = "list"
+                next_state["last_grounded_entities"] = _dedup_preserve_order(
+                    preserved_entities + answer_items
+                )
             last_answer_state[connection_id] = next_state
         except Exception:
             logger.exception("[FOLLOWUP] failed to update follow-up state")
@@ -6938,6 +7730,8 @@ def _is_arabic_small_talk(text: str) -> bool:
 import collections as _collections
 _AR_EN_CACHE: "_collections.OrderedDict[str, str]" = _collections.OrderedDict()
 _AR_EN_CACHE_MAX = 512
+_AR_NON_LLM_QUERY_CACHE: "_collections.OrderedDict[str, Dict[str, Any]]" = _collections.OrderedDict()
+_AR_NON_LLM_QUERY_CACHE_MAX = 512
 
 # ---- Final grounded English→Arabic answer translation cache ----
 # Keyed only by the already-selected final answer text and target language.
@@ -7049,6 +7843,247 @@ def _has_exact_phrase_and_grounding(query_text: str, docs: list[dict]) -> bool:
     return _has_english_keyword_overlap(query_text, docs) and _passes_hybrid_relevance_gate(query_text, docs)
 
 
+_PROTECTED_QUOTED_TERM_RE = re.compile(r"[\"'`“”‘’«»]\s*([^\"'`“”‘’«»]{2,80}?)\s*[\"'`“”‘’«»]")
+_LATIN_PROPER_NAME_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z][A-Za-z]+|[A-Z]{2,})(?:[\s\-]+(?:[A-Z][A-Za-z]+|[A-Z]{2,})){1,5}(?![A-Za-z0-9])"
+)
+
+
+def _is_arabic_text(value: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", str(value or "")))
+
+
+def _looks_like_arabic_list_query(query_text: str) -> bool:
+    if not _is_arabic_text(query_text):
+        return False
+    try:
+        q = _normalize_query_for_router(query_text)
+    except Exception:
+        q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return False
+    if re.match(r"^\s*(?:اذكر|عدد|استخرج|اعط|اعطني|قدم|هات)\b", q):
+        return True
+    if re.search(r"\b(?:قائمه|قائمة|عدد|تعداد|انواع|خطوات|عناصر|نقاط|اسباب|اهداف|وظائف|مراحل|اقسام|اجزاء)\b", q):
+        return True
+    if re.match(r"^\s*(?:ما|ماذا)\s+(?:هي|هى|هم|تكون)\b", q):
+        return True
+    return False
+
+
+def _normalize_arabic_query_surface(query_text: str) -> str:
+    text = re.sub(r"[\u064b-\u065f\u0670]", "", str(query_text or ""))
+    text = text.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا")
+    text = text.replace("ى", "ي").replace("ة", "ه")
+    text = re.sub(r"[؟?.!،,؛;:\s]+", " ", text)
+    return text.strip().lower()
+
+
+_AR_EXPLANATION_QUERY_RE = re.compile(
+    r"(?:\bلماذا\b|\bكيف\b|ما\s+العلاقه|اشرح\s+العلاقه|وضح|"
+    r"كيف\s+يدعم|كيف\s+يساهم|ما\s+اهميه|\bاهميه\b|\bعلاقه\b|\bيساهم\b|\bيدعم\b)"
+)
+
+_AR_DEFINITION_QUERY_RE = re.compile(
+    r"^\s*(?:(?:ما|ماذا)\s+(?:هو|هي|هى|يعني|تعني)|(?:من)\s+(?:هو|هي|هى)|(?:عرف|تعريف|عرّف))\b"
+)
+
+
+def _classify_arabic_query_type(query_text: str) -> str:
+    """Classify Arabic user intent before retrieval/translation.
+
+    Returns one of: memory, explanation, direct. The labels are routing-only;
+    answers still require retrieved evidence unless the user is explicitly
+    asking to rewrite the previous grounded answer.
+    """
+    if not _is_arabic_text(query_text):
+        return ""
+    if _classify_memory_rewrite_intent(query_text):
+        return "memory"
+    normalized = _normalize_arabic_query_surface(query_text)
+    if not normalized:
+        return "direct"
+    if _AR_EXPLANATION_QUERY_RE.search(normalized):
+        return "explanation"
+    if _looks_like_arabic_list_query(query_text) or _AR_DEFINITION_QUERY_RE.search(normalized):
+        return "direct"
+    return "direct"
+
+
+def _native_arabic_retrieval_queries(query_text: str) -> list[str]:
+    original = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not original:
+        return []
+    queries: list[str] = [original]
+    tokens = [tok for tok in _query_tokens_for_evidence(original) if _is_arabic_text(tok) and len(tok) >= 3]
+    if tokens:
+        unique_tokens: list[str] = []
+        seen_tokens: set[str] = set()
+        for token in tokens:
+            key = token.casefold()
+            if key and key not in seen_tokens:
+                seen_tokens.add(key)
+                unique_tokens.append(token)
+        if len(unique_tokens) >= 2:
+            queries.append(" ".join(unique_tokens[:4]))
+            for idx in range(len(unique_tokens) - 1):
+                queries.append(" ".join(unique_tokens[idx:idx + 2]))
+        queries.extend(unique_tokens[:4])
+
+    ordered: list[str] = []
+    seen_queries: set[str] = set()
+    for query in queries:
+        cleaned = re.sub(r"\s+", " ", str(query or "").strip())
+        key = cleaned.casefold()
+        if cleaned and key not in seen_queries:
+            seen_queries.add(key)
+            ordered.append(cleaned)
+        if len(ordered) >= 7:
+            break
+    return ordered
+
+
+def _extract_protected_exact_query_terms(query_text: str) -> list[str]:
+    raw = str(query_text or "")
+    if not raw.strip():
+        return []
+    terms: list[str] = []
+
+    def _add(value: str) -> None:
+        term = re.sub(r"\s+", " ", str(value or "").strip(" \t\r\n.,;:!?؟،؛-"))
+        if len(term) < 2:
+            return
+        if not re.search(r"[A-Za-z\u0600-\u06FF]", term):
+            return
+        key = term.casefold()
+        if key not in {existing.casefold() for existing in terms}:
+            terms.append(term)
+
+    for match in _PROTECTED_QUOTED_TERM_RE.finditer(raw):
+        _add(match.group(1))
+
+    for match in _LATIN_PROPER_NAME_RE.finditer(raw):
+        term = match.group(0)
+        parts = re.findall(r"[A-Za-z][A-Za-z'.-]*", term)
+        if len(parts) >= 2 or any(part.isupper() and len(part) > 1 for part in parts):
+            _add(term)
+
+    return terms[:4]
+
+
+def _doc_text_for_exact_match(doc: dict) -> str:
+    if not doc:
+        return ""
+    md = (doc or {}).get("metadata") or {}
+    parts = [
+        str((doc or {}).get("text") or ""),
+        str((doc or {}).get("page_content") or ""),
+        str((doc or {}).get("content") or ""),
+        str(md.get("title") or ""),
+        str(md.get("section") or ""),
+        str(md.get("chapter") or ""),
+    ]
+    return "\n".join(part for part in parts if part)
+
+
+def _doc_contains_exact_query_term(doc: dict, term: str) -> bool:
+    haystack = _doc_text_for_exact_match(doc)
+    needle = re.sub(r"\s+", " ", str(term or "").strip())
+    if not haystack or not needle:
+        return False
+    if re.search(r"[A-Za-z]", needle):
+        pattern = re.escape(needle).replace(r"\ ", r"\s+")
+        return bool(re.search(rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])", haystack, flags=re.IGNORECASE))
+    return needle.casefold() in haystack.casefold()
+
+
+def _docs_contain_all_protected_terms(docs: list[dict], protected_terms: list[str]) -> bool:
+    if not protected_terms:
+        return True
+    if not docs:
+        return False
+    return all(any(_doc_contains_exact_query_term(doc, term) for doc in docs) for term in protected_terms)
+
+
+def _filter_docs_by_protected_terms(docs: list[dict], protected_terms: list[str]) -> list[dict]:
+    if not protected_terms:
+        return list(docs or [])
+    return [doc for doc in (docs or []) if all(_doc_contains_exact_query_term(doc, term) for term in protected_terms)]
+
+
+def _best_doc_rank_score(docs: list[dict]) -> float:
+    scores: list[float] = []
+    for doc in docs or []:
+        for key in ("final_score", "score", "rerank_score"):
+            if key not in (doc or {}):
+                continue
+            try:
+                scores.append(float((doc or {}).get(key) or 0.0))
+            except Exception:
+                pass
+            break
+    return max(scores) if scores else 0.0
+
+
+def _assess_native_arabic_retrieval(query_text: str, retrieved_docs: list[dict]) -> tuple[bool, str, dict]:
+    docs = list(retrieved_docs or [])
+    if not docs:
+        return False, "weak_evidence", {
+            "docs": 0.0,
+            "best_score": 0.0,
+            "coverage": 0.0,
+            "focus_ratio": 0.0,
+            "semantic_density": 0.0,
+        }
+
+    metrics = _retrieval_evidence_metrics(query_text, docs)
+    docs_count = len(docs)
+    best_score = float(metrics.get("max_similarity", 0.0) or 0.0)
+    best_rank_score = _best_doc_rank_score(docs)
+    coverage = float(metrics.get("coverage", 0.0) or 0.0)
+    focus_ratio = float(metrics.get("focus_ratio", 0.0) or 0.0)
+    semantic_density = 1.0 if _has_meaningful_context(docs) else 0.0
+    has_positive_rerank = any(
+        float((doc or {}).get("rerank_score", -999.0) or -999.0) > 0.0
+        for doc in docs[:4]
+    )
+    protected_terms = _extract_protected_exact_query_terms(query_text)
+    exact_protected_hit = _docs_contain_all_protected_terms(docs, protected_terms) if protected_terms else False
+    family_v2 = _classify_query_family_v2(query_text)
+    structure_query = _query_requires_structure(query_text) or family_v2 in {"list_entity", "toc_structure"} or _looks_like_arabic_list_query(query_text)
+    weak_by_existing_gate = _is_weak_retrieval_evidence(query_text, family_v2, docs)
+
+    rank_supported = bool(best_rank_score >= 0.0 or has_positive_rerank)
+    strong_semantic = bool((best_score >= 0.22 and rank_supported) or has_positive_rerank)
+    focused_lexical = bool(coverage >= 0.40 and focus_ratio > 0.0)
+    structured_semantic = bool(
+        structure_query
+        and docs_count >= 3
+        and semantic_density > 0.0
+        and best_score >= 0.15
+        and rank_supported
+    )
+    accepted = bool(
+        (exact_protected_hit and semantic_density > 0.0)
+        or (docs_count >= 2 and semantic_density > 0.0 and strong_semantic)
+        or (semantic_density > 0.0 and focused_lexical)
+        or structured_semantic
+    )
+
+    if weak_by_existing_gate and not (strong_semantic and semantic_density > 0.0) and not exact_protected_hit:
+        accepted = False
+
+    metrics.update({
+        "docs": float(docs_count),
+        "best_score": best_score,
+        "best_rank_score": best_rank_score,
+        "semantic_density": semantic_density,
+        "positive_rerank": 1.0 if has_positive_rerank else 0.0,
+        "protected_exact_hit": 1.0 if exact_protected_hit else 0.0,
+    })
+    return accepted, ("strong_evidence" if accepted else "weak_evidence"), metrics
+
+
 def _translation_cache_get(ar_text: str) -> "str | None":
     key = ar_text.strip()
     if key in _AR_EN_CACHE:
@@ -7063,6 +8098,50 @@ def _translation_cache_put(ar_text: str, en_text: str) -> None:
     _AR_EN_CACHE.move_to_end(key)
     while len(_AR_EN_CACHE) > _AR_EN_CACHE_MAX:
         _AR_EN_CACHE.popitem(last=False)  # evict oldest
+
+
+def _ar_non_llm_query_cache_key(query_text: str) -> str:
+    return re.sub(r"\s+", " ", str(query_text or "").strip())
+
+
+def _ar_non_llm_query_cache_get(query_text: str) -> Dict[str, Any] | None:
+    key = _ar_non_llm_query_cache_key(query_text)
+    if not key or key not in _AR_NON_LLM_QUERY_CACHE:
+        return None
+    _AR_NON_LLM_QUERY_CACHE.move_to_end(key)
+    return dict(_AR_NON_LLM_QUERY_CACHE[key])
+
+
+def _ar_non_llm_query_cache_put(query_text: str, entry: Dict[str, Any]) -> None:
+    key = _ar_non_llm_query_cache_key(query_text)
+    if not key:
+        return
+    cached_entry = dict(entry or {})
+    cached_entry["original_query"] = key
+    _AR_NON_LLM_QUERY_CACHE[key] = cached_entry
+    _AR_NON_LLM_QUERY_CACHE.move_to_end(key)
+    while len(_AR_NON_LLM_QUERY_CACHE) > _AR_NON_LLM_QUERY_CACHE_MAX:
+        _AR_NON_LLM_QUERY_CACHE.popitem(last=False)
+
+
+def _ar_non_llm_query_cache_update_strength(
+    original_query: str,
+    retrieval_query: str,
+    accepted: bool,
+    reason: str,
+    metrics: Dict[str, Any] | None,
+) -> None:
+    entry = _ar_non_llm_query_cache_get(original_query) or {
+        "normalized_query": re.sub(r"\s+", " ", str(retrieval_query or "").strip()),
+    }
+    entry.update({
+        "normalized_query": re.sub(r"\s+", " ", str(retrieval_query or "").strip()),
+        "retrieval_accepted": bool(accepted),
+        "retrieval_reason": str(reason or ""),
+        "retrieval_metrics": dict(metrics or {}),
+        "retrieval_strength_cached": True,
+    })
+    _ar_non_llm_query_cache_put(original_query, entry)
 
 
 def _has_arabic_latin_token_mix(value: str) -> bool:
@@ -7478,6 +8557,405 @@ async def translate_with_llm(text: str, source_lang: str, target_lang: str) -> s
     except Exception as e:
         logger.warning(f"Translation failed ({src}→{tgt}): {e}")
     return text  # Fallback: return original text
+
+
+def _clean_english_search_query_candidate(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip().strip('"\'`'))
+    cleaned = re.sub(r"^(?:english\s+(?:translation|query)\s*[:\-]\s*)", "", cleaned, flags=re.IGNORECASE).strip()
+    if not cleaned or len(cleaned) > 260:
+        return ""
+    if re.search(r"[\u0600-\u06FF]", cleaned):
+        return ""
+    if len(re.findall(r"[A-Za-z]{2,}", cleaned)) < 2:
+        return ""
+    return cleaned
+
+
+def _expand_english_retrieval_query_terms(query_text: str) -> str:
+    query = _clean_english_search_query_candidate(query_text)
+    if not query:
+        return ""
+    lower = query.lower()
+    additions: list[str] = []
+    if re.search(r"\b(?:organi[sz]ation|organi[sz]ations|regulation)\b", lower):
+        additions.extend(["organization", "organisation", "organizing", "organising", "organizational", "organisational"])
+    if re.search(r"\b(?:recruitment|recruiting|human\s+resources?|hr)\b", lower):
+        additions.extend(["staffing", "hiring", "employment", "personnel"])
+    if re.search(r"\bstaffing\b", lower):
+        additions.extend(["recruitment", "hiring", "employment", "personnel"])
+    if not additions:
+        return query
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for token in re.findall(r"[A-Za-z][A-Za-z\-']+", query) + additions:
+        key = token.lower()
+        if key not in seen:
+            seen.add(key)
+            ordered.append(token)
+    expanded = " ".join(ordered)
+    return expanded[:260].strip()
+
+
+async def _translate_arabic_query_for_search_with_llm(query_text: str) -> str:
+    """Produce an English retrieval query when literal MT produced weak evidence."""
+    global llm_session
+    query_key = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not query_key:
+        return ""
+    cached = _translation_cache_get(query_key + "\n[llm_search_query]")
+    if cached:
+        return cached
+    system_msg = (
+        "You translate Arabic user questions into concise English search queries for retrieval. "
+        "Preserve every Latin-script word or proper noun exactly. Choose natural English course/document terms when an Arabic term is ambiguous. "
+        "For questions about functions, roles, processes, or relationships, use the functional sense rather than legal/regulatory or hiring-campaign senses. "
+        "Do not answer the question. Output only the English query."
+    )
+    user_msg = f"Arabic question:\n{query_key}\n\nEnglish search query:"
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ],
+        "stream": False,
+        "keep_alive": -1,
+        "options": {"num_ctx": 2048, "num_gpu": 99, "temperature": 0.0, "num_predict": 96},
+    }
+    try:
+        timeout = aiohttp.ClientTimeout(total=18, connect=5, sock_read=15)
+        session = llm_session
+        if session is None or session.closed:
+            session = aiohttp.ClientSession()
+        logger.info("[OLLAMA CALL] endpoint=%s model=%s query_type=ar_search_translation", LLM_URL, OLLAMA_MODEL)
+        async with session.post(LLM_URL, json=payload, timeout=timeout) as resp:
+            logger.info("[OLLAMA CALL RESULT] status=%s endpoint=%s", resp.status, LLM_URL)
+            if resp.status == 200:
+                data = await resp.json()
+                candidate = _clean_english_search_query_candidate((data.get("message") or {}).get("content") or "")
+                if candidate:
+                    _translation_cache_put(query_key + "\n[llm_search_query]", candidate)
+                    return candidate
+    except Exception as exc:
+        logger.warning("[AR TRANSLATION FALLBACK] llm_search_query_failed=%s", exc)
+    return ""
+
+
+def _extract_latin_runs_from_query(query_text: str) -> list[str]:
+    runs: list[str] = []
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9+_.-]*(?:[ \t]+[A-Za-z][A-Za-z0-9+_.-]*)*", str(query_text or "")):
+        run = re.sub(r"\s+", " ", match.group(0)).strip()
+        if run and run not in runs:
+            runs.append(run)
+    return runs[:6]
+
+
+def _normalize_arabic_keyword_for_non_llm_query(token: str) -> str:
+    keyword = re.sub(r"[\u064b-\u065f\u0670\u0640]", "", str(token or ""))
+    keyword = re.sub(r"[إأآٱ]", "ا", keyword)
+    keyword = keyword.replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي").replace("ة", "ه")
+    keyword = re.sub(r"[^\u0621-\u064A]", "", keyword).strip()
+    if len(keyword) > 3 and keyword[0] in {"و", "ف"} and keyword[1:] not in _AR_QUERY_STOPWORDS:
+        keyword = keyword[1:]
+    return keyword
+
+
+def _arabic_structural_search_hints(normalized_query: str) -> list[str]:
+    normalized = f" {str(normalized_query or '').strip()} "
+    hints: list[str] = []
+
+    def _add(values: list[str]) -> None:
+        for value in values:
+            if value not in hints:
+                hints.append(value)
+
+    if re.search(r"\s(?:لماذا|ليش)\s|\b(?:سبب|اسباب|اهميه|مهم|مهمه)\b", normalized):
+        _add(["why", "importance", "important", "reason", "purpose", "significance"])
+    if re.search(r"\b(?:علاقه|العلاقه|يرتبط|ترتبط|ارتباط|بين)\b", normalized):
+        _add(["relationship", "between", "related", "linked", "connected", "connection"])
+    if re.search(r"\sكيف\s|\b(?:يدعم|تدعم|يساعد|تساعد|يساهم|تساهم)\b", normalized):
+        _add(["how", "support", "supports", "helps", "role"])
+    if re.search(r"\b(?:وظيفه|وظائف|عمليه|عمليات|دور)\b", normalized):
+        _add(["function", "process", "role"])
+    if not hints:
+        hints.append("explanation")
+    return hints[:8]
+
+
+def _build_non_llm_arabic_explanation_query(query_text: str) -> str:
+    original = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not original:
+        return ""
+    normalized_query = _normalize_arabic_query_surface(original)
+    keywords: list[str] = []
+    seen_keywords: set[str] = set()
+
+    def _add_keyword(value: str) -> None:
+        keyword = _normalize_arabic_keyword_for_non_llm_query(value)
+        if len(keyword) < 3 or keyword in _AR_QUERY_STOPWORDS:
+            return
+        if keyword in seen_keywords:
+            return
+        seen_keywords.add(keyword)
+        keywords.append(keyword)
+
+    for token in re.findall(r"[\u0621-\u064A]+", original):
+        _add_keyword(token)
+    for token in _query_tokens_for_evidence(original):
+        if _is_arabic_text(token):
+            _add_keyword(token)
+
+    latin_runs = _extract_latin_runs_from_query(original)
+    structural_hints = _arabic_structural_search_hints(normalized_query)
+    parts = [original]
+    if keywords:
+        parts.append(" ".join(keywords[:10]))
+    for latin_run in latin_runs:
+        if latin_run and latin_run not in parts:
+            parts.append(latin_run)
+    if structural_hints:
+        parts.append(" ".join(structural_hints))
+    return re.sub(r"\s+", " ", " ".join(part for part in parts if part).strip())[:520]
+
+
+def _repair_fast_arabic_search_query(original_arabic_query: str, english_query: str) -> str:
+    query = _clean_english_search_query_candidate(english_query)
+    if not query:
+        return ""
+    original_norm = _normalize_arabic_query_surface(original_arabic_query)
+
+    # Tiny phrase-sense repair for Arabic function wording only. This changes
+    # retrieval-query wording, never the answer, and only when the user's own
+    # Arabic phrasing indicates a function/process sense.
+    if "وظيفه" in original_norm or "وظائف" in original_norm:
+        query = re.sub(r"\brecruitment\s+function\b", "staffing", query, flags=re.IGNORECASE)
+        query = re.sub(r"\brecruitment\b", "staffing", query, flags=re.IGNORECASE)
+        query = re.sub(r"\brecruiting\b", "staffing", query, flags=re.IGNORECASE)
+        if "تنظيم" in original_norm and not re.search(r"\b(?:law|legal|policy|rule|rules|regulatory)\b", query, flags=re.IGNORECASE):
+            query = re.sub(r"\ban\s+organization\b", "organising", query, flags=re.IGNORECASE)
+            query = re.sub(r"\borganization\b", "organising", query, flags=re.IGNORECASE)
+            query = re.sub(r"\borganizing\b", "organising", query, flags=re.IGNORECASE)
+            query = re.sub(r"\bregulation\b", "organising", query, flags=re.IGNORECASE)
+    if "رقابه" in original_norm and ("تخطيط" in original_norm or "اداره" in original_norm or "علاقه" in original_norm):
+        query = re.sub(r"\bmonitoring\b", "controlling", query, flags=re.IGNORECASE)
+        query = re.sub(r"\bsupervision\b", "controlling", query, flags=re.IGNORECASE)
+
+    for latin_run in _extract_latin_runs_from_query(original_arabic_query):
+        if latin_run and latin_run not in query:
+            query = f"{query} {latin_run}".strip()
+    return _clean_english_search_query_candidate(query)
+
+
+async def _build_fast_arabic_explanation_query(query_text: str, t_meta: dict | None = None) -> tuple[str, str]:
+    query_key = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not query_key:
+        return "", "empty"
+    t0 = time.perf_counter()
+    provider = "non_llm_query_builder"
+    cached_entry = _ar_non_llm_query_cache_get(query_key)
+    cache_hit = bool(cached_entry and cached_entry.get("normalized_query"))
+    if cache_hit:
+        candidate = str((cached_entry or {}).get("normalized_query") or "").strip()
+    else:
+        candidate = _build_non_llm_arabic_explanation_query(query_key)
+        if candidate:
+            _ar_non_llm_query_cache_put(query_key, {
+                "normalized_query": candidate,
+                "provider": provider,
+            })
+    if not candidate:
+        provider = "failed"
+    elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
+    if t_meta is not None:
+        t_meta["ar_fast_query_ms"] = elapsed_ms
+        t_meta["query_translation_ms"] = elapsed_ms
+        t_meta["query_translation_skipped"] = True
+        t_meta["ar_fast_query_provider"] = provider
+        t_meta["query_translation_cache_hit"] = cache_hit
+    logger.info("[AR FAST QUERY] original=%s", query_key[:240])
+    logger.info("[AR FAST QUERY] retrieval_query=%s", candidate[:240])
+    logger.info("[AR FAST QUERY] cache_hit=%s", cache_hit)
+    logger.info("[AR FAST QUERY] provider=%s time_ms=%s", provider, elapsed_ms)
+    return candidate, provider
+
+
+async def _build_llm_arabic_explanation_query(query_text: str, t_meta: dict | None = None) -> tuple[str, str]:
+    query_key = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not query_key:
+        return "", "empty"
+    t0 = time.perf_counter()
+    provider = "llm_search_query"
+    cached = _translation_cache_get(query_key + "\n[llm_search_query]")
+    if cached:
+        provider = "llm_search_query_cache"
+        candidate = cached
+    else:
+        candidate = await _translate_arabic_query_for_search_with_llm(query_key)
+    candidate = _repair_fast_arabic_search_query(query_key, candidate)
+    if not candidate:
+        provider = "external_translation"
+        try:
+            result = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: __import__('deep_translator', fromlist=['GoogleTranslator'])
+                           .GoogleTranslator(source='ar', target='en').translate(query_key)
+            )
+            candidate = _repair_fast_arabic_search_query(query_key, result if result else "")
+        except Exception as exc:
+            logger.warning("[AR FAST QUERY] external_translation_failed=%s", exc)
+            candidate = ""
+    if not candidate:
+        provider = "failed"
+    elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
+    if t_meta is not None:
+        t_meta["query_translation_ms"] = elapsed_ms
+        t_meta["query_translation_skipped"] = False
+        t_meta["ar_llm_query_ms"] = elapsed_ms
+        t_meta["ar_llm_query_provider"] = provider
+        t_meta["query_translation_cache_hit"] = bool(provider == "llm_search_query_cache")
+    logger.info("[AR LLM QUERY FALLBACK] provider=%s time_ms=%s", provider, elapsed_ms)
+    logger.info("[AR LLM QUERY FALLBACK] english_query=%s", candidate[:240])
+    return candidate, provider
+
+
+async def _build_external_arabic_explanation_query(query_text: str, t_meta: dict | None = None) -> tuple[str, str]:
+    query_key = re.sub(r"\s+", " ", str(query_text or "").strip())
+    if not query_key:
+        return "", "empty"
+    t0 = time.perf_counter()
+    provider = "external_translation"
+    cache_key = query_key + "\n[external_search_query]"
+    cached = _translation_cache_get(cache_key)
+    if cached:
+        provider = "external_translation_cache"
+        candidate = cached
+    else:
+        candidate = ""
+        try:
+            result = await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None,
+                    lambda: __import__('deep_translator', fromlist=['GoogleTranslator'])
+                               .GoogleTranslator(source='ar', target='en').translate(query_key),
+                ),
+                timeout=6.0,
+            )
+            candidate = _repair_fast_arabic_search_query(query_key, result if result else "")
+            if candidate:
+                _translation_cache_put(cache_key, candidate)
+        except Exception as exc:
+            logger.warning("[AR NON-LLM QUERY FALLBACK] external_translation_failed=%s", exc)
+            candidate = ""
+    candidate = _repair_fast_arabic_search_query(query_key, candidate)
+    if not candidate:
+        provider = "failed"
+    elapsed_ms = int(round((time.perf_counter() - t0) * 1000))
+    if t_meta is not None:
+        t_meta["ar_external_query_ms"] = elapsed_ms
+        t_meta["ar_external_query_provider"] = provider
+        if provider == "external_translation_cache":
+            t_meta["query_translation_cache_hit"] = True
+    logger.info("[AR NON-LLM QUERY FALLBACK] provider=%s time_ms=%s", provider, elapsed_ms)
+    logger.info("[AR NON-LLM QUERY FALLBACK] english_query=%s", candidate[:240])
+    return candidate, provider
+
+
+def _retrieval_candidate_strength(query_text: str, docs: list[dict] | None) -> float:
+    if not docs:
+        return -999.0
+    try:
+        metrics = _retrieval_evidence_metrics(query_text, docs or [])
+    except Exception:
+        metrics = {"coverage": 0.0, "focus_ratio": 0.0, "semantic_density": 0.0, "max_similarity": 0.0}
+    try:
+        weak = _is_weak_retrieval_evidence(query_text, _classify_query_family(query_text), docs or [])
+    except Exception:
+        weak = False
+    best_rank = _best_doc_rank_score(docs or [])
+    return (
+        best_rank
+        + (float(metrics.get("coverage", 0.0) or 0.0) * 2.0)
+        + (float(metrics.get("focus_ratio", 0.0) or 0.0) * 0.8)
+        + min(len(docs or []), 6) * 0.05
+        - (1.5 if weak and best_rank < 0.0 else 0.0)
+    )
+
+
+def _translation_retrieval_is_weak(query_text: str, docs: list[dict] | None) -> bool:
+    if not docs:
+        return True
+    best_rank = _best_doc_rank_score(docs or [])
+    try:
+        metrics = _retrieval_evidence_metrics(query_text, docs or [])
+    except Exception:
+        metrics = {"coverage": 0.0, "focus_ratio": 0.0}
+    if best_rank >= 0.5 and float(metrics.get("coverage", 0.0) or 0.0) > 0.0:
+        return False
+    if best_rank < 0.0 and float(metrics.get("coverage", 0.0) or 0.0) < 0.70:
+        return True
+    try:
+        return bool(_is_weak_retrieval_evidence(query_text, _classify_query_family(query_text), docs or []))
+    except Exception:
+        return best_rank < 0.0
+
+
+async def _maybe_improve_arabic_translation_retrieval(
+    original_arabic_query: str,
+    translated_query: str,
+    translated_docs: list[dict] | None,
+    protected_terms: list[str] | None,
+    t_meta: dict | None = None,
+) -> tuple[str, list[dict] | None]:
+    if not _translation_retrieval_is_weak(translated_query, translated_docs):
+        return translated_query, translated_docs
+    llm_query = await _translate_arabic_query_for_search_with_llm(original_arabic_query)
+    if not llm_query or llm_query.strip().lower() == str(translated_query or "").strip().lower():
+        return translated_query, translated_docs
+    candidate_queries = [llm_query]
+    expanded_query = _expand_english_retrieval_query_terms(llm_query)
+    if expanded_query and expanded_query.lower() != llm_query.lower():
+        candidate_queries.append(expanded_query)
+    t_start = time.perf_counter()
+    best_query = ""
+    best_docs: list[dict] | None = None
+    best_strength = -999.0
+    for candidate_query in candidate_queries:
+        try:
+            candidate_docs = _search_with_query_expansion(
+                candidate_query,
+                top_k=10,
+                distance_threshold=_distance_threshold_for_query(candidate_query),
+                return_dicts=True,
+            ) or []
+            if protected_terms:
+                candidate_docs = _filter_docs_by_protected_terms(candidate_docs or [], protected_terms)
+        except Exception:
+            logger.exception("[AR TRANSLATION FALLBACK] llm_search_retrieval_failed=True query=%s", candidate_query[:160])
+            continue
+        candidate_strength_local = _retrieval_candidate_strength(candidate_query, candidate_docs)
+        if candidate_query == expanded_query and candidate_docs:
+            candidate_strength_local += 0.25
+        if candidate_strength_local > best_strength:
+            best_strength = candidate_strength_local
+            best_query = candidate_query
+            best_docs = candidate_docs
+    if t_meta is not None:
+        t_meta["llm_search_translation_retrieval_ms"] = int(round((time.perf_counter() - t_start) * 1000))
+    current_strength = _retrieval_candidate_strength(translated_query, translated_docs)
+    candidate_strength = best_strength
+    accepted = bool(best_docs and best_query and candidate_strength > current_strength + 0.35)
+    logger.info(
+        "[AR TRANSLATION FALLBACK] llm_search_query=%s docs=%s current_strength=%.3f candidate_strength=%.3f accepted=%s",
+        best_query[:160],
+        len(best_docs or []),
+        current_strength,
+        candidate_strength,
+        accepted,
+    )
+    if accepted:
+        _translation_cache_put(original_arabic_query, best_query)
+        return best_query, best_docs
+    return translated_query, translated_docs
 
 def _is_llm_generation_query(q: str) -> bool:
     q = re.sub(r"\s+", " ", str(q or "").strip().lower())
@@ -10376,6 +11854,34 @@ def _format_translated_explanation_lines(text: str, max_lines: int = 5) -> str:
 
 
 async def _translate_controlled_explanation_answer_ar(answer_en: str) -> str:
+    async def _translate_line_external(line_text: str) -> str:
+        source_text = str(line_text or "").strip()
+        if not source_text:
+            return ""
+        try:
+            translator_cls = __import__("deep_translator", fromlist=["GoogleTranslator"]).GoogleTranslator
+            translated = await asyncio.get_event_loop().run_in_executor(
+                None,
+                lambda: translator_cls(source="en", target="ar").translate(source_text),
+            )
+            return str(translated or "").strip()
+        except Exception:
+            return ""
+
+    def _clean_ar_controlled_line(candidate: str) -> str:
+        cleaned = _sanitize_arabic_text(str(candidate or "").strip())
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" \t\r\n-\u2022،,.;:")
+        return cleaned
+
+    def _valid_ar_controlled_line(candidate: str) -> bool:
+        if not candidate:
+            return False
+        if re.search(r"[A-Za-z\u0400-\u04FF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]", candidate):
+            return False
+        if _has_arabic_latin_token_mix(candidate):
+            return False
+        return sum(1 for char in candidate if "\u0600" <= char <= "\u06FF") >= 3
+
     lines = []
     for raw_line in str(answer_en or "").splitlines():
         line = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)])\s+", "", raw_line).strip()
@@ -10390,17 +11896,20 @@ async def _translate_controlled_explanation_answer_ar(answer_en: str) -> str:
         if cached:
             translated_lines.append(cached)
             continue
-        try:
-            candidate = await translate_with_llm(line, "en", "ar")
-        except Exception:
-            candidate = ""
-        candidate = _sanitize_arabic_text(str(candidate or "").strip())
-        candidate = re.sub(r"\s+", " ", candidate).strip(" \t\r\n-\u2022،,.;:")
-        if not candidate:
-            return ""
-        if re.search(r"[A-Za-z]", candidate) or _has_arabic_latin_token_mix(candidate):
-            return ""
-        if sum(1 for char in candidate if "\u0600" <= char <= "\u06FF") < 3:
+        candidate = await _translate_line_external(line)
+        if _valid_ar_controlled_line(candidate):
+            logger.info("[AR ITEM TRANSLATION] provider=external branch=controlled_explanation item_len=%s", len(line))
+        else:
+            try:
+                candidate = await translate_with_llm(line, "en", "ar")
+            except Exception:
+                candidate = ""
+        candidate = _clean_ar_controlled_line(candidate)
+        if not _valid_ar_controlled_line(candidate):
+            candidate = _clean_ar_controlled_line(await _translate_line_external(line))
+            if _valid_ar_controlled_line(candidate):
+                logger.info("[AR ITEM TRANSLATION] provider=external branch=controlled_explanation item_len=%s", len(line))
+        if not _valid_ar_controlled_line(candidate):
             return ""
         if len(candidate) > 280:
             candidate = re.sub(r"(?<=[.!?\u061f])\s+", "\n", candidate).split("\n", 1)[0].strip()
@@ -17394,6 +18903,8 @@ def _query_requires_structure(query_text: str) -> bool:
     q = (query_text or "").strip().lower()
     if not q:
         return False
+    if _looks_like_arabic_list_query(q):
+        return True
     if re.search(r"\blist\b", q):
         return True
     if re.match(r"^\s*(?:what|which)\s+are\b", q):
@@ -17667,6 +19178,16 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
         )
     logger.info("[FLOW] query_after = %s", (corrected or "")[:400])
     return corrected or q
+
+
+def _spelling_correction_preserving_exact_terms(query_text: str, seed_docs: list[dict] | None = None) -> str:
+    if _extract_protected_exact_query_terms(query_text):
+        logger.info("[EXACT ENTITY GUARD] spelling_correction_skipped=True query=%s", str(query_text or "")[:160])
+        return query_text
+    try:
+        return _lightweight_spelling_correction(query_text, seed_docs=seed_docs)
+    except Exception:
+        return query_text
 
 
 def _normalize_definition_query_before_retrieval(query_text: str) -> tuple[str, str]:
@@ -22692,6 +24213,8 @@ def _is_targeted_list_question(query: str) -> bool:
     q = re.sub(r"\s+", " ", str(query or "").strip().lower())
     if not q:
         return False
+    if _looks_like_arabic_list_query(q):
+        return True
     if re.search(r"\blist\b", q):
         return True
     if re.match(r"^\s*(?:what|which)\s+are\b", q):
@@ -24050,11 +25573,32 @@ def _query_tokens_for_evidence(query_text: str) -> list[str]:
         "list", "explain", "define", "tell", "me", "document", "chapter", "section", "topics", "covered",
         "difference", "between", "compared", "compare",
     }
-    return [
-        t
-        for t in re.findall(r"[a-z0-9]{3,}", (query_text or "").lower())
-        if t not in stop
-    ]
+    arabic_stop = {
+        "ما", "ماذا", "من", "متي", "متى", "اين", "أين", "كيف", "لماذا", "هل", "هذا", "هذه", "ذلك", "تلك",
+        "هؤلاء", "عن", "علي", "على", "في", "من", "الي", "إلى", "الى", "او", "أو", "و", "ثم", "مع", "ب", "ل",
+        "هو", "هي", "هم", "هن", "انت", "أنت", "يمكن", "يمكنك", "ممكن", "هل", "اشرح", "لخص", "اذكر", "عدد",
+        "قارن", "عرف", "تعريف", "المستند", "الوثيقه", "الوثيقة", "الفصل", "القسم", "الموضوعات", "ذلك",
+        "الذي", "التي", "الذين", "اللتان", "الذى", "اي", "أي", "وما", "وهل", "وكيف", "بذلك",
+    }
+    normalized = str(query_text or "").lower()
+    try:
+        normalized = _normalize_query_for_router(query_text)
+    except Exception:
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    tokens: list[str] = []
+    for token in re.findall(r"[a-z0-9]{3,}|[\u0600-\u06FF]{2,}", normalized):
+        if re.search(r"[\u0600-\u06FF]", token):
+            arabic_token = re.sub(r"[\u064B-\u065F\u0670\u0640]", "", token)
+            arabic_token = re.sub(r"[إأآٱ]", "ا", arabic_token)
+            arabic_token = arabic_token.replace("ى", "ي").replace("ؤ", "و").replace("ئ", "ي").replace("ة", "ه")
+            arabic_token = arabic_token.strip()
+            if len(arabic_token) >= 2 and arabic_token not in arabic_stop:
+                tokens.append(arabic_token)
+            continue
+        if token not in stop:
+            tokens.append(token)
+    return tokens
 
 
 def _retrieval_evidence_metrics(query_text: str, retrieved_docs: list[dict]) -> Dict[str, float]:
@@ -29746,7 +31290,7 @@ def _validate_query_ui_equivalent(query: str) -> dict:
     """
     import time as _t
     _t0 = _t.perf_counter()
-    result: dict = {
+    result: Dict[str, Any] = {
         "query_original": str(query or ""),
         "query_normalized": "",
         "retrieval_count": 0,
@@ -29890,7 +31434,7 @@ def _validate_query_ui_equivalent(query: str) -> dict:
 
 
 
-async def call_llm_with_rag(text: str, connection_id: str, user):
+async def call_llm_with_rag(text: str, connection_id: str, user):  # pyright: ignore[reportGeneralTypeIssues]
     global llm_session
     import time
     start_time = time.time()
@@ -29911,13 +31455,19 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     # Run BEFORE the direct router so shapes like "What about X?" /
     # "وماذا عن X" with a real new entity X aren't mis-classified as
     # `unsupported_unclear`.
-    text = _maybe_rewrite_about_entity_question(text)
+    if not _is_memory_rewrite_query(text) and not _is_marked_arabic_resolved_followup(connection_id, text):
+        text = _maybe_rewrite_about_entity_question(text)
 
     route = classify_query_route(text)
     if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
         route_lang = _route_response_language(text)
         direct_answer = _direct_route_answer(text, route, route_lang)
         _log_direct_route_handled(route, text, route_lang)
+        if direct_answer == RAG_NO_MATCH_RESPONSE:
+            try:
+                _save_last_answer_state(connection_id, text, direct_answer, [])
+            except Exception:
+                logger.exception("[FOLLOWUP] save state failed (HTTP direct not-found)")
         try:
             _append_conversation_turn(connection_id, text, direct_answer)
         except Exception:
@@ -29948,10 +31498,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
         logger.info("[CONV NORM] (http) '%s' -> '%s'", (text or "")[:160], _norm[:160])
         text = _norm
 
-    try:
-        _spell_norm = _lightweight_spelling_correction(text)
-    except Exception:
-        _spell_norm = text
+    _spell_norm = _spelling_correction_preserving_exact_terms(text)
     if _spell_norm and _spell_norm.strip().lower() != (text or "").strip().lower():
         text = _spell_norm
 
@@ -29972,7 +31519,8 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
     # Catch "what about X / how about X / and X / tell me about X / explain
     # X" with a real new entity X BEFORE follow-up routing so we don't
     # inherit the previous answer's topic.
-    text = _maybe_rewrite_about_entity_question(text)
+    if not _is_memory_rewrite_query(text) and not _is_marked_arabic_resolved_followup(connection_id, text):
+        text = _maybe_rewrite_about_entity_question(text)
 
     # ---- FOLLOW-UP / EXPLANATION MODE (HTTP path) -----------------------
     # Detect generic clarification intents ("what do you mean?", "explain more",
@@ -30124,7 +31672,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):
             }
             no_matched_tokens = bool(metrics.get("query_tokens", 0.0) > 0 and metrics.get("coverage", 0.0) <= 0.0)
             weak_scores = (not relevant_docs) or _is_weak_retrieval_evidence(text, query_family, relevant_docs or [])
-            corrected_query = _lightweight_spelling_correction(text, seed_docs=relevant_docs or [])
+            corrected_query = _spelling_correction_preserving_exact_terms(text, seed_docs=relevant_docs or [])
             has_corrected_variant = bool(corrected_query and corrected_query.strip().lower() != (text or "").strip().lower())
             force_overview_retry = bool(has_corrected_variant and _is_force_overview_paragraph_query(corrected_query))
             if (no_matched_tokens or weak_scores or force_overview_retry) and has_corrected_variant:
@@ -32028,6 +33576,11 @@ async def _tts_single_response(
     if not clean:
         return
 
+    if t_meta is not None:
+        t_meta.setdefault("tts_wait_ms", 0)
+        t_meta.setdefault("tts_synthesis_ms", 0)
+        t_meta.setdefault("audio_bytes", 0)
+
     cache_key = _tts_cache_key(clean, language, XTTS_SPEAKER)
     cached_wav = await _tts_cache_get(cache_key)
     cache_hit = cached_wav is not None
@@ -32056,6 +33609,8 @@ async def _tts_single_response(
                 await _ws_send_bytes(pcm_data)
                 if t_meta is not None:
                     t_meta["xtts_last_chunk"] = time.perf_counter()
+                    t_meta["audio_bytes"] = len(pcm_data)
+                    t_meta["audio_wav_bytes"] = len(cached_wav)
             else:
                 await _ws_send_json({"type": "ttsFallback", "text": clean})
         finally:
@@ -32063,8 +33618,14 @@ async def _tts_single_response(
         cached_ms = int(round((time.perf_counter() - cached_start) * 1000))
         if t_meta is not None:
             t_meta["tts_ms"] = cached_ms
+            t_meta["tts_wait_ms"] = 0
+            t_meta["tts_synthesis_ms"] = 0
         if language == "ar":
-            logger.info("[AR PERF] tts_ms=%s cache_hit=True", cached_ms)
+            logger.info(
+                "[AR PERF] tts_ms=%s tts_wait_ms=0 tts_synthesis_ms=0 audio_bytes=%s cache_hit=True",
+                cached_ms,
+                int(t_meta.get("audio_bytes") or 0) if t_meta is not None else 0,
+            )
         return
 
     _local_tts_session = None
@@ -32076,10 +33637,13 @@ async def _tts_single_response(
         _tts_sess = _local_tts_session
 
     chunk_start = time.perf_counter()
+    audio_bytes_sent = 0
+    wav_bytes_accumulated = 0
     try:
         if t_meta is not None:
             t_meta.setdefault("xtts_send", chunk_start)
         await _ws_send_json({"type": "ttsAudioStart", "sampleRate": 24000})
+        synthesis_start = time.perf_counter()
         resp = await _tts_sess.post(
             f"{XTTS_SERVICE_URL}/synthesize",
             json={"text": clean, "speaker": XTTS_SPEAKER, "language": language},
@@ -32119,11 +33683,15 @@ async def _tts_single_response(
                     if t_meta is not None and not t_meta.get("first_tts_chunk"):
                         t_meta["first_tts_chunk"] = time.perf_counter()
                     await _ws_send_bytes(data)
+                    audio_bytes_sent += len(data)
                     emitted_audio = True
             resp.close()
             if t_meta is not None and emitted_audio:
                 t_meta["xtts_last_chunk"] = time.perf_counter()
+                t_meta["tts_synthesis_ms"] = int(round((t_meta["xtts_last_chunk"] - synthesis_start) * 1000))
+                t_meta["audio_bytes"] = audio_bytes_sent
             if emitted_audio and wav_accum:
+                wav_bytes_accumulated = len(wav_accum)
                 await _tts_cache_put(cache_key, bytes(wav_accum))
                 logger.info(
                     "[WS TTS CACHE] stored=True language=%s key=%s bytes=%s text_len=%s",
@@ -32158,8 +33726,19 @@ async def _tts_single_response(
             tts_ms = int(round((time.perf_counter() - chunk_start) * 1000))
             if t_meta is not None:
                 t_meta["tts_ms"] = tts_ms
+                t_meta["tts_wait_ms"] = int(t_meta.get("tts_wait_ms") or 0)
+                t_meta.setdefault("tts_synthesis_ms", tts_ms)
+                t_meta.setdefault("audio_bytes", audio_bytes_sent)
+                if wav_bytes_accumulated:
+                    t_meta["audio_wav_bytes"] = wav_bytes_accumulated
             if language == "ar":
-                logger.info("[AR PERF] tts_ms=%s cache_hit=False", tts_ms)
+                logger.info(
+                    "[AR PERF] tts_ms=%s tts_wait_ms=%s tts_synthesis_ms=%s audio_bytes=%s cache_hit=False",
+                    tts_ms,
+                    int(t_meta.get("tts_wait_ms") or 0) if t_meta is not None else 0,
+                    int(t_meta.get("tts_synthesis_ms") or tts_ms) if t_meta is not None else tts_ms,
+                    int(t_meta.get("audio_bytes") or audio_bytes_sent) if t_meta is not None else audio_bytes_sent,
+                )
         except Exception:
             pass
         if _local_tts_session is not None and not _local_tts_session.closed:
@@ -32206,6 +33785,9 @@ async def send_final_response(
             if has_ar and has_latin:
                 return True
         return False
+
+    def _has_non_arabic_script_contamination(value: str) -> bool:
+        return bool(re.search(r"[\u0400-\u04FF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF]", str(value or "")))
 
     def _pre_language_clean(value: str) -> tuple[str, bool]:
         s = str(value or "").strip()
@@ -32294,7 +33876,11 @@ async def send_final_response(
             translated = str(translated or "").strip()
             if not translated:
                 return ""
-            if re.search(r"[A-Za-z]", translated) or _has_arabic_latin_contamination(translated):
+            if (
+                re.search(r"[A-Za-z]", translated)
+                or _has_arabic_latin_contamination(translated)
+                or _has_non_arabic_script_contamination(translated)
+            ):
                 return ""
             if sum(1 for c in translated if "\u0600" <= c <= "\u06FF") < 3:
                 return ""
@@ -32422,6 +34008,15 @@ async def send_final_response(
                     return cleaned
 
                 def _is_clean_ar_item_translation(source_item: str, candidate: str) -> bool:
+                    if branch == "controlled_explanation":
+                        cleaned_candidate = str(candidate or "").strip()
+                        return bool(
+                            cleaned_candidate
+                            and sum(1 for char in cleaned_candidate if "\u0600" <= char <= "\u06FF") >= 3
+                            and not re.search(r"[A-Za-z]", cleaned_candidate)
+                            and not _has_arabic_latin_contamination(cleaned_candidate)
+                            and not _has_non_arabic_script_contamination(cleaned_candidate)
+                        )
                     return _is_compact_arabic_item_translation(source_item, candidate)
 
                 for _item in _bullet_items:
@@ -32527,6 +34122,7 @@ async def send_final_response(
                 _local_mixed_translation = bool(
                     re.search(r"[A-Za-z]", _translated)
                     or _has_arabic_latin_contamination(_translated)
+                    or _has_non_arabic_script_contamination(_translated)
                 )
                 if _local_mixed_translation and not _final_translation_cache_hit:
                     _external_translated = await _translate_to_arabic_external(_translation_input, _pre_lang)
@@ -32540,6 +34136,7 @@ async def send_final_response(
                     and _translated != clean_text
                     and not re.search(r"[A-Za-z]", _translated)
                     and not _has_arabic_latin_contamination(_translated)
+                    and not _has_non_arabic_script_contamination(_translated)
                 ):
                     try:
                         _translated = _sanitize_arabic_text(_translated)
@@ -32603,6 +34200,7 @@ async def send_final_response(
         and clean_text
         and clean_text != "Not found in the document."
         and not _ar_list_fast_path_applied
+        and any("\u0600" <= ch <= "\u06FF" for ch in clean_text)
     ):
         _arabic_only = _finalize_arabic_only(clean_text)
         if _arabic_only and _arabic_only != clean_text:
@@ -32644,6 +34242,7 @@ async def send_final_response(
 
     if should_trigger:
         timing.setdefault("xtts_send", time.perf_counter())
+        timing["answer_chars"] = len(response_text or "")
         # ---- TTS LANGUAGE GATE (Phase 7C — TASK 3) ----
         # The voice used to read the answer must follow the actual answer-text
         # script, never the UI flag. Otherwise the Arabic Piper voice ends up
@@ -32696,6 +34295,64 @@ async def send_final_response(
                     final_cache_hit,
                     tts_cache_hit,
                     query_cache_hit,
+                    branch,
+                )
+                timing["frontend_done_ms"] = total_ar_ms
+
+                def _detail_ms(*keys, fallback=None):
+                    for key in keys:
+                        value = timing.get(key)
+                        if value is None:
+                            continue
+                        try:
+                            return int(round(float(value)))
+                        except Exception:
+                            continue
+                    return fallback
+
+                classification_ms = _detail_ms("ar_query_classification_ms")
+                fast_query_ms = _detail_ms(
+                    "ar_fast_query_ms",
+                    "query_translation_ms",
+                    fallback=0 if timing.get("query_translation_skipped") else None,
+                )
+                retrieval_ms = _detail_ms(
+                    "ar_fast_retrieval_ms",
+                    "retrieval_after_translation_ms",
+                    "ar_native_retrieval_ms",
+                    fallback=None,
+                )
+                answer_generation_ms = _detail_ms(
+                    "answer_generation_ms",
+                    "comparison_synthesis_ms",
+                    "llm_generation_ms",
+                )
+                final_translation_ms = _detail_ms("final_translation_ms", fallback=0)
+                tts_wait_ms = _detail_ms("tts_wait_ms", fallback=0)
+                tts_synthesis_ms = _detail_ms("tts_synthesis_ms", "tts_ms", fallback=0)
+                audio_bytes = int(timing.get("audio_bytes") or 0)
+                answer_chars = len(response_text or "")
+                timing["answer_chars"] = answer_chars
+                logger.info(
+                    "[PERF AR DETAIL] classification_ms=%s fast_query_ms=%s retrieval_ms=%s "
+                    "answer_generation_ms=%s final_translation_ms=%s tts_wait_ms=%s "
+                    "tts_synthesis_ms=%s audio_bytes=%s answer_chars=%s total_ms=%s "
+                    "frontend_done_ms=%s query_cache_hit=%s final_translation_cache_hit=%s "
+                    "tts_cache_hit=%s branch=%s",
+                    classification_ms,
+                    fast_query_ms,
+                    retrieval_ms,
+                    answer_generation_ms,
+                    final_translation_ms,
+                    tts_wait_ms,
+                    tts_synthesis_ms,
+                    audio_bytes,
+                    answer_chars,
+                    total_ar_ms,
+                    total_ar_ms,
+                    query_cache_hit,
+                    final_cache_hit,
+                    tts_cache_hit,
                     branch,
                 )
             except Exception:
@@ -32804,6 +34461,34 @@ def _emit_perf_report(t_meta: dict, perf_start: float, query_text: str, answer_t
             f"xtts_first={_c(_p_xtts_ft)} xtts_total={_c(_p_xtts_tot)} "
             f"total_backend={_c(_p_total_be)} total_audio={_c(_p_total_au)}"
         )
+        if t_meta.get("ar_query_type") or _is_arabic_text(query_text):
+            def _meta_ms(*keys, fallback=None):
+                for key in keys:
+                    value = t_meta.get(key)
+                    if value is None:
+                        continue
+                    try:
+                        return int(round(float(value)))
+                    except Exception:
+                        continue
+                return fallback
+
+            _ar_class_ms = _meta_ms("ar_query_classification_ms")
+            _ar_query_ms = _meta_ms("ar_fast_query_ms", "query_translation_ms", fallback=0 if t_meta.get("query_translation_skipped") else None)
+            _ar_retrieval_ms = _meta_ms("ar_fast_retrieval_ms", "retrieval_after_translation_ms", "ar_native_retrieval_ms", fallback=_p_retrieval)
+            _ar_final_translation_ms = _meta_ms("final_translation_ms", fallback=0 if answer_text == RAG_NO_MATCH_RESPONSE else None)
+            _ar_tts_ms = _meta_ms("tts_ms", fallback=_p_xtts_tot)
+            _ar_total_ms = _meta_ms("total_arabic_backend_ms", fallback=_p_total_be)
+            logger.info(
+                "[AR PERF SUMMARY] type=%s classification_ms=%s query_translation_or_search_ms=%s retrieval_ms=%s final_translation_ms=%s tts_ms=%s total_ms=%s",
+                t_meta.get("ar_query_type") or "unknown",
+                _c(_ar_class_ms),
+                _c(_ar_query_ms),
+                _c(_ar_retrieval_ms),
+                _c(_ar_final_translation_ms),
+                _c(_ar_tts_ms),
+                _c(_ar_total_ms),
+            )
     except Exception:
         logger.exception("[PERF REPORT] _emit_perf_report failed")
 
@@ -32827,7 +34512,63 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     # "What about X?" as `unsupported_unclear` and short-circuit them. We
     # rewrite first so a real-entity question reaches the direct router (and
     # the follow-up router below) in canonical "What is X?" / "ما هي X؟" form.
-    text = _maybe_rewrite_about_entity_question(text)
+    if not _is_memory_rewrite_query(text) and not _is_marked_arabic_resolved_followup(connection_id, text):
+        text = _maybe_rewrite_about_entity_question(text)
+    # ---- P12C-1: ARABIC FOLLOW-UP REFERENCE RESOLUTION (call_llm_streaming) ----
+    try:
+        if not _is_memory_rewrite_query(text):
+            ar_resolved_s, ar_reason_s = _maybe_resolve_arabic_followup_reference(text, connection_id)
+            if ar_resolved_s and ar_resolved_s != text:
+                logger.info(
+                    "[AR FOLLOWUP MEMORY] resolved_query=%s reason=%s original=%s",
+                    ar_resolved_s[:200],
+                    ar_reason_s,
+                    (text or "")[:200],
+                )
+                text = ar_resolved_s
+    except Exception:
+        logger.exception("[AR FOLLOWUP MEMORY] call_llm_streaming resolution failed; continuing")
+    # ---- MEMORY REWRITE ROUTE (highest priority) -----------------------
+    # Summary/rephrase/simplify requests operate only on the last grounded
+    # answer and must not enter translation, retrieval, reranking, or LLM gen.
+    try:
+        if _is_memory_rewrite_query(text):
+            mem_t0 = time.perf_counter()
+            mem_t_meta = t_meta if isinstance(t_meta, dict) else {}
+            mem_t_meta.setdefault("request_start", mem_t0)
+            mem_t_meta["query_translation_ms"] = 0
+            mem_t_meta["query_translation_skipped"] = True
+            mem_t_meta["retrieval_after_translation_ms"] = 0
+            mem_lang = _resolve_user_language(text, language)
+            if mem_lang == "ar":
+                mem_class_t0 = time.perf_counter()
+                mem_type = _classify_arabic_query_type(text)
+                mem_t_meta["ar_query_type"] = mem_type
+                mem_t_meta["ar_query_classification_ms"] = int(round((time.perf_counter() - mem_class_t0) * 1000))
+                logger.info("[AR QUERY TYPE] type=%s", mem_type)
+            mem_text, _mem_docs = await _handle_memory_rewrite_query(text, connection_id)
+            mem_text = (mem_text or "").strip() or RAG_NO_MATCH_RESPONSE
+            try:
+                history = conversation_history[connection_id]
+                history.append({"role": "user", "content": (text or "").strip()})
+                history.append({"role": "assistant", "content": mem_text})
+            except Exception:
+                pass
+            await send_final_response(
+                connection_id,
+                mem_text,
+                "ar" if mem_lang == "ar" else XTTS_LANGUAGE,
+                not EFFECTIVE_DISABLE_TTS,
+                websocket=websocket,
+                sources=0,
+                arabic_mode=(mem_lang == "ar"),
+                t_meta=mem_t_meta,
+                branch="memory_rewrite_defensive",
+            )
+            _emit_perf_report(mem_t_meta, mem_t0, text, mem_text, connection_id)
+            return
+    except Exception:
+        logger.exception("[MEMORY SUMMARY MODE] defensive route failed; continuing")
     # ---- PRE-RAG ROUTER (defensive for voice / non-typed callers) --------
     try:
         if text and len(str(text).strip()) >= 2:
@@ -32837,6 +34578,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                 route_lang = _route_response_language(text, language)
                 direct_answer = _direct_route_answer(text, direct_route, route_lang)
                 _log_direct_route_handled(direct_route, text, route_lang)
+                if direct_answer == RAG_NO_MATCH_RESPONSE:
+                    try:
+                        _save_last_answer_state(connection_id, text, direct_answer, [])
+                    except Exception:
+                        logger.exception("[FOLLOWUP] save state failed (WS defensive direct not-found)")
                 try:
                     _append_conversation_turn(connection_id, text, direct_answer)
                 except Exception:
@@ -32880,7 +34626,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     # is emitted, so the log can never falsely indicate that a follow-up
     # entered the heavy RAG path.
     try:
-        if _is_followup_query(text, connection_id):
+        if _is_followup_query(text, connection_id) and not _is_marked_arabic_resolved_followup(connection_id, text):
             logger.error("🔥 FOLLOWUP ROUTE TRIGGERED (defensive in call_llm_streaming)")
             logger.info("[FOLLOWUP] WS follow-up detected (defensive): '%s'", (text or "")[:80])
             fu_t0 = time.perf_counter()
@@ -33020,9 +34766,16 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     arabic_mode = (language == "ar")
     xtts_lang = "ar" if arabic_mode else XTTS_LANGUAGE
     original_arabic_text = text  # preserve for later use
+    ar_query_type = ""
+    if arabic_mode:
+        ar_classify_t0 = time.perf_counter()
+        ar_query_type = _classify_arabic_query_type(original_arabic_text)
+        t_meta["ar_query_type"] = ar_query_type
+        t_meta["ar_query_classification_ms"] = int(round((time.perf_counter() - ar_classify_t0) * 1000))
+        logger.info("[AR QUERY TYPE] type=%s", ar_query_type)
     logger.info(
         "[LANG ROUTE] original_language=%s ui_language=%s retrieval_query_language=%s final_language=%s",
-        language, _ui_language_in, ("en" if arabic_mode else language), language,
+        language, _ui_language_in, ("en_fast_hybrid" if ar_query_type == "explanation" else ("ar_native_first" if arabic_mode else language)), language,
     )
     _prefetched_rag_docs = None  # cached from Arabic guard check to avoid double RAG search
 
@@ -33057,11 +34810,6 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         else:
             arabic_small_talk = False
 
-            # ---- Fire ack audio AND translate concurrently ----
-            # Previously these were sequential: ack (~20ms) → translate (~700-900ms).
-            # Running them in parallel shaves the ack-send time from the critical path.
-            logger.info(f"{connection_id} Arabic mode: translating query to English…")
-
             async def _send_ack_coro():
                 if _arabic_ack_pcm:
                     try:
@@ -33072,6 +34820,329 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                         t_meta["first_ack_sent"] = time.perf_counter()
                     except Exception:
                         pass
+
+            async def _native_retrieval_coro():
+                if ar_query_type == "explanation":
+                    logger.info("[AR NATIVE RETRIEVAL] skipped=True reason=explanation_fast_hybrid")
+                    t_native_skip = time.perf_counter()
+                    t_meta["ar_native_retrieval_start"] = t_native_skip
+                    t_meta["ar_native_retrieval_end"] = t_native_skip
+                    t_meta["ar_native_retrieval_ms"] = 0
+                    return False, "explanation_fast_hybrid", [], {}
+                logger.info("[AR NATIVE RETRIEVAL] start original_query=%s", str(original_arabic_text or text)[:240])
+                t_native_start = time.perf_counter()
+                t_meta["ar_native_retrieval_start"] = t_native_start
+                native_docs: list[dict] = []
+                try:
+                    merged_docs: list[dict] = []
+                    seen_docs: set[tuple[str, str, str]] = set()
+                    native_queries = _native_arabic_retrieval_queries(original_arabic_text)
+                    for idx, native_query in enumerate(native_queries):
+                        found_docs = live_rag.search(
+                            native_query,
+                            top_k=10 if idx == 0 else 6,
+                            distance_threshold=_distance_threshold_for_query(native_query),
+                            return_dicts=True,
+                            enable_rerank=True,
+                        ) or []
+                        logger.info(
+                            "[AR NATIVE RETRIEVAL] probe=%s docs=%s query=%s",
+                            idx + 1,
+                            len(found_docs or []),
+                            str(native_query or "")[:160],
+                        )
+                        for doc in _filter_results_to_active_sources(found_docs):
+                            metadata = (doc or {}).get("metadata") or {}
+                            key = (
+                                str((doc or {}).get("source") or metadata.get("source") or metadata.get("file") or ""),
+                                str((doc or {}).get("page") or metadata.get("page") or ""),
+                                str((doc or {}).get("text") or (doc or {}).get("page_content") or (doc or {}).get("content") or "")[:220],
+                            )
+                            if key in seen_docs:
+                                continue
+                            seen_docs.add(key)
+                            merged_docs.append(doc)
+                    native_docs = merged_docs[:12]
+                    logger.info("[RERANK ACTIVE]")
+                except Exception:
+                    logger.exception("[AR NATIVE RETRIEVAL] search_failed=True")
+                    native_docs = []
+                native_docs = _filter_results_to_active_sources(native_docs)
+                accepted, reason, native_metrics = _assess_native_arabic_retrieval(original_arabic_text, native_docs)
+                t_native_end = time.perf_counter()
+                t_meta["ar_native_retrieval_end"] = t_native_end
+                t_meta["ar_native_retrieval_ms"] = int(round((t_native_end - t_native_start) * 1000))
+                best_score = float(native_metrics.get("best_score", 0.0) or 0.0)
+                logger.info(
+                    "[AR NATIVE RETRIEVAL] docs=%s best_score=%.4f best_rank_score=%.4f coverage=%.3f focus=%.3f semantic_density=%.3f",
+                    len(native_docs or []),
+                    best_score,
+                    float(native_metrics.get("best_rank_score", 0.0) or 0.0),
+                    float(native_metrics.get("coverage", 0.0) or 0.0),
+                    float(native_metrics.get("focus_ratio", 0.0) or 0.0),
+                    float(native_metrics.get("semantic_density", 0.0) or 0.0),
+                )
+                logger.info("[AR NATIVE RETRIEVAL] accepted=%s reason=%s", bool(accepted), reason)
+                return accepted, reason, native_docs, native_metrics
+
+            _, native_result = await asyncio.gather(_send_ack_coro(), _native_retrieval_coro())
+            native_accepted, native_reason, native_docs, native_metrics = native_result
+            protected_terms = _extract_protected_exact_query_terms(original_arabic_text)
+            if ar_query_type == "explanation":
+                t_fast_query_start = time.perf_counter()
+                t_meta["query_translation_start"] = t_fast_query_start
+                text_for_rag, fast_query_provider = await _build_fast_arabic_explanation_query(original_arabic_text, t_meta)
+                t_translate_done = time.perf_counter()
+                t_meta["translate_done"] = t_translate_done
+                t_meta["query_translation_end"] = t_translate_done
+                if not text_for_rag:
+                    fallback_text = RAG_NO_MATCH_RESPONSE
+                    logger.info("[AR FAST RETRIEVAL] skipped=True reason=empty_fast_query returning_not_found=True")
+                    t_meta.setdefault("routing_end", time.perf_counter())
+                    try:
+                        _save_last_answer_state(connection_id, original_arabic_text, fallback_text, [])
+                        _append_conversation_turn(connection_id, original_arabic_text, fallback_text)
+                    except Exception:
+                        logger.exception("[FOLLOWUP] save state failed (AR fast query empty)")
+                    try:
+                        await send_final_response(
+                            connection_id,
+                            fallback_text,
+                            XTTS_LANGUAGE,
+                            not EFFECTIVE_DISABLE_TTS,
+                            websocket=websocket,
+                            sources=0,
+                            arabic_mode=False,
+                            t_meta=t_meta,
+                            branch="arabic_fast_explanation_empty_query",
+                        )
+                    except Exception:
+                        pass
+                    _emit_perf_report(t_meta, perf_start, original_arabic_text, fallback_text, connection_id)
+                    return
+
+                t_ar_retrieval_start = time.perf_counter()
+                t_meta["retrieval_after_translation_start"] = t_ar_retrieval_start
+                rag_docs_check = _search_fast_minimal(text_for_rag, top_k=10) or []
+                if protected_terms:
+                    rag_docs_check = _filter_docs_by_protected_terms(rag_docs_check or [], protected_terms)
+                t_ar_retrieval_end = time.perf_counter()
+                t_meta["retrieval_after_translation_end"] = t_ar_retrieval_end
+                retrieval_after_translation_ms = int(round((t_ar_retrieval_end - t_ar_retrieval_start) * 1000))
+                t_meta["retrieval_after_translation_ms"] = retrieval_after_translation_ms
+                t_meta["ar_fast_retrieval_ms"] = retrieval_after_translation_ms
+                t_meta["ar_fast_explanation_single_retrieval"] = True
+                non_llm_accepted, non_llm_reason, non_llm_metrics = _assess_native_arabic_retrieval(text_for_rag, rag_docs_check)
+                fast_retrieval_weak = not non_llm_accepted
+                _ar_non_llm_query_cache_update_strength(
+                    original_arabic_text,
+                    text_for_rag,
+                    non_llm_accepted,
+                    non_llm_reason,
+                    non_llm_metrics,
+                )
+                logger.info(
+                    "[AR FAST RETRIEVAL] query=%s provider=%s docs=%s weak=%s time_ms=%s",
+                    text_for_rag[:180],
+                    fast_query_provider,
+                    len(rag_docs_check or []),
+                    bool(fast_retrieval_weak),
+                    retrieval_after_translation_ms,
+                )
+                if fast_retrieval_weak:
+                    logger.info("[AR FAST RETRIEVAL] accepted=False reason=weak_non_llm_evidence")
+                    t_meta["ar_fast_explanation_single_retrieval"] = False
+                    external_text_for_rag, external_query_provider = await _build_external_arabic_explanation_query(original_arabic_text, t_meta)
+                    external_rag_docs_check: list[dict] = []
+                    external_retrieval_weak = True
+                    if external_text_for_rag:
+                        t_external_retrieval_start = time.perf_counter()
+                        external_rag_docs_check = _search_fast_minimal(external_text_for_rag, top_k=10) or []
+                        if protected_terms:
+                            external_rag_docs_check = _filter_docs_by_protected_terms(external_rag_docs_check or [], protected_terms)
+                        t_external_retrieval_end = time.perf_counter()
+                        external_retrieval_ms = int(round((t_external_retrieval_end - t_external_retrieval_start) * 1000))
+                        t_meta["ar_external_fallback_retrieval_ms"] = external_retrieval_ms
+                        external_retrieval_weak = _translation_retrieval_is_weak(external_text_for_rag, external_rag_docs_check)
+                        logger.info(
+                            "[AR FAST RETRIEVAL] query=%s provider=%s docs=%s weak=%s time_ms=%s",
+                            external_text_for_rag[:180],
+                            external_query_provider,
+                            len(external_rag_docs_check or []),
+                            bool(external_retrieval_weak),
+                            external_retrieval_ms,
+                        )
+                    else:
+                        logger.info("[AR NON-LLM QUERY FALLBACK] skipped=True reason=empty_external_query")
+
+                    if external_text_for_rag and not external_retrieval_weak:
+                        logger.info("[AR LLM QUERY FALLBACK] used=False reason=external_non_llm_evidence_strong")
+                        t_meta["ar_llm_query_fallback_used"] = False
+                        t_meta["ar_llm_query_fallback_logged"] = True
+                        text_for_rag = external_text_for_rag
+                        fast_query_provider = external_query_provider
+                        rag_docs_check = external_rag_docs_check
+                    else:
+                        if external_text_for_rag:
+                            logger.info("[AR FAST RETRIEVAL] accepted=False reason=weak_external_non_llm_evidence")
+                        logger.info("[AR LLM QUERY FALLBACK] used=True reason=weak_non_llm_evidence")
+                        t_meta["ar_llm_query_fallback_used"] = True
+                        t_meta["ar_llm_query_fallback_logged"] = True
+                        llm_text_for_rag, llm_query_provider = await _build_llm_arabic_explanation_query(original_arabic_text, t_meta)
+                        t_translate_done = time.perf_counter()
+                        t_meta["translate_done"] = t_translate_done
+                        t_meta["query_translation_end"] = t_translate_done
+                        if not llm_text_for_rag:
+                            fallback_text = RAG_NO_MATCH_RESPONSE
+                            logger.info("[AR FAST RETRIEVAL] skipped=True reason=empty_llm_fallback_query returning_not_found=True")
+                            t_meta.setdefault("routing_end", time.perf_counter())
+                            try:
+                                _save_last_answer_state(connection_id, original_arabic_text, fallback_text, [])
+                                _append_conversation_turn(connection_id, original_arabic_text, fallback_text)
+                            except Exception:
+                                logger.exception("[FOLLOWUP] save state failed (AR llm fallback query empty)")
+                            try:
+                                await send_final_response(
+                                    connection_id,
+                                    fallback_text,
+                                    XTTS_LANGUAGE,
+                                    not EFFECTIVE_DISABLE_TTS,
+                                    websocket=websocket,
+                                    sources=0,
+                                    arabic_mode=False,
+                                    t_meta=t_meta,
+                                    branch="arabic_fast_explanation_empty_llm_fallback_query",
+                                )
+                            except Exception:
+                                pass
+                            _emit_perf_report(t_meta, perf_start, original_arabic_text, fallback_text, connection_id)
+                            return
+
+                        t_llm_retrieval_start = time.perf_counter()
+                        t_meta["retrieval_after_translation_start"] = t_llm_retrieval_start
+                        llm_rag_docs_check = _search_fast_minimal(llm_text_for_rag, top_k=10) or []
+                        if protected_terms:
+                            llm_rag_docs_check = _filter_docs_by_protected_terms(llm_rag_docs_check or [], protected_terms)
+                        t_llm_retrieval_end = time.perf_counter()
+                        t_meta["retrieval_after_translation_end"] = t_llm_retrieval_end
+                        llm_retrieval_ms = int(round((t_llm_retrieval_end - t_llm_retrieval_start) * 1000))
+                        t_meta["retrieval_after_translation_ms"] = llm_retrieval_ms
+                        t_meta["ar_llm_fallback_retrieval_ms"] = llm_retrieval_ms
+                        fallback_retrieval_weak = _translation_retrieval_is_weak(llm_text_for_rag, llm_rag_docs_check)
+                        logger.info(
+                            "[AR FAST RETRIEVAL] query=%s provider=%s docs=%s weak=%s time_ms=%s",
+                            llm_text_for_rag[:180],
+                            llm_query_provider,
+                            len(llm_rag_docs_check or []),
+                            bool(fallback_retrieval_weak),
+                            llm_retrieval_ms,
+                        )
+                        if fallback_retrieval_weak:
+                            fallback_text = RAG_NO_MATCH_RESPONSE
+                            logger.info("[AR FAST RETRIEVAL] accepted=False reason=weak_llm_fallback_evidence returning_not_found=True")
+                            t_meta.setdefault("routing_end", time.perf_counter())
+                            try:
+                                _save_last_answer_state(connection_id, original_arabic_text, fallback_text, [])
+                                _append_conversation_turn(connection_id, original_arabic_text, fallback_text)
+                            except Exception:
+                                logger.exception("[FOLLOWUP] save state failed (AR fast explanation weak)")
+                            try:
+                                await send_final_response(
+                                    connection_id,
+                                    fallback_text,
+                                    XTTS_LANGUAGE,
+                                    not EFFECTIVE_DISABLE_TTS,
+                                    websocket=websocket,
+                                    sources=0,
+                                    arabic_mode=False,
+                                    t_meta=t_meta,
+                                    branch="arabic_fast_explanation_not_found",
+                                )
+                            except Exception:
+                                pass
+                            _emit_perf_report(t_meta, perf_start, original_arabic_text, fallback_text, connection_id)
+                            return
+                        text_for_rag = llm_text_for_rag
+                        fast_query_provider = llm_query_provider
+                        rag_docs_check = llm_rag_docs_check
+                else:
+                    logger.info("[AR LLM QUERY FALLBACK] used=False")
+                    t_meta["ar_llm_query_fallback_used"] = False
+                    t_meta["ar_llm_query_fallback_logged"] = True
+                native_docs = rag_docs_check
+                native_accepted = True
+                native_reason = "explanation_fast_hybrid"
+                native_metrics = {}
+                protected_terms = []
+                text = text_for_rag
+            if protected_terms and not _docs_contain_all_protected_terms(native_docs, protected_terms):
+                exact_query = " ".join(protected_terms)
+                exact_docs: list[dict] = []
+                try:
+                    exact_docs = live_rag.search(
+                        exact_query,
+                        top_k=5,
+                        distance_threshold=max(_distance_threshold_for_query(exact_query), 1.10),
+                        return_dicts=True,
+                        enable_rerank=True,
+                    ) or []
+                    logger.info("[RERANK ACTIVE]")
+                except Exception:
+                    logger.exception("[AR EXACT ENTITY GUARD] exact_retrieval_failed=True terms=%s", protected_terms)
+                    exact_docs = []
+                exact_docs = _filter_docs_by_protected_terms(_filter_results_to_active_sources(exact_docs), protected_terms)
+                logger.info(
+                    "[AR EXACT ENTITY GUARD] protected_terms=%s exact_docs=%s",
+                    protected_terms,
+                    len(exact_docs or []),
+                )
+                if exact_docs:
+                    native_docs = exact_docs
+                    native_accepted = True
+                    native_reason = "strong_evidence"
+                    native_metrics = dict(native_metrics or {})
+                    native_metrics["protected_exact_hit"] = 1.0
+                    logger.info("[AR NATIVE RETRIEVAL] accepted=True reason=strong_evidence")
+                else:
+                    fallback_text = RAG_NO_MATCH_RESPONSE
+                    logger.info("[AR EXACT ENTITY GUARD] exact_evidence_found=False returning_not_found=True")
+                    try:
+                        _save_last_answer_state(connection_id, original_arabic_text, fallback_text, [])
+                        _append_conversation_turn(connection_id, original_arabic_text, fallback_text)
+                    except Exception:
+                        logger.exception("[FOLLOWUP] save state failed (AR exact entity not-found)")
+                    try:
+                        await send_final_response(
+                            connection_id,
+                            fallback_text,
+                            XTTS_LANGUAGE,
+                            not EFFECTIVE_DISABLE_TTS,
+                            websocket=websocket,
+                            sources=0,
+                            arabic_mode=False,
+                            t_meta=t_meta,
+                            branch="arabic_exact_entity_not_found",
+                        )
+                    except Exception:
+                        pass
+                    _emit_perf_report(t_meta, perf_start, original_arabic_text, fallback_text, connection_id)
+                    return
+
+            if native_accepted:
+                if ar_query_type == "explanation":
+                    fallback_used = bool(t_meta.get("ar_llm_query_fallback_used"))
+                    t_meta["query_translation_skipped"] = not fallback_used
+                    if not t_meta.get("ar_llm_query_fallback_logged"):
+                        logger.info("[AR LLM QUERY FALLBACK] used=%s", fallback_used)
+                else:
+                    t_meta["query_translation_ms"] = 0
+                    t_meta["query_translation_skipped"] = True
+                    t_meta["query_translation_cache_hit"] = False
+                    logger.info("[AR TRANSLATION FALLBACK] used=False")
+                _prefetched_rag_docs = native_docs
+            else:
+                logger.info("[AR TRANSLATION FALLBACK] used=True")
+                logger.info(f"{connection_id} Arabic mode: native retrieval weak; translating query to English…")
 
             async def _translate_coro():
                 nonlocal _translate_was_cached
@@ -33118,75 +35189,81 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                     except Exception:
                         return text
 
-            # Run ack send and translation truly in parallel
-            t_query_translation_start = time.perf_counter()
-            t_meta["query_translation_start"] = t_query_translation_start
-            _, text_for_rag = await asyncio.gather(_send_ack_coro(), _translate_coro())
-            t_translate_done = time.perf_counter()
-            t_meta["translate_done"] = t_translate_done
-            t_meta["query_translation_end"] = t_translate_done
-            query_translation_ms = int(round((t_translate_done - t_query_translation_start) * 1000))
-            t_meta["query_translation_ms"] = query_translation_ms
-            logger.info(
-                "[AR PERF] query_translation_ms=%s cache_hit=%s",
-                query_translation_ms,
-                bool(_translate_was_cached),
-            )
-            logger.info(f"Translation (Arabic→English): '{text[:60]}' → '{text_for_rag[:60]}'")
-
-            # 3. Search RAG with the translated English text (cache result to avoid double search below)
-            rag_docs_check = None
-            print("[DEBUG] FINAL QUERY:", text_for_rag)
-            print("[DEBUG] TOP_K:", 10)
-            t_ar_retrieval_start = time.perf_counter()
-            t_meta["retrieval_after_translation_start"] = t_ar_retrieval_start
-            rag_docs_check = _search_with_query_expansion(
-                text_for_rag,
-                top_k=10,
-                distance_threshold=_distance_threshold_for_query(text_for_rag),
-                return_dicts=True,
-            )
-            if (not rag_docs_check) and _is_overview_query(text_for_rag):
-                rag_docs_check = live_rag.search(
-                    _overview_seed_query(),
-                    top_k=5,
-                    distance_threshold=max(_distance_threshold_for_query(text_for_rag), 1.50),
-                    return_dicts=True,
-                    enable_rerank=True,
+            if not native_accepted:
+                t_query_translation_start = time.perf_counter()
+                t_meta["query_translation_start"] = t_query_translation_start
+                text_for_rag = await _translate_coro()
+                t_translate_done = time.perf_counter()
+                t_meta["translate_done"] = t_translate_done
+                t_meta["query_translation_end"] = t_translate_done
+                query_translation_ms = int(round((t_translate_done - t_query_translation_start) * 1000))
+                t_meta["query_translation_ms"] = query_translation_ms
+                logger.info(
+                    "[AR PERF] query_translation_ms=%s cache_hit=%s",
+                    query_translation_ms,
+                    bool(_translate_was_cached),
                 )
-                logger.info("[RERANK ACTIVE]")
-                logger.info("%s Arabic overview fallback retrieval used | docs=%s", connection_id, len(rag_docs_check))
-            t_ar_retrieval_end = time.perf_counter()
-            t_meta["retrieval_after_translation_end"] = t_ar_retrieval_end
-            retrieval_after_translation_ms = int(round((t_ar_retrieval_end - t_ar_retrieval_start) * 1000))
-            t_meta["retrieval_after_translation_ms"] = retrieval_after_translation_ms
-            logger.info(
-                "[AR PERF] retrieval_after_translation_ms=%s docs=%s",
-                retrieval_after_translation_ms,
-                len(rag_docs_check or []),
-            )
-            _prefetched_rag_docs = rag_docs_check  # reuse in the main RAG block
-            if not rag_docs_check:
-                # Off-topic: no relevant docs in the knowledge base → Arabic refusal
-                logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
-                try:
-                    fallback_text = ARABIC_OFF_TOPIC_RESPONSE
-                    await send_final_response(
-                        connection_id,
-                        fallback_text,
-                        "ar",
-                        not EFFECTIVE_DISABLE_TTS,
-                        websocket=websocket,
-                        sources=0,
-                        arabic_mode=True,
-                        t_meta=t_meta,
-                        branch="arabic_offtopic",
+                logger.info(f"Translation (Arabic→English): '{text[:60]}' → '{text_for_rag[:60]}'")
+
+                rag_docs_check = None
+                print("[DEBUG] FINAL QUERY:", text_for_rag)
+                print("[DEBUG] TOP_K:", 10)
+                t_ar_retrieval_start = time.perf_counter()
+                t_meta["retrieval_after_translation_start"] = t_ar_retrieval_start
+                rag_docs_check = _search_with_query_expansion(
+                    text_for_rag,
+                    top_k=10,
+                    distance_threshold=_distance_threshold_for_query(text_for_rag),
+                    return_dicts=True,
+                )
+                if protected_terms:
+                    rag_docs_check = _filter_docs_by_protected_terms(rag_docs_check or [], protected_terms)
+                if (not rag_docs_check) and _is_overview_query(text_for_rag):
+                    rag_docs_check = live_rag.search(
+                        _overview_seed_query(),
+                        top_k=5,
+                        distance_threshold=max(_distance_threshold_for_query(text_for_rag), 1.50),
+                        return_dicts=True,
+                        enable_rerank=True,
                     )
-                except Exception:
-                    pass
-                return
-            # Use the English translation for RAG
-            text = text_for_rag
+                    logger.info("[RERANK ACTIVE]")
+                    logger.info("%s Arabic overview fallback retrieval used | docs=%s", connection_id, len(rag_docs_check))
+                text_for_rag, rag_docs_check = await _maybe_improve_arabic_translation_retrieval(
+                    original_arabic_text,
+                    text_for_rag,
+                    rag_docs_check,
+                    protected_terms,
+                    t_meta,
+                )
+                t_ar_retrieval_end = time.perf_counter()
+                t_meta["retrieval_after_translation_end"] = t_ar_retrieval_end
+                retrieval_after_translation_ms = int(round((t_ar_retrieval_end - t_ar_retrieval_start) * 1000))
+                t_meta["retrieval_after_translation_ms"] = retrieval_after_translation_ms
+                logger.info(
+                    "[AR PERF] retrieval_after_translation_ms=%s docs=%s",
+                    retrieval_after_translation_ms,
+                    len(rag_docs_check or []),
+                )
+                _prefetched_rag_docs = rag_docs_check
+                if not rag_docs_check:
+                    logger.info(f"{connection_id} Arabic off-topic guard triggered — no RAG docs found for: {text_for_rag[:60]}")
+                    try:
+                        fallback_text = RAG_NO_MATCH_RESPONSE if protected_terms else ARABIC_OFF_TOPIC_RESPONSE
+                        await send_final_response(
+                            connection_id,
+                            fallback_text,
+                            XTTS_LANGUAGE if protected_terms else "ar",
+                            not EFFECTIVE_DISABLE_TTS,
+                            websocket=websocket,
+                            sources=0,
+                            arabic_mode=False if protected_terms else True,
+                            t_meta=t_meta,
+                            branch="arabic_translation_fallback_no_docs",
+                        )
+                    except Exception:
+                        pass
+                    return
+                text = text_for_rag
     else:
         arabic_small_talk = False
 
@@ -33201,8 +35278,20 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
     elif _prefetched_rag_docs is not None:
         # Arabic path: reuse result from guard check — avoids a second identical RAG search
         relevant_docs = _prefetched_rag_docs
-        t_meta["retrieval_start"] = t_meta.get("routing_end")
-        t_meta["retrieval_end"] = t_meta.get("routing_end")
+        if t_meta.get("ar_fast_explanation_single_retrieval"):
+            t_meta["retrieval_start"] = t_meta.get("retrieval_after_translation_start") or t_meta.get("routing_end")
+            t_meta["retrieval_end"] = t_meta.get("retrieval_after_translation_end") or t_meta.get("routing_end")
+        else:
+            t_meta["retrieval_start"] = (
+                t_meta.get("ar_native_retrieval_start")
+                or t_meta.get("retrieval_after_translation_start")
+                or t_meta.get("routing_end")
+            )
+            t_meta["retrieval_end"] = (
+                t_meta.get("ar_native_retrieval_end")
+                or t_meta.get("retrieval_after_translation_end")
+                or t_meta.get("routing_end")
+            )
     else:
         retrieval_start = time.perf_counter()
         t_meta["retrieval_start"] = retrieval_start
@@ -33323,6 +35412,11 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             f"(threshold={RAG_STRICT_DISTANCE_THRESHOLD:.2f})"
         )
         fallback_text = ARABIC_OFF_TOPIC_RESPONSE if arabic_mode else _apply_not_found_ux(text, RAG_NO_MATCH_RESPONSE, [])
+        try:
+            _save_last_answer_state(connection_id, text, fallback_text, [])
+            _append_conversation_turn(connection_id, text, fallback_text)
+        except Exception:
+            logger.exception("[FOLLOWUP] save state failed (WS no docs)")
         try:
             await send_final_response(
                 connection_id,
@@ -33668,7 +35762,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             family_v2_current in {"list_entity", "toc_structure"}
             or family_legacy_current in {"list_structure", "overview_chapter_compare"}
         )
-        if needs_early_section_rerank and doc_dicts:
+        if needs_early_section_rerank and doc_dicts and not bool(t_meta.get("ar_fast_explanation_single_retrieval")):
             pool_before = len(doc_dicts)
             rerank_top_k = min(max(6, pool_before), 12)
             doc_dicts = _rerank_docs_for_query_intent(text, doc_dicts)
@@ -33833,12 +35927,14 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         )
         if explanation_mode and not is_generation_query_requested:
             explanation_source_docs = explanation_candidate_doc_dicts or doc_dicts
+            answer_generation_t0 = time.perf_counter()
             explanation_answer = await _build_controlled_explanation_answer(
                 text,
                 explanation_source_docs,
                 language=("ar" if arabic_mode else "en"),
                 original_query_text=(original_arabic_text if arabic_mode else original_query_text),
             )
+            t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
             explanation_answer = str(explanation_answer or "").strip() or RAG_NO_MATCH_RESPONSE
             try:
                 _save_last_answer_state(connection_id, text, explanation_answer, explanation_source_docs)
@@ -34122,8 +36218,10 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         # Fast/simple early selector for definition/list/overview queries.
         stream_pre_simple = {"used_llm": True, "answer_type": "doc_router_multi_source"}
         if doc_router_mode != "multi_source_synthesis":
+            answer_generation_t0 = time.perf_counter()
             stream_pre_simple = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
             stream_pre_simple = _enforce_runtime_answer_acceptance(text, stream_pre_simple, doc_dicts)
+            t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
         else:
             logger.info("[DOC ROUTER] deterministic_bypass=pre_simple reason=multi_source_synthesis")
         if not stream_pre_simple.get("used_llm", True):
@@ -34943,8 +37041,10 @@ STRICT BEHAVIOR:
         stream_pre_decision = {"used_llm": True, "answer_type": "doc_router_multi_source"}
         logger.info("[DOC ROUTER] deterministic_bypass=stream_pre_decision reason=multi_source_synthesis")
     else:
+        answer_generation_t0 = time.perf_counter()
         stream_pre_decision = _shared_rag_final_answer_decision(text, doc_dicts)
         stream_pre_decision = _enforce_runtime_answer_acceptance(text, stream_pre_decision, doc_dicts)
+        t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
     stream_short_circuit_non_llm = not stream_pre_decision.get("used_llm", True)
     logger.info("[TRACE STREAM] short_circuit_non_llm=%s", stream_short_circuit_non_llm)
     logger.info("[TRACE STREAM] used_llm=%s", stream_pre_decision.get("used_llm", True))
@@ -35093,8 +37193,10 @@ STRICT BEHAVIOR:
     user_role = user.get("role", "unknown")
     query_length = len(text.strip())
 
+    answer_generation_t0 = time.perf_counter()
     deterministic_decision = _shared_rag_final_answer_decision(text, doc_dicts, llm_text=None)
     deterministic_decision = _enforce_runtime_answer_acceptance(text, deterministic_decision, doc_dicts)
+    t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
     if not deterministic_decision.get("used_llm", True):
         deterministic_answer = (deterministic_decision.get("answer") or RAG_NO_MATCH_RESPONSE).strip()
         if deterministic_answer == RAG_NO_MATCH_RESPONSE:
@@ -35107,6 +37209,8 @@ STRICT BEHAVIOR:
             deterministic_answer = _ws_fix_explanation_answer(text, deterministic_answer, doc_dicts)
         try:
             _log_answer_mode_markers(text, doc_dicts, deterministic_answer, source_mode="extractor")
+            _save_last_answer_state(connection_id, text, deterministic_answer, doc_dicts)
+            _append_conversation_turn(connection_id, text, deterministic_answer)
             await websocket.send_json({"type": "thinking"})
             await send_final_response(
                 connection_id,
@@ -35937,6 +38041,13 @@ STRICT BEHAVIOR:
         t_meta["llm_first_token"] = first_token_time
         t_meta["llm_full_response"] = t_llm_done
         t_meta["vram_llm_active"] = vram_llm_active
+        try:
+            answer_generation_start = float(t_meta.get("llm_send") or t_meta.get("context_focus_end") or perf_start)
+            answer_generation_ms = int(round((t_llm_done - answer_generation_start) * 1000))
+            t_meta["answer_generation_ms"] = answer_generation_ms
+            t_meta["llm_generation_ms"] = answer_generation_ms
+        except Exception:
+            pass
 
         first_token_ms = ((first_token_time - perf_start) * 1000) if first_token_time else None
         first_sentence_ms = ((first_sentence_time - perf_start) * 1000) if first_sentence_time else None
@@ -36228,7 +38339,7 @@ async def query_rag(data: QueryRequest, request: Request, user=Depends(require_l
     # Apply about-entity rewrite up-front so downstream follow-up post-checks
     # and definition cleanup see the same standalone-question form that
     # call_llm_with_rag will use internally.
-    _post_text = _maybe_rewrite_about_entity_question(data.text)
+    _post_text = data.text if _is_memory_rewrite_query(data.text) else _maybe_rewrite_about_entity_question(data.text)
     ai_response, retrieved_docs = await call_llm_with_rag(_post_text, connection_id, user)
     if persistent_conversation_id:
         append_conversation_message(persistent_conversation_id, "assistant", ai_response)
@@ -37895,7 +40006,7 @@ async def tts_endpoint(req: TTSRequest, request: Request):
 
 # ========== WEBSOCKET: Real-time audio -> faster-whisper -> LLM bridge ==========
 @app.websocket("/ws")
-async def rag_ws_endpoint(websocket: WebSocket):
+async def rag_ws_endpoint(websocket: WebSocket):  # pyright: ignore
     global _active_voice_task, _active_voice_conn_id
     global _sessions_blocked, _sessions_blocked_since, _consecutive_gpu_growth, _consecutive_cpu_growth
     await websocket.accept()
@@ -38255,7 +40366,23 @@ async def rag_ws_endpoint(websocket: WebSocket):
                     # ---- ABOUT-ENTITY STANDALONE REWRITE (voice path) ----
                     # Same shared helper as the typed-text path so behavior
                     # cannot drift between voice and text.
-                    full_text = _maybe_rewrite_about_entity_question(full_text)
+                    if not _is_memory_rewrite_query(full_text):
+                        full_text = _maybe_rewrite_about_entity_question(full_text)
+
+                    # ---- P12C-1: ARABIC FOLLOW-UP REFERENCE RESOLUTION (voice) --
+                    try:
+                        if not _is_memory_rewrite_query(full_text):
+                            ar_resolved_v, ar_reason_v = _maybe_resolve_arabic_followup_reference(full_text, conn_id)
+                            if ar_resolved_v and ar_resolved_v != full_text:
+                                logger.info(
+                                    "[AR FOLLOWUP MEMORY] resolved_query=%s reason=%s original=%s",
+                                    ar_resolved_v[:200],
+                                    ar_reason_v,
+                                    (full_text or "")[:200],
+                                )
+                                full_text = ar_resolved_v
+                    except Exception:
+                        logger.exception("[AR FOLLOWUP MEMORY] voice resolution failed; continuing")
 
                     # Voice answers follow the explicit UI language lock used for STT.
                     lang = requested_voice_lang
@@ -38530,6 +40657,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                             msg_lang = str(payload.get("language", session_language) or session_language).strip().lower()
                             if msg_lang in ("en", "ar"):
                                 session_language = msg_lang  # update session preference
+                            force_final_language_for_rewrite = None
                             if text:
                                 conversation_id_for_text = _activate_conversation(payload.get("conversation_id"))
                                 conversation_ws = _conversation_ws(conversation_id_for_text)
@@ -38538,32 +40666,112 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 except Exception:
                                     logger.exception("[CONV] failed to persist user message id=%s", conversation_id_for_text)
 
+                                # ---- P12C-1: ARABIC FOLLOW-UP RESOLUTION (earliest) ----
+                                # Run before about-entity normalization; otherwise
+                                # Arabic ordinal references like "اشرح الثانية" can
+                                # be flattened into standalone "ما هي الثانية؟" and
+                                # lose the previous-list target.
+                                text, ar_reason_early = _resolve_and_mark_arabic_followup_for_ws(text, connection_id, "early")
+                                if ar_reason_early and msg_lang in {"ar", "en"}:
+                                    force_final_language_for_rewrite = msg_lang
+
                                 # ---- ABOUT-ENTITY STANDALONE REWRITE (typed WS, pre-router) ----
                                 # Run BEFORE the direct router so shapes like
                                 # "What about X?" / "وماذا عن X" with a real new
                                 # entity X are normalized to "What is X?" /
                                 # "ما هي X؟" and don't get mis-classified as
                                 # `unsupported_unclear`.
-                                text = _maybe_rewrite_about_entity_question(text)
+                                if not _is_memory_rewrite_query(text) and not _is_marked_arabic_resolved_followup(connection_id, text):
+                                    text = _maybe_rewrite_about_entity_question(text)
 
                                 # ---- LANGUAGE RESOLUTION (Phase 7C — TASK 1) ----
                                 # Always trust the actual script of the user's
                                 # query over the UI/session language flag so the
                                 # router/follow-up/RAG branches all agree on the
                                 # answer language. UI language remains a hint only.
-                                _resolved_msg_lang = _resolve_user_language(text, msg_lang)
+                                _resolved_msg_lang = _resolve_user_language(stored_user_text or text, msg_lang)
                                 if _resolved_msg_lang != msg_lang:
                                     logger.info(
                                         "[LANG ROUTE] original_language=%s ui_language=%s overriding=True branch=ws_typed",
                                         _resolved_msg_lang, msg_lang,
                                     )
                                 msg_lang = _resolved_msg_lang
+                                if _is_marked_arabic_resolved_followup(connection_id, text) and msg_lang in {"ar", "en"}:
+                                    force_final_language_for_rewrite = msg_lang
+
+                                # ---- P12C-1: ARABIC FOLLOW-UP REFERENCE RESOLUTION ----
+                                # Must run before the direct unsupported/unclear
+                                # router, otherwise short Arabic anaphora such as
+                                # "وما علاقتها بالرقابة؟" is rejected before it can
+                                # become an explicit grounded RAG query.
+                                text, ar_reason_pre = _resolve_and_mark_arabic_followup_for_ws(text, connection_id, "pre-router")
+                                if ar_reason_pre and msg_lang in {"ar", "en"}:
+                                    force_final_language_for_rewrite = msg_lang
+
+                                if _is_memory_rewrite_query(text):
+                                    route_t0 = time.perf_counter()
+                                    route_t_meta = {
+                                        "request_start": route_t0,
+                                        "query_translation_ms": 0,
+                                        "query_translation_skipped": True,
+                                        "retrieval_after_translation_ms": 0,
+                                    }
+                                    if msg_lang == "ar":
+                                        ar_classify_t0 = time.perf_counter()
+                                        ar_type = _classify_arabic_query_type(text)
+                                        route_t_meta["ar_query_type"] = ar_type
+                                        route_t_meta["ar_query_classification_ms"] = int(round((time.perf_counter() - ar_classify_t0) * 1000))
+                                        logger.info("[AR QUERY TYPE] type=%s", ar_type)
+                                    mem_text, _ = await _handle_memory_rewrite_query(text, connection_id)
+                                    mem_text = (mem_text or "").strip() or RAG_NO_MATCH_RESPONSE
+                                    try:
+                                        history = conversation_history[connection_id]
+                                        history.append({"role": "user", "content": text.strip()})
+                                        history.append({"role": "assistant", "content": mem_text})
+                                    except Exception:
+                                        pass
+                                    try:
+                                        await send_final_response(
+                                            connection_id,
+                                            mem_text,
+                                            "ar" if msg_lang == "ar" else XTTS_LANGUAGE,
+                                            not EFFECTIVE_DISABLE_TTS,
+                                            websocket=conversation_ws,
+                                            sources=0,
+                                            arabic_mode=(msg_lang == "ar"),
+                                            t_meta=route_t_meta,
+                                            branch="memory_rewrite_text",
+                                        )
+                                        _emit_perf_report(route_t_meta, route_t0, text, mem_text, connection_id)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        log_usage(
+                                            username=(user or {}).get("username", "unknown"),
+                                            user_role=(user or {}).get("role", "unknown"),
+                                            query_text=stored_user_text,
+                                            response_status="success",
+                                            error_message=None,
+                                            response_time_ms=int((time.perf_counter() - route_t0) * 1000),
+                                            rag_docs_found=0,
+                                            query_length=len(stored_user_text),
+                                            response_length=len(mem_text or ""),
+                                        )
+                                    except Exception:
+                                        pass
+                                    persist_runtime_memory(connection_id, conversation_id_for_text)
+                                    continue
 
                                 route = classify_query_route(text)
                                 if route in {"smalltalk", "assistant_meta", "unsupported_unclear"}:
                                     route_lang = _route_response_language(text, msg_lang)
                                     direct_answer = _direct_route_answer(text, route, route_lang)
                                     _log_direct_route_handled(route, text, route_lang)
+                                    if direct_answer == RAG_NO_MATCH_RESPONSE:
+                                        try:
+                                            _save_last_answer_state(connection_id, text, direct_answer, [])
+                                        except Exception:
+                                            logger.exception("[FOLLOWUP] save state failed (WS typed direct not-found)")
                                     try:
                                         _append_conversation_turn(connection_id, stored_user_text, direct_answer)
                                     except Exception:
@@ -38606,6 +40814,10 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                 if _is_weak_generic_request(text):
                                     direct_answer = RAG_NO_MATCH_RESPONSE
                                     logger.info("[ANSWER PERMISSION] allowed=False reason=weak_generic_entrypoint query=%s", text[:180])
+                                    try:
+                                        _save_last_answer_state(connection_id, text, direct_answer, [])
+                                    except Exception:
+                                        logger.exception("[FOLLOWUP] save state failed (WS weak generic not-found)")
                                     try:
                                         _append_conversation_turn(connection_id, stored_user_text, direct_answer)
                                     except Exception:
@@ -38658,10 +40870,7 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                         text[:160], _norm_text[:160],
                                     )
                                     text = _norm_text
-                                try:
-                                    _spell_norm_text = _lightweight_spelling_correction(text)
-                                except Exception:
-                                    _spell_norm_text = text
+                                _spell_norm_text = _spelling_correction_preserving_exact_terms(text)
                                 if _spell_norm_text and _spell_norm_text.strip().lower() != (text or "").strip().lower():
                                     text = _spell_norm_text
                                 # ---- KB READY GATE (must be before follow-up or RAG) ----
@@ -38691,7 +40900,6 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                     except Exception:
                                         pass
                                     continue
-                                force_final_language_for_rewrite = None
                                 history_snapshot = list(conversation_history.get(connection_id, []) or [])
                                 rewritten_comparison_query = _rewrite_bare_comparison_query_from_history(text, history_snapshot, connection_id)
                                 if rewritten_comparison_query and rewritten_comparison_query != text:
@@ -38704,9 +40912,29 @@ async def rag_ws_endpoint(websocket: WebSocket):
                                         force_final_language_for_rewrite = msg_lang
                                     text = rewritten_comparison_query
 
+                                # ---- P12C-1: ARABIC FOLLOW-UP REFERENCE RESOLUTION ----
+                                # Rewrite Arabic pronoun/ordinal references
+                                # ("وما علاقتها بالرقابة؟", "اشرح الثانية",
+                                # "كيف ترتبط بالأخيرة؟") into explicit
+                                # grounded queries using the previous saved
+                                # answer state. The rewritten query then
+                                # flows through the normal /ws routing
+                                # (followup vs RAG) so retrieval grounds
+                                # the final answer.
+                                text, ar_reason = _resolve_and_mark_arabic_followup_for_ws(text, connection_id, "post-kb")
+                                if ar_reason and msg_lang in {"ar", "en"}:
+                                    force_final_language_for_rewrite = msg_lang
+
                                 # ---- HARD DEBUG: prove the WS entrypoint is reached ----
                                 try:
                                     _fu_check = _is_followup_query(text, connection_id)
+                                    _ar_marker_reason = _get_marked_arabic_resolved_followup_reason(connection_id, text)
+                                    if _ar_marker_reason == "ar_ordinal_explain":
+                                        logger.info("[AR FOLLOWUP MEMORY] ordinal_explain_followup_route=True resolved_query=%s", text[:200])
+                                        _fu_check = True
+                                    elif _fu_check and _ar_marker_reason:
+                                        logger.info("[AR FOLLOWUP MEMORY] followup_shortcut_bypassed=True resolved_query=%s", text[:200])
+                                        _fu_check = False
                                 except Exception:
                                     _fu_check = False
                                 logger.error("🔥 WS RECEIVED TEXT: %s", text)
