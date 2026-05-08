@@ -2798,7 +2798,7 @@ _FOLLOWUP_LEADING_CONJUNCTION_RE = _re_followup.compile(
 )
 _FOLLOWUP_OCR_SPLIT_WORD_RE = _re_followup.compile(
     r"\b([a-z]{4,})\s+"
-    r"(eved|ieved|tion|sion|ment|ments|ness|able|ible|ally|ance|ence|ive|ous|ful|less|ing|ed|ine)\b",
+    r"(eved|ieved|tion|sion|ment|ments|ness|able|ible|ally|ance|ence|ive|ous|ful|less|ing|ed|ine|ves)\b",
     _re_followup.IGNORECASE,
 )
 _OCR_MERGED_PREFIX_WORD_RE = _re_followup.compile(
@@ -11301,17 +11301,17 @@ _EXPLANATION_QUERY_STOP = _EXPLANATION_HELPER_STOP | {
 
 _EXPLANATION_CUE_RE = re.compile(
     r"\b(?:because|therefore|thus|so\s+that|in\s+order\s+to|"
-    r"helps?|supports?|enables?|ensures?|leads?\s+to|contributes?|"
+    r"helps?|supports?|enables?|ensures?|facilitates?|leads?\s+to|contributes?|"
     r"important|importance|role|function|purpose|objective|objectives|"
-    r"goal|goals|impact|effect|effects|relationship|relation|related|"
+    r"goal|goals|impact|effect|effects|benefits?|significance|significant|relationship|relation|related|"
     r"connected|through|guides?|uses?|used\s+to|allows?)\b",
     re.IGNORECASE,
 )
 
 _EXPLANATION_DIRECT_CUE_RE = re.compile(
     r"\b(?:because|therefore|thus|so\s+that|in\s+order\s+to|"
-    r"helps?|supports?|enables?|ensures?|leads?\s+to|contributes?|"
-    r"important|importance|role|function|purpose|impact|effect|effects|"
+    r"helps?|supports?|enables?|ensures?|facilitates?|leads?\s+to|contributes?|"
+    r"important|importance|role|function|purpose|impact|effect|effects|benefits?|significance|significant|"
     r"relationship|relation|related|linked|connected|allows?|main\s+focus|"
     r"focus\s+of|compares?|corrects?|monitors?|assess(?:es)?|mitigates?|"
     r"avoidance|improves?|improved|accomplish(?:es|ing)?|achieves?|achieving)\b",
@@ -11321,8 +11321,79 @@ _EXPLANATION_DIRECT_CUE_RE = re.compile(
 _EXPLANATION_NOISE_RE = re.compile(
     r"\b(?:table\s+of\s+contents|contents|index|isbn|copyright|"
     r"all\s+rights\s+reserved|references?|bibliograph(?:y|ies)|"
-    r"figure\s+\d+|table\s+\d+|principles\s+of\s+business\s+management|"
+    r"figure\s+\d+|table\s+\d+|"
     r"concept,\s*principles|proces\s+\d+|www\.|https?://)\b",
+    re.IGNORECASE,
+)
+
+_EXPLANATION_LEADING_FRAGMENT_RE = re.compile(
+    r"^\s*(?:of|in|to|for|from|with|by|and|or|but|which|that|whereas|while|because|as|than)\b",
+    re.IGNORECASE,
+)
+
+_EXPLANATION_RELATION_VERB_RE = re.compile(
+    r"\b(?:support|supports|help|helps|contribute|contributes|relate|relates|connect|connects|"
+    r"affect|affects|influence|influences|depend|depends|link|links|lead|leads)\b",
+    re.IGNORECASE,
+)
+
+_EXPLANATION_FEATURE_QUERY_PATTERNS: dict[str, tuple[str, ...]] = {
+    "importance": (
+        r"\b(?:important|importance|significant|significance|benefits?|beneficial|valuable|essential|crucial|fundamental|necessary|needed|useful)\b",
+        r"\b(?:purpose|purposes|objective|objectives|goal|goals|aim|aims)\b",
+    ),
+    "reason": (
+        r"\b(?:why|reason|reasons|because|cause|causes|purpose|purposes|so\s+that|in\s+order\s+to)\b",
+    ),
+    "relationship": (
+        r"\b(?:relation|relationship|connection|connected|connects?|linked?|link|links|related|relates?|between|dependency|depend(?:s|ent)?)\b",
+    ),
+    "support": (
+        r"\b(?:support|supports|supporting|help|helps|helping|enable|enables|facilitate|facilitates|contribute|contributes|assist|assists|allows?)\b",
+    ),
+    "role": (
+        r"\b(?:role|roles|function|functions|purpose|responsibility|responsibilities|part\s+played)\b",
+    ),
+    "process": (
+        r"\b(?:process|steps?|methods?|procedure|procedures|approach|sequence|stages?|how)\b",
+    ),
+    "comparison": (
+        r"\b(?:compare|comparison|difference|different|distinguish|contrast|versus|vs\.?|unlike|whereas)\b",
+    ),
+}
+
+_EXPLANATION_FEATURE_EVIDENCE_PATTERNS: dict[str, tuple[str, ...]] = {
+    "importance": (
+        r"\b(?:important|importance|significant|significance|benefits?|beneficial|valuable|essential|crucial|fundamental|necessary|useful)\b",
+        r"\b(?:purpose|purposes|objective|objectives|goal|goals|aim|aims)\b",
+    ),
+    "reason": (
+        r"\b(?:because|reason|reasons|therefore|thus|so\s+that|in\s+order\s+to|purpose|purposes|leads?\s+to|enables?|ensures?)\b",
+    ),
+    "relationship": (
+        r"\b(?:relation|relationship|connection|connected|connects?|linked?|link|links|related|relates?|interrelated|between|depends?|dependency|coordinate|coordinates|coordination)\b",
+    ),
+    "support": (
+        r"\b(?:support|supports|supporting|help|helps|helping|enable|enables|facilitate|facilitates|contribute|contributes|assist|assists|allows?|guides?)\b",
+    ),
+    "role": (
+        r"\b(?:role|roles|function|functions|purpose|responsibility|responsibilities|part\s+played)\b",
+    ),
+    "process": (
+        r"\b(?:process|steps?|methods?|procedure|procedures|approach|sequence|stages?|cycle|phase|phases)\b",
+    ),
+    "comparison": (
+        r"\b(?:compare|comparison|difference|different|distinguish|contrast|versus|vs\.?|unlike|whereas|while|however)\b",
+    ),
+}
+
+_EXPLANATION_SECTION_MARKER_RE = re.compile(
+    r"\b(?:importance|significance|benefits?|purpose|role|relation|relationship|support|function|process|steps?|methods?|objectives?|goals?)\b",
+    re.IGNORECASE,
+)
+
+_EXPLANATION_EXAMPLE_DOMINANT_RE = re.compile(
+    r"\b(?:for\s+example|for\s+instance|e\.g\.|example\s+of|such\s+as)\b",
     re.IGNORECASE,
 )
 
@@ -11371,6 +11442,53 @@ def _is_explanation_intent_query(query: str) -> bool:
     return False
 
 
+def _explanation_query_features(query_text: str) -> list[str]:
+    query_value = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not query_value:
+        return []
+    features: list[str] = []
+    for feature_name, patterns in _EXPLANATION_FEATURE_QUERY_PATTERNS.items():
+        if any(re.search(pattern, query_value, flags=re.IGNORECASE) for pattern in patterns):
+            features.append(feature_name)
+    if "reason" in features and "importance" in features:
+        features = [feature for feature in features if feature != "reason"] + ["reason"]
+    return features
+
+
+def _explanation_feature_hits(text_value: str, query_features: list[str] | set[str] | tuple[str, ...]) -> set[str]:
+    haystack = str(text_value or "").lower()
+    hits: set[str] = set()
+    for feature_name in query_features or []:
+        patterns = _EXPLANATION_FEATURE_EVIDENCE_PATTERNS.get(str(feature_name), ())
+        if any(re.search(pattern, haystack, flags=re.IGNORECASE) for pattern in patterns):
+            hits.add(str(feature_name))
+    return hits
+
+
+def _explanation_token_match(haystack: str, token: str) -> bool:
+    if _token_match_light(haystack, token):
+        return True
+    base = _light_normalize_query_token(token)
+    if len(base) < 5:
+        return False
+    forms = {base + "ing", base + "ed", base + "s", base + "es"}
+    if base.endswith("e") and len(base) > 5:
+        forms.add(base[:-1] + "ing")
+    if re.search(r"[aeiou][bcdfghjklmnpqrstvwxyz]$", base):
+        forms.add(base + base[-1] + "ing")
+        forms.add(base + base[-1] + "ed")
+    low = str(haystack or "").lower()
+    return any(re.search(rf"\b{re.escape(form)}\b", low) for form in forms if form)
+
+
+def _explanation_section_feature_hits(text_value: str, query_features: list[str] | set[str] | tuple[str, ...]) -> set[str]:
+    head = str(text_value or "")[:900]
+    hits = set(_explanation_feature_hits(head, query_features))
+    if _EXPLANATION_SECTION_MARKER_RE.search(head):
+        hits.add("section_marker")
+    return hits
+
+
 def _explanation_focus_tokens(query_text: str) -> list[str]:
     """Return generic content tokens of the query, excluding intent words.
 
@@ -11386,6 +11504,153 @@ def _explanation_focus_tokens(query_text: str) -> list[str]:
         if token and token not in merged:
             merged.append(token)
     return merged or filtered or base
+
+
+def _clean_explanation_concept_phrase(value: str) -> str:
+    cleaned = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    cleaned = re.sub(r"^[\s\"'`.,;:!?()\[\]{}-]+|[\s\"'`.,;:!?()\[\]{}-]+$", "", cleaned)
+    cleaned = re.sub(r"^(?:the|a|an|this|that|these|those|its|their|his|her|our)\s+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _explanation_tokens_for_phrase(value: str) -> list[str]:
+    tokens: list[str] = []
+    for token in _explanation_content_tokens(_clean_explanation_concept_phrase(value), keep_short=True):
+        normalized = _light_normalize_query_token(token)
+        if normalized and normalized not in tokens:
+            tokens.append(normalized)
+    return tokens[:5]
+
+
+def _explanation_relationship_concept_groups(query_text: str) -> list[list[str]]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return []
+
+    left = right = ""
+    try:
+        left, right = _compare_terms_from_query(q)
+    except Exception:
+        left = right = ""
+    if left and right:
+        groups = [_explanation_tokens_for_phrase(left), _explanation_tokens_for_phrase(right)]
+        return [group for group in groups if group]
+
+    relation_patterns = [
+        r"\bhow\s+(?:does|do|can|could)\s+(.+?)\s+(?:support|supports|help|helps|contribute|contributes|relate|relates|connect|connects|affect|affects|influence|influences|link|links)\s+(?:to\s+|with\s+)?(.+?)(?:[?.!]|$)",
+        r"\bhow\s+(?:is|are)\s+(.+?)\s+(?:related|connected|linked)\s+(?:to|with)\s+(.+?)(?:[?.!]|$)",
+        r"\b(?:relationship|relation|connection|link)\s+between\s+(.+?)\s+and\s+(.+?)(?:[?.!]|$)",
+    ]
+    for pattern in relation_patterns:
+        match = re.search(pattern, q)
+        if not match:
+            continue
+        groups = [
+            _explanation_tokens_for_phrase(match.group(1)),
+            _explanation_tokens_for_phrase(match.group(2)),
+        ]
+        groups = [group for group in groups if group]
+        if len(groups) >= 2:
+            return groups[:2]
+    return []
+
+
+def _explanation_primary_concept_group(query_text: str, query_focus: list[str]) -> list[str]:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return []
+    primary_patterns = [
+        r"\bwhy\s+(?:is|are|was|were|does|do|did)?\s*(.+?)\s+(?:important|necessary|needed|useful|significant|valuable|beneficial)\b",
+        r"\b(?:importance|benefits?|purpose|role|function)\s+of\s+(.+?)(?:\s+(?:in|for|to|within|about|regarding|concerning)\b|[?.!]|$)",
+        r"\bhow\s+(?:does|do|can|could)\s+(.+?)\s+(?:work|operate|function)\b",
+    ]
+    for pattern in primary_patterns:
+        match = re.search(pattern, q)
+        if not match:
+            continue
+        tokens = _explanation_tokens_for_phrase(match.group(1))
+        if tokens:
+            return tokens
+    return [_light_normalize_query_token(query_focus[0])] if query_focus else []
+
+
+def _explanation_hit_group_indices(text_value: str, concept_groups: list[list[str]]) -> set[int]:
+    low = str(text_value or "").lower()
+    hit_indices: set[int] = set()
+    for idx, group in enumerate(concept_groups or []):
+        group_tokens = [token for token in group if token]
+        if not group_tokens:
+            continue
+        hits = sum(1 for token in group_tokens if _explanation_token_match(low, token))
+        required = max(1, min(2, len(group_tokens)))
+        if hits >= required:
+            hit_indices.add(idx)
+    return hit_indices
+
+
+def _explanation_group_has_hit(text_value: str, group: list[str]) -> bool:
+    if not group:
+        return False
+    return bool(_explanation_hit_group_indices(text_value, [group]))
+
+
+def _split_explanation_leading_label(sentence: str) -> tuple[str, str]:
+    value = re.sub(r"\s+", " ", str(sentence or "").strip())
+    if ":" not in value[:120]:
+        return "", value
+    label, body = value.split(":", 1)
+    label = label.strip(" -\t\r\n.,;:")
+    body = body.strip()
+    label_words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", label)
+    if not (1 <= len(label_words) <= 9):
+        return "", value
+    if re.search(r"[.!?]", label):
+        return "", value
+    return label, body
+
+
+def _explanation_primary_appears_early(sentence: str, primary_group: list[str], max_words: int = 12) -> bool:
+    if not primary_group:
+        return True
+    label, body = _split_explanation_leading_label(sentence)
+    prefix_source = f"{label} " if label and _explanation_group_has_hit(label, primary_group) else ""
+    prefix_source += " ".join(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", body or sentence)[:max_words])
+    return _explanation_group_has_hit(prefix_source, primary_group)
+
+
+def _explanation_starts_as_fragment(sentence: str, primary_group: list[str] | None = None) -> bool:
+    value = re.sub(r"\s+", " ", str(sentence or "").strip())
+    if not value:
+        return True
+    if _EXPLANATION_LEADING_FRAGMENT_RE.match(value):
+        return True
+    first_word_match = re.match(r"^\s*([A-Za-z][A-Za-z'\-]*)", value)
+    if not first_word_match:
+        return False
+    first_word = first_word_match.group(1)
+    if first_word[:1].islower():
+        allowed_lower_starts = {"it", "this", "these", "those", "they", "the", "a", "an", "one", "another", "each"}
+        if first_word.lower() not in allowed_lower_starts and not _explanation_primary_appears_early(value, primary_group or [], max_words=8):
+            return True
+    return False
+
+
+def _explanation_line_fingerprint(sentence: str) -> set[str]:
+    return {
+        _light_normalize_query_token(token)
+        for token in _explanation_content_tokens(sentence, keep_short=False)
+        if _light_normalize_query_token(token)
+    }
+
+
+def _explanation_lines_too_similar(left: str, right: str) -> bool:
+    a = _explanation_line_fingerprint(left)
+    b = _explanation_line_fingerprint(right)
+    if not a or not b:
+        return False
+    overlap = len(a & b) / float(max(1, len(a | b)))
+    return overlap >= 0.72 or (len(a & b) >= 8 and min(len(a), len(b)) <= len(a & b) + 2)
 
 
 def _filter_docs_for_explanation(docs: list[dict], query_text: str) -> list[dict]:
@@ -11446,6 +11711,20 @@ def _explanation_mode_instructions(language: str = "en") -> str:
 
 def _clean_explanation_sentence(sentence: str) -> str:
     cleaned = re.sub(r"\s+", " ", str(sentence or "").strip())
+    try:
+        cleaned = _clean_ocr_artifacts(cleaned)
+    except Exception:
+        pass
+    cleaned = re.sub(
+        r"^\s*(?:(?:[A-Z][A-Za-z0-9'\-/]*|of|and|the|for|in|to|on)(?:\s*/\s*|\s+)+){3,}\d{1,4}\s+(?=(?:[A-Z][.)]\s+)?[A-Z][A-Za-z])",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(
+        r"^\s*(?:(?:[A-Z][A-Za-z0-9'\-/]*|of|and|the|for|in|to|on)(?:\s*/\s*|\s+)+){5,}(?=[A-Z][.)]\s+[A-Z][A-Za-z])",
+        "",
+        cleaned,
+    )
     cleaned = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+", "", cleaned)
     cleaned = re.sub(r"^\s*\d+(?:\.\d+)*\s+[A-Za-z][^:]{0,90}:\s*", "", cleaned)
     cleaned = cleaned.strip(" \t\r\n\"'`.,;:()[]{}")
@@ -11455,11 +11734,20 @@ def _clean_explanation_sentence(sentence: str) -> str:
     return cleaned
 
 
-def _is_usable_explanation_sentence(sentence: str, query_focus: list[str], needs_direct_cue: bool = True) -> bool:
+def _is_usable_explanation_sentence(
+    sentence: str,
+    query_focus: list[str],
+    needs_direct_cue: bool = True,
+    concept_groups: list[list[str]] | None = None,
+    relationship_mode: bool = False,
+    primary_group: list[str] | None = None,
+) -> bool:
     sentence_text = re.sub(r"\s+", " ", str(sentence or "").strip())
     if not sentence_text:
         return False
     if _EXPLANATION_NOISE_RE.search(sentence_text):
+        return False
+    if _explanation_starts_as_fragment(sentence_text, primary_group or []):
         return False
     if sentence_text.count('"') % 2 == 1:
         return False
@@ -11477,6 +11765,10 @@ def _is_usable_explanation_sentence(sentence: str, query_focus: list[str], needs
         return False
     if re.search(r"\bthe\s+next\s+function\b", lower_sentence):
         return False
+    if len(re.findall(r"\b[A-Za-z]{2,7}\s+(?:ves|tion|sion|ment|ness|ance|ence|ing|ed)\b", sentence_text)) >= 3:
+        return False
+    if len(re.findall(r"\b[A-Za-z]{1,2}\s+[A-Za-z]{1,2}\s+[A-Za-z]{1,2}\b", sentence_text)) >= 1:
+        return False
     direct_cue = bool(_EXPLANATION_DIRECT_CUE_RE.search(lower_sentence))
     if needs_direct_cue and not direct_cue:
         return False
@@ -11484,11 +11776,20 @@ def _is_usable_explanation_sentence(sentence: str, query_focus: list[str], needs
         focus_hits = sum(1 for token in query_focus if _token_match_light(lower_sentence, token))
         if focus_hits <= 0:
             return False
-        generic_focus = {"management", "organization", "organisation", "organizational", "organisational", "objective", "objectives", "goal", "goals"}
-        specific_focus = [token for token in query_focus if token not in generic_focus]
-        if specific_focus and not any(_token_match_light(lower_sentence, token) for token in specific_focus):
-            return False
-        if len(query_focus) >= 2 and focus_hits < 2 and not direct_cue:
+        groups = list(concept_groups or [])
+        hit_indices = _explanation_hit_group_indices(lower_sentence, groups)
+        if groups:
+            if relationship_mode:
+                if not hit_indices:
+                    return False
+            elif primary_group and not _explanation_group_has_hit(lower_sentence, primary_group):
+                return False
+        if (not relationship_mode) and primary_group:
+            label, body = _split_explanation_leading_label(sentence_text)
+            if label and not _explanation_group_has_hit(label, primary_group):
+                if not _explanation_primary_appears_early(body or sentence_text, primary_group, max_words=12):
+                    return False
+        if len(query_focus) >= 2 and focus_hits < 2 and not direct_cue and not groups:
             return False
     return True
 
@@ -11527,14 +11828,69 @@ def _split_explanation_candidates(text: str) -> list[str]:
     return expanded
 
 
-def _score_explanation_sentence(sentence: str, query_focus: list[str], doc_rank: int) -> float:
+def _score_explanation_sentence(
+    sentence: str,
+    query_focus: list[str],
+    doc_rank: int,
+    concept_groups: list[list[str]] | None = None,
+    relationship_mode: bool = False,
+    primary_group: list[str] | None = None,
+    query_features: list[str] | None = None,
+) -> float:
     lower_sentence = str(sentence or "").lower()
     focus_hits = sum(1 for token in query_focus if _token_match_light(lower_sentence, token)) if query_focus else 0
     cue_bonus = 1.5 if _EXPLANATION_CUE_RE.search(lower_sentence) else 0.0
     predicate_bonus = 0.8 if re.search(r"\b(?:is|are|was|were|means?|includes?|involves?|consists?|provides?|ensures?|supports?|helps?|uses?)\b", lower_sentence) else 0.0
     length_words = len(re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", lower_sentence))
     length_bonus = 0.4 if 8 <= length_words <= 32 else 0.0
-    return (2.2 * focus_hits) + cue_bonus + predicate_bonus + length_bonus - (0.05 * doc_rank)
+    groups = list(concept_groups or [])
+    hit_indices = _explanation_hit_group_indices(lower_sentence, groups)
+    group_bonus = 0.0
+    if groups:
+        if relationship_mode and len(groups) >= 2:
+            if len(hit_indices) >= len(groups):
+                group_bonus += 4.0
+            elif hit_indices:
+                group_bonus += 0.8
+                if _EXPLANATION_RELATION_VERB_RE.search(lower_sentence):
+                    group_bonus += 0.7
+        elif primary_group and _explanation_group_has_hit(lower_sentence, primary_group):
+            group_bonus += 2.4
+            if _explanation_primary_appears_early(sentence, primary_group, max_words=12):
+                group_bonus += 0.9
+    features = list(query_features or [])
+    feature_hits = _explanation_feature_hits(lower_sentence, features)
+    feature_bonus = 0.0
+    if feature_hits:
+        feature_bonus += min(2.4, 1.05 * len(feature_hits))
+        if "relationship" in feature_hits and relationship_mode:
+            feature_bonus += 0.8
+        if "importance" in feature_hits and (not relationship_mode):
+            feature_bonus += 0.7
+    feature_missing_penalty = 0.0
+    if features and not feature_hits:
+        feature_missing_penalty = 0.9 if not relationship_mode else 0.35
+    label_penalty = 0.0
+    label_quality_bonus = 0.0
+    if (not relationship_mode) and primary_group:
+        label, body = _split_explanation_leading_label(sentence)
+        label_low = label.lower()
+        if label and re.search(
+            r"\b(?:facilitates?|fundamental|important|importance|significance|significant|purpose|benefits?|helps?|supports?|enables?|ensures?|leads?\s+to|contributes?)\b",
+            label_low,
+        ):
+            label_quality_bonus += 0.5
+        if label and not _explanation_group_has_hit(label, primary_group) and not _explanation_primary_appears_early(body or sentence, primary_group, max_words=12):
+            label_penalty += 3.0
+        elif label and not _explanation_group_has_hit(label, primary_group):
+            label_penalty += 0.65
+        elif label and not _explanation_group_has_hit(label, primary_group) and not label_quality_bonus:
+            label_penalty += 0.8
+    fragment_penalty = 2.5 if _explanation_starts_as_fragment(sentence, primary_group or []) else 0.0
+    ocr_penalty = 1.5 if re.search(r"\b[A-Za-z]{2,7}\s+(?:ves|tion|sion|ment|ness|ance|ence|ing|ed)\b", sentence) else 0.0
+    density = focus_hits / max(1, length_words)
+    density_bonus = min(1.0, density * 10.0) if focus_hits else 0.0
+    return (1.8 * focus_hits) + group_bonus + feature_bonus + cue_bonus + predicate_bonus + length_bonus + density_bonus + label_quality_bonus - label_penalty - feature_missing_penalty - fragment_penalty - ocr_penalty - (0.05 * doc_rank)
 
 
 def _doc_explanation_focus_hits(doc: dict, query_focus: list[str]) -> set[str]:
@@ -11551,6 +11907,11 @@ def _select_explanation_topic_group(docs: list[dict], query_text: str) -> list[d
     if not filtered_docs:
         return []
     query_focus = _explanation_focus_tokens(query_text)
+    query_features = _explanation_query_features(query_text)
+    relationship_groups = _explanation_relationship_concept_groups(query_text)
+    relationship_mode = bool(len(relationship_groups) >= 2)
+    primary_group = relationship_groups[0] if relationship_mode else _explanation_primary_concept_group(query_text, query_focus)
+    concept_groups = relationship_groups if relationship_mode else ([primary_group] if primary_group else [])
     scored_docs: list[tuple[float, int, dict, set[str], tuple[str, str, str]]] = []
     token_document_frequency: dict[str, int] = {}
     doc_hits_by_id: dict[int, set[str]] = {}
@@ -11571,6 +11932,32 @@ def _select_explanation_topic_group(docs: list[dict], query_text: str) -> list[d
         if not hits:
             continue
         doc_text = _explanation_doc_text(doc_candidate)
+        usable_sentence_scores: list[float] = []
+        for sentence_text in _split_explanation_candidates(doc_text)[:24]:
+            cleaned_sentence = _clean_explanation_sentence(sentence_text)
+            if not _is_usable_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                needs_direct_cue=True,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+            ):
+                continue
+            usable_sentence_scores.append(_score_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                doc_rank,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+                query_features=query_features,
+            ))
+        if not usable_sentence_scores:
+            continue
+        best_sentence_score = max(usable_sentence_scores)
+        if best_sentence_score < (3.0 if relationship_mode else 3.4):
+            continue
         metadata = dict((doc_candidate or {}).get("metadata") or {})
         key = (
             str(metadata.get("source") or metadata.get("filename") or "").strip().lower(),
@@ -11580,7 +11967,12 @@ def _select_explanation_topic_group(docs: list[dict], query_text: str) -> list[d
         rare_hit_bonus = 1.2 * len(hits.intersection(rare_tokens))
         cue_bonus = 0.6 if _EXPLANATION_CUE_RE.search(doc_text[:1800]) else 0.0
         coverage = len(hits) / max(1, len(query_focus))
-        score = (2.0 * len(hits)) + rare_hit_bonus + coverage + cue_bonus - (0.08 * doc_rank)
+        group_hits = len(_explanation_hit_group_indices(doc_text, concept_groups)) if concept_groups else 0
+        group_bonus = 0.9 * group_hits
+        if relationship_mode and concept_groups and group_hits >= len(concept_groups):
+            group_bonus += 2.0
+        sentence_bonus = min(4.0, best_sentence_score * 0.45) + min(1.0, 0.25 * len(usable_sentence_scores))
+        score = (1.55 * len(hits)) + rare_hit_bonus + coverage + cue_bonus + group_bonus + sentence_bonus - (0.08 * doc_rank)
         scored_docs.append((score, doc_rank, doc_candidate, hits, key))
     if not scored_docs:
         return []
@@ -11599,7 +11991,8 @@ def _select_explanation_topic_group(docs: list[dict], query_text: str) -> list[d
         shares_rare = bool(hits.intersection(rare_tokens) and (best_hits.intersection(rare_tokens) or same_topic_key))
         enough_overlap = bool(hits.intersection(selected_hits) and (len(hits) >= 2 or len(best_hits) <= 1))
         complementary_same_topic = bool(same_topic_key and hits and len(selected_hits.union(hits)) > len(selected_hits))
-        if shares_rare or enough_overlap or complementary_same_topic:
+        complementary_relationship = bool(relationship_mode and hits and len(selected_hits.union(hits)) > len(selected_hits))
+        if shares_rare or enough_overlap or complementary_same_topic or complementary_relationship:
             selected.append(doc_candidate)
             selected_ids.add(id(doc_candidate))
             selected_hits.update(hits)
@@ -11704,6 +12097,7 @@ def _build_symbolic_anchor_explanation_answer(
     query_info = _detect_short_symbolic_list_query(query_text)
     if not isinstance(query_info, dict) or not required_anchor_tokens:
         return ""
+    query_features = _explanation_query_features(query_text)
 
     best_answer_lines: list[str] = []
     best_score = float("-inf")
@@ -11728,6 +12122,8 @@ def _build_symbolic_anchor_explanation_answer(
                 if not _is_symbolic_support_line(support_sentence, query_focus):
                     continue
                 support_score = _score_explanation_sentence(support_sentence, query_focus, doc_rank)
+                if query_features and _explanation_feature_hits(support_sentence, query_features):
+                    support_score += 0.8
                 if offset == 1:
                     support_score += 2.0
                 elif offset == 2:
@@ -11758,13 +12154,268 @@ def _build_symbolic_anchor_explanation_answer(
     return "\n".join(f"- {line}" for line in best_answer_lines[:3]).strip()
 
 
+def _expand_explanation_docs_with_local_windows(query_text: str, docs: list[dict]) -> list[dict]:
+    """Prefer focused local spans from already-selected chunks.
+
+    This does not change chunking or retrieval. It only adds short, query-focused
+    views of the same evidence so the sentence selector is less likely to start
+    from a section boundary or a mid-chunk OCR fragment.
+    """
+    expanded: list[dict] = []
+    seen: set[str] = set()
+    focus_tokens = _explanation_focus_tokens(query_text)
+
+    def _append(doc_value: dict, text_value: str, local_flag: bool = False) -> None:
+        text_clean = re.sub(r"\s+", " ", str(text_value or "").strip())
+        if not text_clean:
+            return
+        if focus_tokens and not any(_token_match_light(text_clean.lower(), token) for token in focus_tokens):
+            return
+        fingerprint = text_clean.lower()[:700]
+        if fingerprint in seen:
+            return
+        seen.add(fingerprint)
+        doc_new = dict(doc_value or {})
+        metadata_new = dict((doc_new.get("metadata") or {}))
+        if local_flag:
+            metadata_new["_explanation_local_window"] = True
+        doc_new["metadata"] = metadata_new
+        doc_new["page_content"] = text_value
+        doc_new["text"] = text_value
+        expanded.append(doc_new)
+
+    for doc in docs or []:
+        raw_text = _explanation_doc_text(doc)
+        if not raw_text.strip():
+            continue
+        metadata = dict((doc or {}).get("metadata") or {})
+        local_text = str(metadata.get("_single_local_window_text") or "").strip()
+        if local_text:
+            _append(doc, local_text, local_flag=True)
+        if len(raw_text) > 1400:
+            try:
+                focused_text = _focus_doc_to_query_window(query_text, raw_text, window=1000)
+            except Exception:
+                focused_text = ""
+            if focused_text and len(focused_text) < int(len(raw_text) * 0.92):
+                _append(doc, focused_text, local_flag=True)
+        _append(doc, raw_text, local_flag=False)
+    return expanded or list(docs or [])
+
+
+def _explanation_fragment_marker_count(text_value: str) -> int:
+    lines = [re.sub(r"\s+", " ", line).strip() for line in str(text_value or "").splitlines() if str(line or "").strip()]
+    count = 0
+    for line in lines[:80]:
+        words = re.findall(r"[A-Za-z][A-Za-z'\-]*", line)
+        if not (2 <= len(words) <= 11):
+            continue
+        if re.match(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+", line) or line.endswith(":"):
+            count += 1
+            continue
+        title_words = sum(1 for word in words if word[:1].isupper())
+        if title_words >= max(2, len(words) // 2) and not re.search(r"[.!?]$", line):
+            count += 1
+    return count
+
+
+def _rank_explanation_docs_for_query(query_text: str, docs: list[dict], max_docs: int = 3) -> list[dict]:
+    source_docs = list(docs or [])
+    if not source_docs:
+        return []
+
+    query_focus = _explanation_focus_tokens(query_text)
+    query_features = _explanation_query_features(query_text)
+    logger.info("[EXPLAIN QUERY FEATURES] features=%s", query_features)
+    relationship_groups = _explanation_relationship_concept_groups(query_text)
+    relationship_mode = bool(len(relationship_groups) >= 2 or "relationship" in query_features)
+    primary_group = relationship_groups[0] if len(relationship_groups) >= 2 else _explanation_primary_concept_group(query_text, query_focus)
+    concept_groups = relationship_groups if len(relationship_groups) >= 2 else ([primary_group] if primary_group else [])
+
+    scored_rows: list[tuple[float, float, float, int, dict, set[int], set[str], int, str]] = []
+    for doc_rank, doc_candidate in enumerate(source_docs):
+        doc_text = _explanation_doc_text(doc_candidate)
+        if not doc_text.strip():
+            continue
+        lower_text = doc_text.lower()
+        metadata = dict((doc_candidate or {}).get("metadata") or {})
+        base_raw = float(
+            (doc_candidate or {}).get(
+                "similarity",
+                (doc_candidate or {}).get("score", metadata.get("_score", 0.0)),
+            )
+            or 0.0
+        )
+        base_component = max(-1.4, min(1.4, base_raw * 0.20))
+        words = re.findall(r"[A-Za-z0-9][A-Za-z0-9'\-]*", lower_text)
+        focus_hits = sum(1 for token in query_focus if _token_match_light(lower_text, token)) if query_focus else 0
+        focus_coverage = focus_hits / max(1, len(query_focus)) if query_focus else 0.0
+        focus_density = focus_hits / max(1, len(words))
+        group_hits = _explanation_hit_group_indices(lower_text, concept_groups)
+        feature_hits = _explanation_feature_hits(lower_text, query_features)
+        section_blob = "\n".join([
+            _explanation_doc_metadata_text(doc_candidate),
+            "\n".join(str(doc_text or "").splitlines()[:8]),
+        ])
+        section_hits = _explanation_section_feature_hits(section_blob, query_features)
+
+        usable_sentence_scores: list[float] = []
+        starts_fragment = False
+        example_sentences = 0
+        for sentence_text in _split_explanation_candidates(doc_text)[:28]:
+            cleaned_sentence = _clean_explanation_sentence(sentence_text)
+            if not cleaned_sentence:
+                continue
+            if _explanation_starts_as_fragment(cleaned_sentence, primary_group):
+                starts_fragment = True
+            if _EXPLANATION_EXAMPLE_DOMINANT_RE.search(cleaned_sentence):
+                example_sentences += 1
+            if not _is_usable_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                needs_direct_cue=True,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+            ):
+                continue
+            usable_sentence_scores.append(_score_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                doc_rank,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+                query_features=query_features,
+            ))
+
+        best_sentence_score = max(usable_sentence_scores) if usable_sentence_scores else 0.0
+        coherent_count = len(usable_sentence_scores)
+        relationship_both_sides = bool(concept_groups and len(group_hits) >= len(concept_groups))
+        boost = 0.0
+        boost += min(3.0, 2.2 * focus_coverage)
+        boost += min(1.4, focus_hits * 0.35)
+        boost += min(1.2, focus_density * 70.0) if focus_hits else 0.0
+        boost += min(3.2, 1.15 * len(feature_hits))
+        boost += min(1.4, 0.55 * len(section_hits))
+        boost += min(3.4, best_sentence_score * 0.42)
+        boost += min(1.0, coherent_count * 0.25)
+        if concept_groups:
+            boost += min(2.0, 0.8 * len(group_hits))
+        if relationship_mode and relationship_both_sides:
+            boost += 2.8
+
+        penalty = 0.0
+        reasons: list[str] = []
+        if query_focus and focus_hits <= 0:
+            penalty += 4.0
+            reasons.append("no_concept_hit")
+        elif query_focus and focus_coverage < 0.45:
+            penalty += 1.35
+            reasons.append("low_concept_coverage")
+        if focus_hits and focus_density < 0.006:
+            penalty += 0.9
+            reasons.append("low_concept_density")
+        if query_features and not feature_hits and coherent_count <= 1:
+            penalty += 1.35
+            reasons.append("missing_feature_terms")
+        if relationship_mode and concept_groups and not relationship_both_sides:
+            penalty += 1.4
+            reasons.append("single_relationship_side")
+        if starts_fragment:
+            penalty += 0.7
+            reasons.append("fragment_start")
+        if _looks_table_or_heading_like_chunk(doc_text[:1800]):
+            penalty += 1.5
+            reasons.append("heading_table_like")
+        fragment_markers = _explanation_fragment_marker_count(doc_text[:1800])
+        if fragment_markers >= 4:
+            penalty += min(1.4, 0.25 * fragment_markers)
+            reasons.append("many_heading_fragments")
+        lines = [line for line in str(doc_text or "").splitlines() if line.strip()]
+        bullet_lines = [line for line in lines if re.match(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+", line)]
+        if lines and (len(bullet_lines) / max(1, len(lines))) >= 0.35:
+            penalty += 1.1
+            reasons.append("list_fragment")
+        if example_sentences >= max(2, coherent_count + 1):
+            penalty += 0.8
+            reasons.append("example_dominant")
+        if coherent_count <= 0:
+            penalty += 2.6
+            reasons.append("no_coherent_sentence")
+
+        final_score = base_component + boost - penalty - (0.035 * doc_rank)
+        if not reasons:
+            reasons.append("matched")
+
+        doc_ranked = dict(doc_candidate or {})
+        ranked_metadata = dict(metadata)
+        ranked_metadata["_explanation_rank_score"] = float(final_score)
+        ranked_metadata["_explanation_rank_features"] = sorted(feature_hits)
+        doc_ranked["metadata"] = ranked_metadata
+        logger.info(
+            "[EXPLAIN RANK] chunk_index=%s base=%.3f boost=%.3f penalty=%.3f final=%.3f reason=%s",
+            metadata.get("chunk_index"),
+            base_raw,
+            boost,
+            penalty,
+            final_score,
+            ",".join(reasons[:4]),
+        )
+        scored_rows.append((final_score, boost, penalty, doc_rank, doc_ranked, group_hits, feature_hits, coherent_count, ",".join(reasons[:4])))
+
+    if not scored_rows:
+        return []
+    scored_rows.sort(key=lambda row: (-row[0], row[3]))
+    minimum_score = 4.2 if relationship_mode else 3.7
+    strong_rows = [row for row in scored_rows if row[0] >= minimum_score and row[7] > 0]
+    if not strong_rows:
+        logger.info("[EXPLANATION MODE] fallback=weak_explanation_rank best=%.2f threshold=%.2f", scored_rows[0][0], minimum_score)
+        return []
+
+    if relationship_mode and concept_groups:
+        required_groups = set(range(len(concept_groups)))
+        both_side_rows = [row for row in strong_rows if required_groups.issubset(row[5])]
+        selected_rows: list[tuple[float, float, float, int, dict, set[int], set[str], int, str]] = []
+        covered_groups: set[int] = set()
+        if both_side_rows:
+            selected_rows.append(both_side_rows[0])
+            covered_groups.update(both_side_rows[0][5])
+        for row in strong_rows:
+            if len(selected_rows) >= max_docs:
+                break
+            if any(row[4] is selected[4] for selected in selected_rows):
+                continue
+            if not row[5].difference(covered_groups) and selected_rows:
+                continue
+            selected_rows.append(row)
+            covered_groups.update(row[5])
+        if not required_groups.issubset(covered_groups):
+            logger.info(
+                "[EXPLANATION MODE] fallback=weak_relationship_rank required=%s covered=%s",
+                sorted(required_groups),
+                sorted(covered_groups),
+            )
+            return []
+        return [row[4] for row in selected_rows[:max_docs]]
+
+    return [row[4] for row in strong_rows[:max_docs]]
+
+
 def _build_controlled_explanation_answer_en(query_text: str, docs: list[dict]) -> str:
     query_focus = _explanation_focus_tokens(query_text)
-    topic_docs = _select_explanation_topic_group(docs or [], query_text)
+    query_features = _explanation_query_features(query_text)
+    logger.info("[EXPLAIN QUERY FEATURES] features=%s", query_features)
+    relationship_groups = _explanation_relationship_concept_groups(query_text)
+    relationship_mode = bool(len(relationship_groups) >= 2)
+    primary_group = relationship_groups[0] if relationship_mode else _explanation_primary_concept_group(query_text, query_focus)
+    concept_groups = relationship_groups if relationship_mode else ([primary_group] if primary_group else [])
+    candidate_docs = _expand_explanation_docs_with_local_windows(query_text, docs or [])
+    topic_docs = _select_explanation_topic_group(candidate_docs, query_text)
     if not topic_docs:
         rescued_docs, rescue_meta = _append_symbolic_explanation_rescue_doc(query_text, docs or [])
         if rescue_meta.get("reason") == "candidate_selected" and len(rescued_docs) > len(docs or []):
-            topic_docs = _select_explanation_topic_group(rescued_docs, query_text)
+            topic_docs = _select_explanation_topic_group(_expand_explanation_docs_with_local_windows(query_text, rescued_docs), query_text)
     if not topic_docs:
         logger.info("[EXPLANATION MODE] fallback=no_consistent_topic_group")
         return RAG_NO_MATCH_RESPONSE
@@ -11778,7 +12429,7 @@ def _build_controlled_explanation_answer_en(query_text: str, docs: list[dict]) -
     if missing_anchor_tokens:
         rescued_docs, rescue_meta = _append_symbolic_explanation_rescue_doc(query_text, docs or [])
         if rescue_meta.get("reason") == "candidate_selected" and len(rescued_docs) > len(docs or []):
-            rescued_topic_docs = _select_explanation_topic_group(rescued_docs, query_text)
+            rescued_topic_docs = _select_explanation_topic_group(_expand_explanation_docs_with_local_windows(query_text, rescued_docs), query_text)
             rescued_combined_text = " ".join(_explanation_doc_text(doc) for doc in rescued_topic_docs).lower()
             rescued_missing_anchors = [
                 token for token in required_anchor_tokens
@@ -11801,18 +12452,34 @@ def _build_controlled_explanation_answer_en(query_text: str, docs: list[dict]) -
     if symbolic_answer:
         return symbolic_answer
 
-    scored_sentences: list[tuple[float, int, str]] = []
+    scored_sentences: list[tuple[float, int, str, set[int]]] = []
     needs_direct_cue = bool(_is_explanation_intent_query(query_text))
     for doc_rank, doc_candidate in enumerate(topic_docs):
         doc_text = _explanation_doc_text(doc_candidate)
         for sentence_index, sentence_text in enumerate(_split_explanation_candidates(doc_text)):
             cleaned_sentence = _clean_explanation_sentence(sentence_text)
-            if not _is_usable_explanation_sentence(cleaned_sentence, query_focus, needs_direct_cue=needs_direct_cue):
+            if not _is_usable_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                needs_direct_cue=needs_direct_cue,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+            ):
                 continue
-            score = _score_explanation_sentence(cleaned_sentence, query_focus, doc_rank)
-            if score <= 0.0:
+            score = _score_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                doc_rank,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+                query_features=query_features,
+            )
+            if score < (3.0 if relationship_mode else 3.4):
                 continue
-            scored_sentences.append((score, sentence_index + (doc_rank * 1000), cleaned_sentence))
+            hit_indices = _explanation_hit_group_indices(cleaned_sentence, concept_groups)
+            scored_sentences.append((score, sentence_index + (doc_rank * 1000), cleaned_sentence, hit_indices))
     if not scored_sentences:
         logger.info("[EXPLANATION MODE] fallback=no_relevant_sentences")
         return RAG_NO_MATCH_RESPONSE
@@ -11820,35 +12487,62 @@ def _build_controlled_explanation_answer_en(query_text: str, docs: list[dict]) -
     scored_sentences.sort(key=lambda item: (-item[0], item[1]))
     selected_lines: list[str] = []
     seen_lines: set[str] = set()
-    for score, _sentence_order, sentence_text in scored_sentences:
+    selected_group_indices: set[int] = set()
+    selected_has_direct_relationship = False
+
+    direct_relationship_rows = [
+        row for row in scored_sentences
+        if relationship_mode and concept_groups and len(row[3]) >= len(concept_groups)
+    ]
+    ordered_rows = direct_relationship_rows + [row for row in scored_sentences if row not in direct_relationship_rows]
+
+    for score, _sentence_order, sentence_text, hit_indices in ordered_rows:
         normalized_sentence = re.sub(r"\W+", " ", sentence_text.lower()).strip()
         if not normalized_sentence or normalized_sentence in seen_lines:
             continue
+        if any(_explanation_lines_too_similar(sentence_text, existing) for existing in selected_lines):
+            continue
+        if relationship_mode and selected_lines and hit_indices and hit_indices.issubset(selected_group_indices) and len(selected_lines) >= 2:
+            continue
         seen_lines.add(normalized_sentence)
         selected_lines.append(sentence_text)
-        if len(selected_lines) >= 4:
+        selected_group_indices.update(hit_indices)
+        if relationship_mode and concept_groups and len(hit_indices) >= len(concept_groups):
+            selected_has_direct_relationship = True
+        if len(selected_lines) >= 3:
             break
 
     if not selected_lines:
         logger.info("[EXPLANATION MODE] fallback=empty_after_dedupe")
         return RAG_NO_MATCH_RESPONSE
-    if len(selected_lines) == 1 and scored_sentences[0][0] < 3.0:
-        logger.info("[EXPLANATION MODE] fallback=single_weak_sentence score=%.2f", scored_sentences[0][0])
-        return RAG_NO_MATCH_RESPONSE
-
+    if relationship_mode and len(concept_groups) >= 2:
+        required_groups = set(range(len(concept_groups)))
+        if not required_groups.issubset(selected_group_indices):
+            logger.info(
+                "[EXPLANATION MODE] fallback=missing_relationship_side groups=%s selected=%s",
+                len(concept_groups),
+                sorted(selected_group_indices),
+            )
+            return RAG_NO_MATCH_RESPONSE
+        if (not selected_has_direct_relationship) and len(selected_lines) < 2:
+            logger.info("[EXPLANATION MODE] fallback=relationship_needs_two_grounded_sides")
+            return RAG_NO_MATCH_RESPONSE
     if len(selected_lines) < 2:
-        logger.info("[EXPLANATION MODE] fallback=too_few_lines count=%d", len(selected_lines))
-        return RAG_NO_MATCH_RESPONSE
+        if relationship_mode and selected_has_direct_relationship:
+            logger.info("[EXPLANATION MODE] accepted_single_direct_relationship")
+        else:
+            logger.info("[EXPLANATION MODE] fallback=too_few_lines count=%d", len(selected_lines))
+            return RAG_NO_MATCH_RESPONSE
 
-    answer = "\n".join(f"- {line}" for line in selected_lines[:4]).strip()
+    answer = "\n".join(f"- {line}" for line in selected_lines[:3]).strip()
     logger.info(
         "[EXPLANATION MODE] accepted docs=%d lines=%d focus=%s",
-        len(topic_docs), len(selected_lines[:4]), query_focus,
+        len(topic_docs), len(selected_lines[:3]), query_focus,
     )
     return answer or RAG_NO_MATCH_RESPONSE
 
 
-def _format_translated_explanation_lines(text: str, max_lines: int = 5) -> str:
+def _format_translated_explanation_lines(text: str, max_lines: int = 3) -> str:
     cleaned = re.sub(r"\s+", " ", str(text or "").strip())
     if not cleaned:
         return ""
@@ -11903,7 +12597,7 @@ async def _translate_controlled_explanation_answer_ar(answer_en: str) -> str:
         return ""
 
     translated_lines: list[str] = []
-    for line in lines[:4]:
+    for line in lines[:3]:
         cached = _ar_item_translation_cache_get(line, "ar", "controlled_explanation")
         if cached:
             translated_lines.append(cached)
@@ -15268,10 +15962,21 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
     comparison_re = re.compile(r"\b(?:better\s+than|worse\s+than|compared\s+to|in\s+contrast\s+to|unlike)\b", re.IGNORECASE)
     list_like_re = re.compile(r"(?m)^\s*(?:[-•*]|\d+[.)])\s+")
     table_or_classification_re = re.compile(r"\b(?:table|classification|major\s+classification|contributors?)\b", re.IGNORECASE)
-    unrelated_concepts_re = re.compile(
-        r"\b(?:system\s+analysis|operations?\s+research|ecology|situational\s+approach|contingency\s+approach|quantitative\s+approach|mathematical\s+approach)\b",
-        re.IGNORECASE,
-    )
+
+    def _generic_mixed_topic_fragment_count(text_value: str) -> int:
+        lines_local = [re.sub(r"\s+", " ", ln).strip() for ln in str(text_value or "").splitlines() if str(ln or "").strip()]
+        count = 0
+        for line_value in lines_local[:80]:
+            words_local = re.findall(r"[A-Za-z][A-Za-z'\-]*", line_value)
+            if not (2 <= len(words_local) <= 10):
+                continue
+            if list_like_re.match(line_value) or line_value.endswith(":"):
+                count += 1
+                continue
+            title_words = sum(1 for word in words_local if word[:1].isupper())
+            if title_words >= max(2, len(words_local) // 2) and not re.search(r"[.!?]$", line_value):
+                count += 1
+        return count
 
     query_entity = ""
     try:
@@ -15281,7 +15986,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
     except Exception:
         query_entity = ""
 
-    query_tokens_for_explain = [t for t in re.findall(r"[a-z0-9]{3,}", q) if t not in stop]
+    query_tokens_for_explain = _explanation_focus_tokens(q_raw)
     if not query_tokens_for_explain:
         query_tokens_for_explain = [t for t in re.findall(r"[a-z0-9]{3,}", q)]
 
@@ -15343,7 +16048,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
             return "comparison_fragment"
 
         if query_entity and (query_entity not in txt):
-            if unrelated_concepts_re.search(txt):
+            if _generic_mixed_topic_fragment_count(txt_raw[:1800]) >= 3:
                 return "different_concept_focus"
 
         return None
@@ -15748,9 +16453,9 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
             penalties += 1.4
         if classification_heavy:
             penalties += 1.2
-        unrelated_hits = len(unrelated_concepts_re.findall(txt))
-        if unrelated_hits >= 2 and (not query_entity or query_entity not in txt):
-            penalties += 0.9 + (0.2 * min(4, unrelated_hits))
+        mixed_topic_hits = _generic_mixed_topic_fragment_count(txt_raw[:1800])
+        if mixed_topic_hits >= 3 and (not query_entity or query_entity not in txt):
+            penalties += 0.9 + (0.2 * min(4, mixed_topic_hits))
 
         legacy_score = _boost(doc)
         explain_score = semantic_score + keyword_overlap + explanation_bonus - penalties
@@ -15788,7 +16493,7 @@ def _rerank_docs_for_query_intent(query_text: str, retrieved_docs: list[dict]) -
                 _table = _looks_table_or_heading_like_chunk(_txt[:1800])
                 _classif = bool(table_or_classification_re.search(_low[:1400]))
                 _short = len(_txt.strip()) < 160
-                _unrelated = len(unrelated_concepts_re.findall(_low)) >= 2 and (not query_entity or query_entity not in _low)
+                _unrelated = _generic_mixed_topic_fragment_count(_txt[:1800]) >= 3 and (not query_entity or query_entity not in _low)
                 _lines = [ln.strip() for ln in _txt.splitlines() if ln.strip()]
                 _bullet_lines = [ln for ln in _lines if list_like_re.match(ln)]
                 _bullet_ratio = (len(_bullet_lines) / max(1, len(_lines))) if _lines else 0.0
@@ -36553,14 +37258,70 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             or (arabic_mode and _is_explanation_intent_query(original_arabic_text))
         )
         if explanation_mode and not is_generation_query_requested:
-            explanation_source_docs = explanation_candidate_doc_dicts or doc_dicts
-            answer_generation_t0 = time.perf_counter()
-            explanation_answer = await _build_controlled_explanation_answer(
-                text,
+            explanation_source_docs = _dedup_docs_exact_text(
+                list(doc_dicts or []) + [
+                    candidate_doc for candidate_doc in (explanation_candidate_doc_dicts or [])
+                    if candidate_doc not in (doc_dicts or [])
+                ]
+            ) or (explanation_candidate_doc_dicts or doc_dicts)
+            explanation_builder_query = text
+            explanation_ranked_docs = _rank_explanation_docs_for_query(
+                explanation_builder_query,
                 explanation_source_docs,
-                language=("ar" if arabic_mode else "en"),
-                original_query_text=(original_arabic_text if arabic_mode else original_query_text),
+                max_docs=3,
             )
+            if (
+                not explanation_ranked_docs
+                and arabic_mode
+                and original_arabic_text
+                and not bool(t_meta.get("ar_external_query_provider"))
+            ):
+                try:
+                    external_text_for_rag, external_query_provider = await _build_external_arabic_explanation_query(original_arabic_text, t_meta)
+                except Exception:
+                    logger.exception("[EXPLANATION MODE] external_non_llm_fallback_failed")
+                    external_text_for_rag, external_query_provider = "", "failed"
+                if external_text_for_rag:
+                    try:
+                        external_docs_raw = _search_fast_minimal(external_text_for_rag, top_k=10) or []
+                        if "protected_terms" in locals() and protected_terms:
+                            external_docs_raw = _filter_docs_by_protected_terms(external_docs_raw or [], protected_terms)
+                        external_docs_raw = _filter_results_to_active_sources(external_docs_raw or [])
+                        external_doc_dicts = _prepare_rag_doc_dicts_shared(external_docs_raw, external_text_for_rag)
+                        external_ranked_docs = _rank_explanation_docs_for_query(
+                            external_text_for_rag,
+                            external_doc_dicts,
+                            max_docs=3,
+                        )
+                    except Exception:
+                        logger.exception("[EXPLANATION MODE] external_non_llm_fallback_retrieval_failed provider=%s", external_query_provider)
+                        external_ranked_docs = []
+                    if external_ranked_docs:
+                        logger.info(
+                            "[EXPLANATION MODE] external_non_llm_fallback accepted provider=%s docs=%d",
+                            external_query_provider,
+                            len(external_ranked_docs),
+                        )
+                        explanation_builder_query = external_text_for_rag
+                        explanation_ranked_docs = external_ranked_docs
+                    else:
+                        logger.info(
+                            "[EXPLANATION MODE] external_non_llm_fallback weak provider=%s docs=%d",
+                            external_query_provider,
+                            len(external_docs_raw or []) if 'external_docs_raw' in locals() else 0,
+                        )
+            explanation_source_docs = explanation_ranked_docs
+            answer_generation_t0 = time.perf_counter()
+            if explanation_source_docs:
+                explanation_answer = await _build_controlled_explanation_answer(
+                    explanation_builder_query,
+                    explanation_source_docs,
+                    language=("ar" if arabic_mode else "en"),
+                    original_query_text=(original_arabic_text if arabic_mode else original_query_text),
+                )
+            else:
+                logger.info("[EXPLANATION MODE] fallback=weak_ranked_docs_before_builder")
+                explanation_answer = RAG_NO_MATCH_RESPONSE
             t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
             explanation_answer = str(explanation_answer or "").strip() or RAG_NO_MATCH_RESPONSE
             try:
