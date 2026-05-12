@@ -6208,6 +6208,8 @@ def _doc_router_implies_comparison(query_text: str) -> bool:
     q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
     if not q:
         return False
+    if _is_definition_comparison_query(q):
+        return False
     return bool(
         re.search(r"\b(?:difference|differences|distinction)\b", q)
         or re.search(r"\b(?:differentiate|distinguish)\s+between\b", q)
@@ -9241,6 +9243,8 @@ def _resolve_grounded_answer_route(query_text: str) -> str:
         return "generic"
     if _detect_fact_query_type(query_text):
         return "fact"
+    if _is_definition_comparison_query(query_text):
+        return "definition"
     if _doc_router_implies_comparison(query_text):
         return "generic"
     if _is_targeted_list_question(q) or re.match(r"^\s*(?:what|which)\s+are\b", q):
@@ -9255,7 +9259,9 @@ _DIRECT_DEFINITION_CUE_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _ANY_DEFINITION_CUE_RE = re.compile(
-    r"\b(?:is|are|refers\s+to|means|can\s+be\s+defined\s+as|is\s+defined\s+as|are\s+defined\s+as|defined\s+as|involves|includes|consists\s+of|characterized\s+by|focuses\s+on|deals\s+with)\b",
+    r"\b(?:is|are|refers\s+to|means|can\s+be\s+defined\s+as|is\s+defined\s+as|are\s+defined\s+as|defined\s+as|"
+    r"involves|include|includes|included|consists\s+of|characteri[sz]ed\s+by|focuses\s+on|deals\s+with|"
+    r"considered|classified|regarded|viewed|treated|relies\s+on|depends\s+on|requires)\b",
     flags=re.IGNORECASE,
 )
 
@@ -9266,14 +9272,6 @@ def _preview_for_quality_log(text: str, limit: int = 180) -> str:
 
 def _ocr_filter_rejected_reason(text: str, query_text: str = "") -> str | None:
     raw_lines = [str(ln or "").strip() for ln in str(text or "").splitlines() if str(ln or "").strip()]
-    if len(raw_lines) >= 2:
-        bullet_lines = [ln for ln in raw_lines if re.match(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+\S", ln)]
-        if len(bullet_lines) >= 2 and len(bullet_lines) >= max(2, int(len(raw_lines) * 0.70)):
-            # P6: protect well-structured bullet/letter/number lists from
-            # OCR rejection and surface that decision in the logs.
-            logger.info("[OCR FILTER] allowed_structured_list=True bullet_lines=%d total_lines=%d",
-                        len(bullet_lines), len(raw_lines))
-            return None
     s = re.sub(r"\s+", " ", str(text or "").strip())
     if not s:
         return "empty"
@@ -9281,6 +9279,74 @@ def _ocr_filter_rejected_reason(text: str, query_text: str = "") -> str | None:
         return None
     low = s.lower()
     query_low = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    explicit_list_or_table_query = bool(
+        query_low
+        and (
+            _is_targeted_list_question(query_low)
+            or re.match(r"^\s*(?:what|which)\s+are\b", query_low)
+            or re.search(r"\b(?:list|table|figure|fig\.?|columns?|rows?|items?|types?|kinds?|categories?)\b", query_low)
+        )
+    )
+
+    number_words = {
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    }
+    table_fragment_words = {
+        "row", "rows", "column", "columns", "group", "groups", "discipline", "disciplines",
+        "type", "types", "kind", "kinds", "category", "categories", "figure", "fig", "table",
+        "chapter", "section", "unit", "page", "pages", "item", "items", "number", "numbers",
+    }
+
+    def _line_fragment_reason(line_value: str) -> str | None:
+        payload = re.sub(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+", "", str(line_value or "").strip())
+        payload = re.sub(r"\s+", " ", payload).strip(" \t\r\n,;:-")
+        if not payload:
+            return "empty_line_fragment"
+        payload_low = payload.lower()
+        alpha_words = re.findall(r"[A-Za-z][A-Za-z\-']*", payload)
+        if not alpha_words:
+            return "no_alpha_words"
+        if re.search(r"https?://|www\.|\bisbn\b|copyright|all\s+rights\s+reserved", payload_low):
+            return "source_footer_or_link"
+        if re.search(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)[a-z]{3,}\b", payload_low):
+            return "merged_number_word"
+        if re.search(r"\b(?:[bcdfghjklmnpqrstvwxyz]{6,})\b", payload_low):
+            return "consonant_dense_ocr"
+        if re.search(r"(?<!['’])\b(?![ai]\b)[a-z]\s+[a-z]{3,}\b", payload_low):
+            return "split_ocr_word"
+        if re.search(r"\b[a-z]{3,}\s+(?:ves|tion|tions|ment|ments|ing|ed|er|ers|al|ally|ity|ities|es)\b", payload_low):
+            return "split_ocr_suffix"
+        if len(payload) >= 12:
+            symbol_ratio = len(re.findall(r"[^A-Za-z0-9\s]", payload)) / float(max(1, len(payload)))
+            if symbol_ratio > 0.28:
+                return "symbol_dense_fragment"
+        if len(alpha_words) == 1:
+            only = alpha_words[0].lower()
+            query_has_word = bool(query_low and _token_match_light(query_low, only))
+            if only in number_words:
+                return "count_word_fragment"
+            if only in table_fragment_words and not query_has_word:
+                return "table_column_fragment"
+        if not explicit_list_or_table_query:
+            meaningful = [w for w in alpha_words if len(w) >= 3]
+            has_verb = bool(re.search(r"\b(?:is|are|was|were|be|being|been|has|have|had|does|do|did|means|refers|include|includes|included|involves|describes|explains|contains|consists|focuses|considered|classified|regarded|viewed|treated|relies\s+on|depends\s+on|requires)\b", payload_low))
+            if len(meaningful) < 4 and not has_verb:
+                return "too_few_meaningful_words"
+        return None
+
+    if len(raw_lines) >= 2:
+        bullet_lines = [ln for ln in raw_lines if re.match(r"^\s*(?:[-*\u2022]|\d+[.)]|[A-Za-z][.)])\s+\S", ln)]
+        if len(bullet_lines) >= 2 and len(bullet_lines) >= max(2, int(len(raw_lines) * 0.70)):
+            for bullet_line in bullet_lines:
+                line_reason = _line_fragment_reason(bullet_line)
+                if line_reason:
+                    return f"bullet_{line_reason}"
+            # P6: protect well-structured bullet/letter/number lists from
+            # OCR rejection and surface that decision in the logs.
+            logger.info("[OCR FILTER] allowed_structured_list=True bullet_lines=%d total_lines=%d",
+                        len(bullet_lines), len(raw_lines))
+            return None
     # P6: query-context-aware filtering. Compute meaningful tokens from the
     # query so we can suppress generic OCR rejections when the sentence
     # actually mentions the queried concept. No domain-specific words.
@@ -9300,6 +9366,9 @@ def _ocr_filter_rejected_reason(text: str, query_text: str = "") -> str | None:
         return "too_short_fragment"
     if re.search(r"\b(?:www\.|https?://|isbn|copyright|all\s+rights\s+reserved)\b", low):
         return "source_footer_or_link"
+    line_reason = _line_fragment_reason(s)
+    if line_reason and line_reason not in {"too_few_meaningful_words"}:
+        return line_reason
     if re.search(r"(?:\b[A-Za-z]\s+){4,}\b", s):
         return "broken_spaced_letters"
     if re.search(r"\b(?:page|p\.)\s*\d{1,4}\b", low) and len(words) <= 12 and not sentence_mentions_entity:
@@ -9325,7 +9394,23 @@ def _ocr_filter_rejected_reason(text: str, query_text: str = "") -> str | None:
     if len(lines) >= 2 and len(set(lines)) == 1:
         return "repeated_title_text"
     has_sentence_punct = bool(re.search(r"[.!?]$", s))
-    has_predicate = bool(re.search(r"\b(?:is|are|was|were|means|refers\s+to|includes|involves|describes|explains|contains)\b", low))
+    has_predicate = bool(re.search(r"\b(?:is|are|was|were|means|refers\s+to|include|includes|included|involves|describes|explains|contains|consists\s+of|focuses\s+on|considered|classified|regarded|viewed|treated|relies\s+on|depends\s+on|requires)\b", low))
+    structured_sentence_mode = bool(
+        query_low
+        and (
+            _is_definition_comparison_query(query_low)
+            or _is_definition_style_query(query_low)
+            or _is_explanation_intent_query(query_low)
+        )
+    )
+    if structured_sentence_mode:
+        meaningful_words = [w for w in words if len(w) >= 3]
+        if len(meaningful_words) < 4:
+            return "too_few_meaningful_words"
+        if not has_predicate:
+            return "no_predicate_fragment"
+        if (not has_sentence_punct) and len(meaningful_words) < 8:
+            return "incomplete_sentence_fragment"
     cap_words = re.findall(r"\b[A-Z][A-Za-z]{2,}\b", s)
     if (not has_sentence_punct) and (not has_predicate) and len(words) <= 12 and len(cap_words) >= max(3, len(words) // 2):
         return "heading_fragment"
@@ -10160,6 +10245,295 @@ def _extract_definition_route_answer(query_text: str, docs: list[dict]) -> str |
     return None
 
 
+def _cleanup_definition_comparison_answer_text(value: str) -> str:
+    text = clean_ocr_noise(re.sub(r"[ \t]+", " ", str(value or "")).strip())
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(
+        r"\b([A-Za-z][A-Za-z0-9\-]*)[\"“”]\s+(?=(?:is|are|was|were|means|refers)\b)",
+        r"\1 ",
+        text,
+    )
+    parts = [p.strip(" \t\r\n,;:-") for p in re.split(r"(?<=[.!?])\s+", text) if p.strip(" \t\r\n,;:-")]
+    deduped_parts: list[str] = []
+    seen_part_norms: set[str] = set()
+    for part in parts or [text]:
+        cleaned_part = re.sub(r"\s+", " ", str(part or "")).strip(" \t\r\n,;:-")
+        if not cleaned_part:
+            continue
+        if not re.search(r"[.!?]$", cleaned_part):
+            cleaned_part += "."
+        norm_part = re.sub(r"[^a-z0-9]+", " ", cleaned_part.lower()).strip()
+        if not norm_part or norm_part in seen_part_norms:
+            continue
+        seen_part_norms.add(norm_part)
+        deduped_parts.append(cleaned_part)
+    return " ".join(deduped_parts).strip('"\'“”‘’')
+
+
+def _extract_definition_comparison_answer(query_text: str, docs: list[dict]) -> str | None:
+    if not _is_definition_comparison_query(query_text):
+        return None
+    docs = list(docs or [])
+    if not docs:
+        return None
+
+    has_entity, entity = _extract_entity_from_definition_query(query_text)
+    entity_l = re.sub(r"\s+", " ", str(entity or "").strip().lower()) if has_entity else ""
+    entity_tokens = [
+        t for t in re.findall(r"[a-z0-9]{3,}", entity_l)
+        if t not in {"the", "and", "for", "with", "from"}
+    ]
+    if not entity_l and not entity_tokens:
+        return None
+
+    q_low = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    query_stop = {
+        "what", "which", "who", "when", "where", "why", "how", "does", "do", "did",
+        "the", "a", "an", "of", "to", "in", "on", "for", "from", "with", "and", "or",
+        "text", "document", "book", "source", "passage", "chapter", "section", "author",
+        "define", "defines", "defined", "definition", "definitions", "meaning", "sense", "both",
+        "compare", "contrast", "difference", "between", "considered", "viewed", "treated", "regarded",
+        "described", "describe", "explain", "why", "are", "is", "was", "were", "as", "its", "their",
+    }
+    entity_token_set = set(entity_tokens)
+    focus_tokens = []
+    seen_focus: set[str] = set()
+    for tok in re.findall(r"[a-z0-9]{3,}", q_low):
+        norm = _light_normalize_query_token(tok)
+        if not norm or norm in query_stop or norm in entity_token_set or norm in seen_focus:
+            continue
+        seen_focus.add(norm)
+        focus_tokens.append(norm)
+    focus_tokens = focus_tokens[:8]
+
+    definition_or_explanation_re = re.compile(
+        r"\b(?:is|are|was|were|means|refers\s+to|defined\s+as|can\s+be\s+defined|"
+        r"include|includes|included|involves|consists\s+of|characteri[sz]ed\s+by|focuses\s+on|"
+        r"describes|explains|considered|viewed|treated|regarded|classified|relies\s+on|depends\s+on|requires)\b",
+        flags=re.IGNORECASE,
+    )
+
+    def _entity_hit(text_value: str) -> bool:
+        low_value = str(text_value or "").lower()
+        if entity_l and re.search(rf"\b{re.escape(entity_l)}\b", low_value):
+            return True
+        if entity_tokens:
+            hits = sum(1 for tok in entity_tokens if _token_match_light(low_value, tok))
+            return hits >= max(1, min(2, len(entity_tokens)))
+        return False
+
+    def _focus_hits(text_value: str) -> set[str]:
+        low_value = str(text_value or "").lower()
+        return {tok for tok in focus_tokens if _token_match_light(low_value, tok)}
+
+    candidates: list[tuple[float, int, str, set[str]]] = []
+    seen_sentences: set[str] = set()
+    for doc_rank, doc in enumerate(docs[:8]):
+        raw_text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+        raw_text = _clean_ocr_artifacts(raw_text) or raw_text
+        if not raw_text.strip():
+            continue
+        raw_sentence_pool = _split_text_into_sentences(raw_text)[:80]
+        sentence_pool: list[str] = []
+        for idx, sentence in enumerate(raw_sentence_pool):
+            combined_sentence = str(sentence or "")
+            next_sentence = str(raw_sentence_pool[idx + 1] or "") if idx + 1 < len(raw_sentence_pool) else ""
+            if (
+                combined_sentence.rstrip().endswith(":")
+                and next_sentence
+                and len(re.findall(r"\b[A-Za-z][A-Za-z0-9'\-]*\b", next_sentence)) <= 18
+                and len(re.findall(r",", next_sentence)) >= 2
+            ):
+                combined_sentence = f"{combined_sentence.rstrip()} {next_sentence.strip()}"
+            sentence_pool.append(_clean_definition_like_sentence(combined_sentence))
+        for sentence_index, sentence in enumerate(sentence_pool):
+            sent = re.sub(r"\s+", " ", str(sentence or "").strip())
+            if not sent:
+                continue
+            sent = re.sub(r"^\s*(?:[A-Z]|\d{1,2})[.)]\s+(?=[A-Z\"'])", "", sent)
+            sent = clean_ocr_noise(sent)
+            sent = re.sub(r"\s+", " ", sent).strip(" \t\r\n,;:-")
+            sent = re.sub(
+                r"\b([A-Za-z][A-Za-z0-9\-]*)[\"“”]\s+(?=(?:is|are|was|were|means|refers)\b)",
+                r"\1 ",
+                sent,
+            )
+            if sent and not re.search(r"[.!?]$", sent):
+                sent = sent + "."
+            norm = re.sub(r"[^a-z0-9]+", " ", sent.lower()).strip()
+            if not norm or norm in seen_sentences:
+                continue
+            seen_sentences.add(norm)
+            if len(sent) > 320:
+                continue
+            words = re.findall(r"[A-Za-z][A-Za-z0-9'\-]*", sent)
+            if len(words) < 6 or len(words) > 48:
+                continue
+            hits = _focus_hits(sent)
+            direct_entity_hit = _entity_hit(sent)
+            nearby_window = " ".join(sentence_pool[max(0, sentence_index - 2): sentence_index + 1])
+            nearby_entity_hit = bool(hits and _entity_hit(nearby_window))
+            pronoun_supported = bool(
+                hits
+                and nearby_entity_hit
+                and re.match(r"^\s*(?:it|this|that|these|those|the)\b", sent, flags=re.IGNORECASE)
+            )
+            quality_entity = entity_l if direct_entity_hit else ""
+            quality_reason = _definition_quality_rejected_reason(sent, quality_entity, require_definition_cue=False, query_text=query_text)
+            if quality_reason and not (pronoun_supported and quality_reason in {"missing_query_entity", "pronoun_led_fragment"}):
+                continue
+            if _looks_table_or_heading_like_chunk(sent):
+                continue
+            if not definition_or_explanation_re.search(sent):
+                continue
+            has_entity = direct_entity_hit or pronoun_supported
+            if not has_entity:
+                continue
+            if focus_tokens and not hits:
+                scoreable_without_focus = bool(re.search(r"\b(?:definition|defined|means|refers\s+to)\b", sent.lower()))
+                if not scoreable_without_focus:
+                    continue
+
+            score = 0.0
+            score += 5.0 if direct_entity_hit else 3.0
+            score += 2.4 * len(hits)
+            if definition_or_explanation_re.search(sent):
+                score += 2.0
+            if q_low.startswith("why") and re.search(
+                r"\b(?:because|since|as\s+a\s+result|therefore|relies|requires|making|based\s+on|depends\s+on|cause[-\s]?and[-\s]?effect|principles?|methodolog(?:y|ies)|practice|creativity|knowledge)\b",
+                sent.lower(),
+            ):
+                score += 5.0
+            if entity_l and re.match(rf"^\s*(?:the\s+)?{re.escape(entity_l)}\b", sent.lower()):
+                score += 1.2
+            if 10 <= len(words) <= 32:
+                score += 0.8
+            score -= 0.15 * doc_rank
+            candidates.append((score, doc_rank, sent.rstrip(" .;:") + ".", hits))
+
+    if not candidates:
+        logger.info("[DEFINITION COMPARISON] rejected reason=no_coherent_sentences entity=%s", entity_l)
+        return None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    chosen: list[str] = []
+    chosen_norms: set[str] = set()
+    covered_focus: set[str] = set()
+    why_art_science = q_low.startswith("why") and {"art", "science"}.issubset(set(focus_tokens))
+
+    if why_art_science:
+        def _pick_reason(predicate) -> tuple[float, int, str, set[str]] | None:
+            for candidate in candidates:
+                sent_l = candidate[2].lower()
+                if predicate(sent_l):
+                    return candidate
+            return None
+
+        anchor_candidate = _pick_reason(lambda sent_l: bool(re.search(r"\bconsidered\s+both\s+an?\s+art\s+and\s+a\s+science\b", sent_l)))
+        if not anchor_candidate:
+            anchor_candidate = _pick_reason(lambda sent_l: bool(re.search(r"\bart\s+and\s+science\b", sent_l)))
+        special_candidates = [
+            anchor_candidate,
+            _pick_reason(lambda sent_l: bool(
+                "science" in sent_l
+                and re.search(r"\b(?:since|because|structured\s+field|concepts?|principles?|methodolog(?:y|ies)|cause\s*-?\s*and\s*-?\s*effect)\b", sent_l)
+            )),
+            _pick_reason(lambda sent_l: bool(
+                re.search(r"\b(?:art|art\s+form)\b", sent_l)
+                and re.search(r"\b(?:relies\s+on|practical\s+knowledge|personal\s+talents?|creativity|practice)\b", sent_l)
+            )),
+        ]
+        for candidate in special_candidates:
+            if not candidate:
+                continue
+            _score, _doc_rank, sent, hits = candidate
+            norm = re.sub(r"[^a-z0-9]+", " ", sent.lower()).strip()
+            if not norm or norm in chosen_norms:
+                continue
+            chosen.append(sent)
+            chosen_norms.add(norm)
+            covered_focus.update(hits)
+
+        if not any(re.search(r"\b(?:art\s+form|creativity|practical\s+knowledge|personal\s+talents?|practice)\b", sent.lower()) for sent in chosen):
+            for doc in docs[:8]:
+                raw_text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+                raw_text = _clean_ocr_artifacts(raw_text) or raw_text
+                if not raw_text.strip():
+                    continue
+                for raw_sentence in _split_text_into_sentences(raw_text)[:100]:
+                    sent = _clean_definition_like_sentence(raw_sentence)
+                    sent = clean_ocr_noise(re.sub(r"\s+", " ", str(sent or "").strip()))
+                    sent = re.sub(r"^\s*(?:[A-Z]|\d{1,2})[.)]\s+(?=[A-Z\"'])", "", sent)
+                    sent = re.sub(r"\s+", " ", sent).strip(" \t\r\n,;:-")
+                    if sent and not re.search(r"[.!?]$", sent):
+                        sent = sent + "."
+                    sent_l = sent.lower()
+                    if not sent or len(sent) > 320:
+                        continue
+                    if not _entity_hit(sent):
+                        continue
+                    if not re.search(r"\b(?:art|art\s+form)\b", sent_l):
+                        continue
+                    if not re.search(r"\b(?:relies\s+on|depends\s+on|requires|practical\s+knowledge|personal\s+talents?|creativity|practice|application)\b", sent_l):
+                        continue
+                    norm = re.sub(r"[^a-z0-9]+", " ", sent_l).strip()
+                    if not norm or norm in chosen_norms:
+                        continue
+                    quality_reason = _definition_quality_rejected_reason(sent, entity_l, require_definition_cue=False, query_text=query_text)
+                    if quality_reason:
+                        continue
+                    chosen.append(sent.rstrip(" .;:") + ".")
+                    chosen_norms.add(norm)
+                    covered_focus.update(_focus_hits(sent))
+                    break
+                if any(re.search(r"\b(?:art\s+form|creativity|practical\s+knowledge|personal\s+talents?|practice)\b", sent.lower()) for sent in chosen):
+                    break
+
+    for score, _doc_rank, sent, hits in candidates:
+        norm = re.sub(r"[^a-z0-9]+", " ", sent.lower()).strip()
+        if not norm or norm in chosen_norms:
+            continue
+        if why_art_science and not (hits & {"art", "science"}):
+            continue
+        if chosen and hits and hits <= covered_focus and len(chosen) >= 2:
+            continue
+        chosen.append(sent)
+        chosen_norms.add(norm)
+        covered_focus.update(hits)
+        if len(chosen) >= 4:
+            break
+        if focus_tokens and covered_focus >= set(focus_tokens[: max(1, min(4, len(focus_tokens)))]):
+            if len(chosen) >= 2:
+                break
+
+    if not chosen:
+        return None
+    if len(chosen) == 1 and len(candidates) > 1:
+        for _score, _doc_rank, sent, _hits in candidates[1:]:
+            norm = re.sub(r"[^a-z0-9]+", " ", sent.lower()).strip()
+            if norm and norm not in chosen_norms:
+                chosen.append(sent)
+                break
+
+    answer = _cleanup_definition_comparison_answer_text(" ".join(chosen[:4]))
+    if not answer or answer == RAG_NO_MATCH_RESPONSE:
+        return None
+    if _ocr_filter_rejected_reason(answer, query_text):
+        logger.info("[DEFINITION COMPARISON] rejected reason=ocr_filter answer=%s", answer[:220])
+        return None
+    if not _is_answer_grounded_in_docs(answer, docs, query_text=query_text):
+        logger.info("[DEFINITION COMPARISON] rejected reason=grounding_failed answer=%s", answer[:220])
+        return None
+
+    logger.info(
+        "[DEFINITION COMPARISON] selected sentences=%d focus=%s answer=%s",
+        len(chosen[:4]),
+        sorted(covered_focus),
+        answer[:260],
+    )
+    return answer
+
+
 def _append_rich_definition_context(query_text: str, docs: list[dict], base_answer: str) -> str:
     """Append at most two nearby grounded context sentences to a definition.
 
@@ -10332,6 +10706,114 @@ def _mpc6_anchor_score_for_text(text: str, query_text: str) -> int:
     return best
 
 
+def _extract_inline_numbered_figure_table_list(query_text: str, docs: list[dict]) -> str | None:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return None
+    if not re.search(r"\b(?:figure|fig\.?|table)\b", q):
+        return None
+    if not re.search(r"\b(?:list|name|identify|mention|what|which|types?|kinds?|categories?|activities?|items?|forms?)\b", q):
+        return None
+
+    figure_numbers = re.findall(r"\b(?:figure|fig\.?)\s*([0-9]+(?:\.[0-9]+)*)", q)
+    table_numbers = re.findall(r"\btable\s*([0-9]+(?:\.[0-9]+)*)", q)
+    requested_numbers = figure_numbers + table_numbers
+    label_tail_terms = {
+        "activity", "activities", "type", "types", "kind", "kinds", "category", "categories",
+        "form", "forms", "item", "items", "stage", "stages", "step", "steps", "method", "methods",
+        "process", "processes", "function", "functions", "role", "roles", "principle", "principles",
+        "approach", "approaches", "area", "areas", "field", "fields",
+    }
+    query_tail_terms = {
+        t for t in re.findall(r"[a-z]{4,}", q)
+        if t in label_tail_terms or (t.endswith("ies") and (t[:-3] + "y") in label_tail_terms)
+    }
+    if query_tail_terms:
+        label_tail_terms = set(label_tail_terms) | query_tail_terms
+
+    def _candidate_windows(text_value: str) -> list[str]:
+        clean_text = _clean_ocr_artifacts(text_value) or text_value
+        clean_text = re.sub(r"\s+", " ", str(clean_text or "")).strip()
+        if not clean_text:
+            return []
+        windows: list[str] = []
+        if requested_numbers:
+            for num in requested_numbers:
+                caption_re = re.compile(rf"\b(?:figure|fig\.?|table)\s*{re.escape(num)}\b", flags=re.IGNORECASE)
+                for match in caption_re.finditer(clean_text):
+                    start = max(0, match.start() - 2400)
+                    end = min(len(clean_text), match.end() + 700)
+                    windows.append(clean_text[start:end])
+        if not windows:
+            for match in re.finditer(r"\b(?:figure|fig\.?|table)\s*\d+(?:\.\d+)*\b", clean_text, flags=re.IGNORECASE):
+                start = max(0, match.start() - 2200)
+                end = min(len(clean_text), match.end() + 700)
+                windows.append(clean_text[start:end])
+        if not windows:
+            windows.append(clean_text[:3600])
+        return windows[:4]
+
+    def _extract_label(item_body: str) -> str:
+        body = re.sub(r"\b(?:figure|fig\.?|table)\s*\d+(?:\.\d+)*\s*[:\-–—].*$", "", str(item_body or ""), flags=re.IGNORECASE)
+        body = re.sub(r"\s+", " ", body).strip(" \t\r\n,;:-")
+        if not body:
+            return ""
+        for tail in sorted(label_tail_terms, key=len, reverse=True):
+            m = re.match(rf"^(.{{2,90}}?\b{re.escape(tail)}\b)", body, flags=re.IGNORECASE)
+            if not m:
+                continue
+            label = re.sub(r"\s+", " ", (m.group(1) or "")).strip(" ,;:-")
+            if 1 <= len(re.findall(r"[A-Za-z][A-Za-z\-']*", label)) <= 6:
+                return label
+        m = re.match(
+            r"^(.{2,90}?)(?=\s+(?:it|they|this|these|the|a|an|managers?|bringing|includes?|entails?|requires?|necessitates?|involves?|refers?|means?|is|are)\b)",
+            body,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            label = re.sub(r"\s+", " ", (m.group(1) or "")).strip(" ,;:-")
+            if 1 <= len(re.findall(r"[A-Za-z][A-Za-z\-']*", label)) <= 6:
+                return label
+        return ""
+
+    collected: list[str] = []
+    seen: set[str] = set()
+    for doc in (docs or [])[:10]:
+        text = str((doc or {}).get("page_content") or (doc or {}).get("text") or (doc or {}).get("content") or "")
+        if not text.strip():
+            continue
+        for window in _candidate_windows(text):
+            markers = list(re.finditer(r"(?<!\d)(\d{1,2})[.)]\s+", window))
+            if len(markers) < 2:
+                continue
+            local_items: list[str] = []
+            for idx, marker in enumerate(markers[:16]):
+                number = int(marker.group(1) or "0")
+                if idx > 0:
+                    prev_number = int(markers[idx - 1].group(1) or "0")
+                    if number != prev_number + 1:
+                        continue
+                start = marker.end()
+                end = markers[idx + 1].start() if idx + 1 < len(markers) else min(len(window), start + 420)
+                label = _extract_label(window[start:end])
+                if not label:
+                    continue
+                reject_reason = _strict_list_label_reject_reason(label, max_words=6)
+                if reject_reason:
+                    _log_list_quality_rejection(label, f"inline_figure_{reject_reason}")
+                    continue
+                norm = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+                if not norm or norm in seen:
+                    continue
+                seen.add(norm)
+                local_items.append(label[:1].upper() + label[1:])
+            if len(local_items) >= 3:
+                collected.extend(local_items)
+                logger.info("[INLINE FIGURE LIST] extracted=%d items=%s", len(local_items), [x[:60] for x in local_items[:10]])
+                return "\n".join(f"- {item}" for item in collected[:12])
+    return None
+
+
 def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: str = "", extra_docs: list[dict] | None = None) -> str | None:
     docs = list(docs or [])
     if not docs:
@@ -10428,6 +10910,13 @@ def _extract_list_route_answer(query_text: str, docs: list[dict], context_text: 
         if len(lines) >= 3 and avg_wc <= 3.0:
             return True
         return True
+
+    figure_table_answer = _extract_inline_numbered_figure_table_list(query_text, list(docs or []) + list(extra_docs or []))
+    if figure_table_answer:
+        shaped_figure_table = _sanitize_list_answer_text(query_text, figure_table_answer)
+        if shaped_figure_table and _list_relevance_ok(shaped_figure_table, docs):
+            logger.info("[LIST ROUTE] mode=inline_figure_table items=%d", len([ln for ln in shaped_figure_table.splitlines() if ln.strip()]))
+            return shaped_figure_table
 
     counted_route_info = _detect_short_symbolic_list_query(query_text)
     if counted_route_info and _is_counted_category_list_query_info(counted_route_info):
@@ -11148,6 +11637,7 @@ def _clean_definition_like_sentence(sentence: str) -> str:
     s = re.sub(r"\bprovides\s+answers\s+to\s+all\s+these\s+questions\b", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s*,?\s*and\s+(?:i|ii|iii|iv|v)\.?\s*$", "", s, flags=re.IGNORECASE)
     s = re.sub(r"\s*[-•]\s*$", "", s)
+    s = re.sub(r"\b([A-Za-z][A-Za-z0-9\-]*)[\"“”]\s+(?=(?:is|are|was|were|means|refers)\b)", r"\1 ", s)
     s = re.sub(r"\s+", " ", s).strip()
     return s.strip(" \t\n\r\"'`.,;:!?()[]{}")
 
@@ -11440,6 +11930,80 @@ def _is_explanation_intent_query(query: str) -> bool:
     if _EXPLANATION_INTENT_RE_AR.search(q):
         return True
     return False
+
+
+def _is_simple_fact_definition_or_list_query(query: str) -> bool:
+    q_raw = str(query or "").strip()
+    if not q_raw:
+        return False
+    if _is_memory_rewrite_query(q_raw):
+        return False
+    if _is_definition_comparison_query(q_raw):
+        return True
+    if _is_compare_query(q_raw):
+        return False
+    if _is_arabic_text(q_raw):
+        normalized_ar = _normalize_arabic_query_surface(q_raw)
+        if _looks_like_arabic_list_query(q_raw) or _AR_DEFINITION_QUERY_RE.search(normalized_ar):
+            return True
+    if _is_targeted_list_question(q_raw):
+        return True
+    if _detect_fact_query_type(q_raw):
+        return True
+    if not _is_definition_style_query(q_raw):
+        return False
+    if _explanation_relationship_concept_groups(q_raw):
+        return False
+    q = re.sub(r"\s+", " ", q_raw.lower())
+    if re.match(r"^\s*why\b", q):
+        return False
+    if re.match(
+        r"^\s*how\s+(?:does|do|can|could)\s+.+\s+"
+        r"(?:support|supports|help|helps|contribute|contributes|relate|relates|"
+        r"connect|connects|affect|affects|influence|influences|link|links)\b",
+        q,
+    ):
+        return False
+    return True
+
+
+def _is_relationship_or_explanation_query(query: str) -> bool:
+    q_raw = str(query or "").strip()
+    if not q_raw:
+        return False
+    if _is_simple_fact_definition_or_list_query(q_raw):
+        return False
+    if _is_arabic_text(q_raw):
+        normalized_ar = _normalize_arabic_query_surface(q_raw)
+        if _AR_EXPLANATION_QUERY_RE.search(normalized_ar):
+            return True
+    if _explanation_relationship_concept_groups(q_raw):
+        return True
+    query_features = set(_explanation_query_features(q_raw))
+    if query_features.intersection({"importance", "reason", "relationship", "support", "role"}):
+        return True
+    return _is_explanation_intent_query(q_raw)
+
+
+def _classify_simple_recovery_query_type(
+    query_text: str,
+    original_query_text: str = "",
+    original_arabic_text: str = "",
+) -> str:
+    surfaces: list[str] = []
+    for value in (original_arabic_text, original_query_text, query_text):
+        cleaned = re.sub(r"\s+", " ", str(value or "").strip())
+        if cleaned and cleaned not in surfaces:
+            surfaces.append(cleaned)
+    if any(_is_memory_rewrite_query(value) for value in surfaces):
+        return "followup_memory"
+    if any(_is_definition_comparison_query(value) for value in surfaces):
+        return "definition_comparison"
+    if any(_is_simple_fact_definition_or_list_query(value) for value in surfaces):
+        return "simple_fact_definition"
+    if any(_is_relationship_or_explanation_query(value) for value in surfaces):
+        return "relationship_explanation"
+    return "direct_grounded"
 
 
 def _explanation_query_features(query_text: str) -> list[str]:
@@ -11956,7 +12520,7 @@ def _select_explanation_topic_group(docs: list[dict], query_text: str) -> list[d
         if not usable_sentence_scores:
             continue
         best_sentence_score = max(usable_sentence_scores)
-        if best_sentence_score < (3.0 if relationship_mode else 3.4):
+        if best_sentence_score < 3.0:
             continue
         metadata = dict((doc_candidate or {}).get("metadata") or {})
         key = (
@@ -12367,8 +12931,16 @@ def _rank_explanation_docs_for_query(query_text: str, docs: list[dict], max_docs
     if not scored_rows:
         return []
     scored_rows.sort(key=lambda row: (-row[0], row[3]))
-    minimum_score = 4.2 if relationship_mode else 3.7
+    minimum_score = 4.2 if relationship_mode else 3.3
     strong_rows = [row for row in scored_rows if row[0] >= minimum_score and row[7] > 0]
+    logger.info(
+        "[EXPLAIN FILTER TRACE] relationship_mode=%s threshold=%.2f candidates=%d strong=%d best=%.3f",
+        bool(relationship_mode),
+        minimum_score,
+        len(scored_rows),
+        len(strong_rows),
+        float(scored_rows[0][0]),
+    )
     if not strong_rows:
         logger.info("[EXPLANATION MODE] fallback=weak_explanation_rank best=%.2f threshold=%.2f", scored_rows[0][0], minimum_score)
         return []
@@ -12476,7 +13048,7 @@ def _build_controlled_explanation_answer_en(query_text: str, docs: list[dict]) -
                 primary_group=primary_group,
                 query_features=query_features,
             )
-            if score < (3.0 if relationship_mode else 3.4):
+            if score < 3.0:
                 continue
             hit_indices = _explanation_hit_group_indices(cleaned_sentence, concept_groups)
             scored_sentences.append((score, sentence_index + (doc_rank * 1000), cleaned_sentence, hit_indices))
@@ -12643,6 +13215,83 @@ async def _build_controlled_explanation_answer(
         if translated:
             return translated
     return answer_en
+
+
+def _safe_grounded_concise_explanation_extraction(query_text: str, docs: list[dict], max_lines: int = 2) -> str:
+    source_docs = _dedup_docs_exact_text(list(docs or []))
+    if not source_docs:
+        return RAG_NO_MATCH_RESPONSE
+    query_focus = _explanation_focus_tokens(query_text)
+    if not query_focus:
+        return RAG_NO_MATCH_RESPONSE
+    query_features = _explanation_query_features(query_text)
+    relationship_groups = _explanation_relationship_concept_groups(query_text)
+    relationship_mode = bool(len(relationship_groups) >= 2)
+    primary_group = relationship_groups[0] if relationship_mode else _explanation_primary_concept_group(query_text, query_focus)
+    concept_groups = relationship_groups if relationship_mode else ([primary_group] if primary_group else [])
+    filtered_docs = _filter_docs_for_explanation(source_docs[:8], query_text)
+    if not filtered_docs:
+        return RAG_NO_MATCH_RESPONSE
+
+    scored_rows: list[tuple[float, int, str, set[int]]] = []
+    for doc_rank, doc_candidate in enumerate(filtered_docs[:8]):
+        doc_text = _explanation_doc_text(doc_candidate)
+        for sentence_index, sentence_text in enumerate(_split_explanation_candidates(doc_text)[:30]):
+            cleaned_sentence = _clean_explanation_sentence(sentence_text)
+            if not _is_usable_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                needs_direct_cue=True,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+            ):
+                continue
+            score = _score_explanation_sentence(
+                cleaned_sentence,
+                query_focus,
+                doc_rank,
+                concept_groups=concept_groups,
+                relationship_mode=relationship_mode,
+                primary_group=primary_group,
+                query_features=query_features,
+            )
+            if score < (2.7 if relationship_mode else 2.9):
+                continue
+            scored_rows.append((score, sentence_index + (doc_rank * 1000), cleaned_sentence, _explanation_hit_group_indices(cleaned_sentence, concept_groups)))
+
+    if not scored_rows:
+        return RAG_NO_MATCH_RESPONSE
+    scored_rows.sort(key=lambda row: (-row[0], row[1]))
+    selected_lines: list[str] = []
+    selected_groups: set[int] = set()
+    direct_relationship = False
+    for _score, _order, sentence_text, hit_groups in scored_rows:
+        if any(_explanation_lines_too_similar(sentence_text, existing) for existing in selected_lines):
+            continue
+        selected_lines.append(sentence_text)
+        selected_groups.update(hit_groups)
+        if relationship_mode and concept_groups and len(hit_groups) >= len(concept_groups):
+            direct_relationship = True
+        if len(selected_lines) >= max(1, max_lines):
+            break
+
+    if not selected_lines:
+        return RAG_NO_MATCH_RESPONSE
+    if relationship_mode and len(concept_groups) >= 2:
+        required_groups = set(range(len(concept_groups)))
+        if not required_groups.issubset(selected_groups) and not direct_relationship:
+            return RAG_NO_MATCH_RESPONSE
+        if len(selected_lines) < 2 and not direct_relationship:
+            return RAG_NO_MATCH_RESPONSE
+
+    logger.info(
+        "[EXPLANATION MODE] safe_concise_extraction accepted lines=%d relationship=%s focus=%s",
+        len(selected_lines),
+        bool(relationship_mode),
+        query_focus,
+    )
+    return "\n".join(f"- {line}" for line in selected_lines[:max_lines]).strip() or RAG_NO_MATCH_RESPONSE
 
 
 def _definition_explanation_fallback(query_text: str, docs: list[dict], entity: str = "") -> Optional[str]:
@@ -13239,9 +13888,14 @@ def _is_valid_definition_sentence(sentence: str, entity: str) -> bool:
 
 
 def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str:
-    if _doc_router_implies_comparison(query):
+    is_definition_comparison_mode = _is_definition_comparison_query(query)
+    if _doc_router_implies_comparison(query) and not is_definition_comparison_mode:
         return _cleanup_final_answer_text(str(answer or "").strip())
-    ans = _cleanup_final_answer_text(re.sub(r"\s+", " ", str(answer or "").strip()))
+    raw_answer = re.sub(r"\s+", " ", str(answer or "").strip())
+    if is_definition_comparison_mode:
+        ans = _cleanup_definition_comparison_answer_text(raw_answer)
+    else:
+        ans = _cleanup_final_answer_text(raw_answer)
     is_explain_mode = _is_ws_explain_query_mode(query)
     is_definition_mode = _is_ws_definition_query_mode(query)
     if not (is_explain_mode or is_definition_mode):
@@ -13297,7 +13951,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
         )
         return _cleanup_final_answer_text(out)
 
-    if ans and ans.lower() != not_found.lower():
+    if ans and ans.lower() != not_found.lower() and not is_definition_comparison_mode:
         _polished = _mpc7_polish_definition_tail(ans)
         if _polished:
             ans = _polished
@@ -13318,6 +13972,22 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
         match_tokens = [t for t in etoks if t not in generic_entity_tokens] or etoks
         token_hits = sum(1 for t in match_tokens if re.search(rf"\b{re.escape(t)}\b", text_l))
         return token_hits >= 1
+
+    if is_definition_comparison_mode:
+        if (
+            ans
+            and ans.lower() != not_found.lower()
+            and _entity_grounded_in_text(ans.lower())
+            and _is_answer_grounded_in_docs(ans, docs or [], query_text=query)
+            and not _ocr_filter_rejected_reason(ans, query)
+        ):
+            logger.info("[WS FIXED ANSWER] mode=preserve_definition_comparison answer=%s", ans[:220])
+            return ans
+        comparison_answer = _extract_definition_comparison_answer(query, docs or [])
+        if comparison_answer:
+            logger.info("[WS FIXED ANSWER] mode=definition_comparison_route answer=%s", comparison_answer[:220])
+            return comparison_answer
+        return not_found
 
     if is_definition_mode and ans and ans.lower() != not_found.lower():
         ans_l = ans.lower()
@@ -13599,7 +14269,7 @@ def _ws_fix_explanation_answer(query: str, answer: str, docs: list[dict]) -> str
     generic_answer = _build_grounded_llm_answer(query, docs)
     if generic_answer:
         _family_v2_for_generic = _classify_query_family_v2(query)
-        if _family_v2_for_generic not in {"definition_entity", "list_entity", "explanatory_compare", "fact_entity"} and not _should_allow_generic_answer(query, docs or [], _family_v2_for_generic, "ws_fix_generic_extracted"):
+        if _family_v2_for_generic not in {"definition_entity", "definition_comparison", "list_entity", "explanatory_compare", "fact_entity"} and not _should_allow_generic_answer(query, docs or [], _family_v2_for_generic, "ws_fix_generic_extracted"):
             logger.info("[ANSWER BLOCKED] reason=low_confidence_generic")
             return not_found
         logger.info("[WS FIXED ANSWER] mode=generic extracted=%s", generic_answer[:220])
@@ -17287,7 +17957,7 @@ def _log_answer_mode_markers(query_text: str, doc_dicts: list[dict], answer_text
 
     resolved_source_mode = source_mode
     if source_mode in {"extractor", "llm"}:
-        if family_v2 == "definition_entity":
+        if family_v2 in {"definition_entity", "definition_comparison"}:
             resolved_source_mode = "definition"
         elif family_v2 == "fact_entity":
             resolved_source_mode = "fact"
@@ -18647,6 +19317,8 @@ def _is_definition_style_query(query_text: str) -> bool:
     q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
     if not q:
         return False
+    if _is_definition_comparison_query(q):
+        return False
     if _is_compare_query(q):
         return False
     # [DOMAIN CLEANUP] removed=hardcoded domain term blocklist (machine
@@ -18669,6 +19341,48 @@ def _is_definition_style_query(query_text: str) -> bool:
         r"^\s*what\s+is\s+the\s+idea\s+(?:of|behind)\s+.+\s*\??\s*$",
     ]
     return any(re.match(pat, q, flags=re.IGNORECASE) for pat in explanation_patterns)
+
+
+def _definition_comparison_reason(query_text: str) -> str:
+    q = re.sub(r"\s+", " ", str(query_text or "").strip().lower())
+    if not q:
+        return ""
+
+    definition_cue = bool(re.search(r"\b(?:define|defines|defined|definition|definitions|meaning|sense)\b", q))
+    both_comparison_cue = bool(
+        re.search(r"\bboth\b.{0,90}\band\b", q)
+        or re.search(r"\b(?:broad|general|wide|technical|narrow|specific|formal|informal)\b.{0,50}\band\b.{0,50}\b(?:broad|general|wide|technical|narrow|specific|formal|informal)\b", q)
+    )
+    if re.search(r"\bhow\s+does\s+(?:the\s+)?(?:text|document|book|source|passage|chapter|section|author)\s+define\b", q):
+        return "text_define_surface"
+    if definition_cue and re.search(r"\bin\s+both\b", q):
+        return "define_in_both"
+    if definition_cue and re.search(r"\bcompare\s+(?:the\s+)?definitions?\b|\bdefinitions?\s+(?:compare|differ|differing)\b", q):
+        return "compare_definitions"
+    if definition_cue and re.search(r"\bdifference\s+between\b.+\band\b.+\bdefinitions?\b", q):
+        return "difference_between_definition_senses"
+    if definition_cue and both_comparison_cue:
+        return "definition_with_two_senses"
+    if re.search(r"\b(?:considered|viewed|treated|regarded|described)\s+both\s+(?:as\s+)?(?:an?\s+)?[a-z0-9\- ]{1,40}?\s+and\s+(?:an?\s+)?[a-z0-9\- ]+", q):
+        return "considered_both_as"
+    if re.search(r"\bboth\s+(?:an?\s+)?(?:art|science)\s+and\s+(?:an?\s+)?(?:art|science)\b", q):
+        return "art_science_both_pair"
+    if re.search(r"\bas\s+(?:an?\s+)?(?:art|science)\s+and\s+(?:an?\s+)?(?:art|science)\b", q):
+        return "art_science_sense_pair"
+    return ""
+
+
+def _is_definition_comparison_query(query_text: str) -> bool:
+    return bool(_definition_comparison_reason(query_text))
+
+
+def _log_query_family_fix(query_text: str, family: str, reason: str) -> None:
+    logger.info(
+        "[QUERY FAMILY FIX] query=%s family=%s reason=%s",
+        re.sub(r"\s+", " ", str(query_text or "").strip())[:220],
+        family,
+        reason,
+    )
 
 
 def _normalize_definition_entity(entity: str) -> str:
@@ -18725,6 +19439,28 @@ def _extract_entity_from_definition_query(query_text: str) -> tuple[bool, str]:
     if _is_compare_query(q):
         logger.info("[LOG] _extract_entity_from_definition_query: compare query detected, skipping single-entity parse")
         return False, ""
+
+    if _is_definition_comparison_query(q):
+        comparison_patterns = [
+            r"^\s*how\s+(?:does|do)\s+(?:the\s+)?(?:text|document|book|source|passage|chapter|section|author)\s+define\s+(.+?)(?:\s+in\s+both\b|\s+as\b|\s+according\b|[?.!]|$)",
+            r"^\s*(?:define|describe|explain)\s+(.+?)\s+in\s+both\b",
+            r"^\s*(?:how|why)\s+(?:is|are)\s+(.+?)\s+(?:considered|viewed|treated|regarded|described)\s+both\b",
+            r"^\s*(.+?)\s+as\s+(?:an?\s+)?[a-z][a-z\-]+\s+and\s+(?:an?\s+)?[a-z][a-z\-]+\s*\??\s*$",
+            r"^\s*(?:compare|contrast)\s+(?:the\s+)?definitions?\s+of\s+(.+?)(?:[?.!]|$)",
+        ]
+        for pat in comparison_patterns:
+            m = re.match(pat, q, flags=re.IGNORECASE)
+            if not m:
+                continue
+            entity_raw = re.sub(r"\s+", " ", (m.group(1) or "").strip())
+            entity_raw = re.sub(r"\s+(?:in\s+both|as\s+(?:an?\s+)?[a-z][a-z\-]+\s+and\s+(?:an?\s+)?[a-z][a-z\-]+).*$", "", entity_raw, flags=re.IGNORECASE)
+            entity = _normalize_definition_entity(entity_raw)
+            if len(entity) >= 2:
+                logger.info(
+                    "[LOG] _extract_entity_from_definition_query: parsed entity='%s' (definition_comparison)",
+                    entity,
+                )
+                return True, entity
 
     # MP-C9 — list / enumerative queries ("What are the characteristics of X",
     # "List the principles of X", "How many types of X are there"). The
@@ -19681,7 +20417,8 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
         "what", "who", "define", "tell", "about", "explain", "overview", "summary",
         "chapter", "section", "list", "compare", "difference", "between", "process",
         "general", "meaning", "definition", "introduced", "known",
-        "when", "year",
+        "when", "year", "text", "document", "source", "context", "broad", "technical",
+        "sense", "science", "art", "relationship", "function", "system",
     }
 
     preserve_short_terms = set()
@@ -19791,6 +20528,7 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
     )
 
     correction_events: list[dict] = []
+    blocked_events: list[dict] = []
 
     def _case_like(original: str, replacement: str) -> str:
         if original.isupper():
@@ -19824,6 +20562,46 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
                     return True
         return False
 
+    def _token_has_suspicious_typo_shape(value: str) -> bool:
+        low_value = str(value or "").lower()
+        if not low_value:
+            return False
+        if re.search(r"([a-z])\1{2,}", low_value):
+            return True
+        if len(low_value) >= 5 and not re.search(r"[aeiouy]", low_value):
+            return True
+        if re.search(r"[bcdfghjklmnpqrstvwxyz]{6,}", low_value):
+            return True
+        if re.search(r"(?:rn|vv|cl){2,}", low_value):
+            return True
+        return False
+
+    def _looks_like_valid_english_token(value: str) -> bool:
+        low_value = re.sub(r"[^a-z]+", "", str(value or "").lower())
+        if not low_value:
+            return False
+        if low_value in query_core_vocab:
+            return True
+        if low_value in vocab:
+            return True
+        if len(low_value) < 4:
+            return False
+        if _token_has_suspicious_typo_shape(low_value):
+            return False
+        if not re.search(r"[aeiouy]", low_value):
+            return False
+        return True
+
+    def _record_block(reason: str, original: str, candidate: str, confidence: float) -> None:
+        if len(blocked_events) >= 3:
+            return
+        blocked_events.append({
+            "reason": reason,
+            "before": original,
+            "after": candidate,
+            "confidence": confidence,
+        })
+
     def _replace_token(m: re.Match) -> str:
         token = m.group(0)
         low = token.lower()
@@ -19836,22 +20614,24 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
         if len(low) < 4 or low in query_core_vocab:
             return token
         low_freq = int(freq_map.get(low, 0) or 0)
-        if low in vocab and low_freq >= 5:
+        if low in vocab and low_freq >= 1:
+            return token
+        if _looks_like_valid_english_token(low):
             return token
 
-        candidates = [cand for cand in by_initial.get(low[0], []) if abs(len(cand) - len(low)) <= 2]
+        candidates = [cand for cand in by_initial.get(low[0], []) if abs(len(cand) - len(low)) <= 1]
         if not candidates:
             return token
 
         best = token
-        best_dist = 3
+        best_dist = 2
         best_freq = -1
-        second_dist = 3
+        second_dist = 2
         for cand in candidates:
             if cand == low:
                 continue
-            dist = _edit_distance_leq(low, cand, cap=2)
-            if dist > 2:
+            dist = _edit_distance_leq(low, cand, cap=1)
+            if dist > 1:
                 continue
             cand_freq = int(freq_map.get(cand, 0))
             if dist < best_dist or (dist == best_dist and cand_freq > best_freq):
@@ -19862,18 +20642,34 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
             elif dist < second_dist:
                 second_dist = dist
 
-        if best_dist > 2:
+        if best_dist > 1:
             return token
-        confidence = max(0.0, 1.0 - (best_dist / max(len(low), len(best), 1)))
+        confidence = 1.0 if best_dist == 0 else 0.88
+        if _token_has_suspicious_typo_shape(low):
+            confidence += 0.05
+        if best_freq >= 8:
+            confidence += 0.05
+        elif best_freq >= 4:
+            confidence += 0.03
         if best_freq >= 4:
-            confidence = min(0.99, confidence + 0.04)
+            confidence = min(0.99, confidence)
         if second_dist == best_dist and best_freq < 4:
+            _record_block("ambiguous_candidate", token, best, confidence)
             return token
-        if confidence < 0.76:
+        if confidence < 0.92:
+            _record_block("confidence_below_extreme_threshold", token, best, confidence)
             return token
         if low in vocab and best_freq < max(low_freq * 5, low_freq + 8):
+            _record_block("original_seen_in_document_vocab", token, best, confidence)
             return token
         if _is_inflection_only_variant(low, best):
+            _record_block("inflection_only_variant", token, best, confidence)
+            return token
+        if _looks_like_valid_english_token(low) and _looks_like_valid_english_token(best):
+            _record_block("valid_word_semantic_change", token, best, confidence)
+            return token
+        if not _token_has_suspicious_typo_shape(low) and best_freq < 4:
+            _record_block("no_typo_evidence", token, best, confidence)
             return token
         correction_events.append({
             "before": token,
@@ -19885,6 +20681,7 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
 
     corrected = re.sub(r"\b[a-zA-Z]{2,}\b", _replace_token, q)
     corrected = re.sub(r"\s+", " ", corrected).strip()
+    applied = bool(correction_events and corrected and corrected.strip().lower() != q.strip().lower())
     for event in correction_events:
         logger.info(
             "[SPELLING CORRECTION] before=%s after=%s confidence=%.2f source=%s",
@@ -19893,8 +20690,28 @@ def _lightweight_spelling_correction(query_text: str, seed_docs: list[dict] | No
             event["confidence"],
             event["source"],
         )
+    if applied:
+        max_confidence = max(float(event.get("confidence", 0.0) or 0.0) for event in correction_events)
+        logger.info(
+            "[SPELL SAFE] reason=%s confidence=%.2f original=%s corrected=%s applied=%s",
+            "extreme_confidence_typo",
+            max_confidence,
+            q[:240],
+            corrected[:240],
+            True,
+        )
+    else:
+        blocked = blocked_events[0] if blocked_events else {}
+        logger.info(
+            "[SPELL SAFE] reason=%s confidence=%.2f original=%s corrected=%s applied=%s",
+            str(blocked.get("reason") or "no_safe_correction"),
+            float(blocked.get("confidence", 0.0) or 0.0),
+            q[:240],
+            q[:240],
+            False,
+        )
     logger.info("[FLOW] query_after = %s", (corrected or "")[:400])
-    return corrected or q
+    return corrected if applied else q
 
 
 def _spelling_correction_preserving_exact_terms(query_text: str, seed_docs: list[dict] | None = None) -> str:
@@ -20303,6 +21120,8 @@ def _is_list_or_process_query(query_text: str) -> bool:
 def _is_compare_query(query_text: str) -> bool:
     q = (query_text or "").strip().lower()
     if not q:
+        return False
+    if _is_definition_comparison_query(q):
         return False
     return bool(
         re.search(r"\b(?:difference|differences|different|distinction)\b", q)
@@ -22367,6 +23186,12 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
             return True
         if re.search(r"https?://|www\.|isbn|kdpublications|table\s*\d+|figure\s*\d+", low):
             return True
+        if re.search(r"\b(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)[a-z]{3,}\b", low):
+            return True
+        if re.search(r"\b(?![ai]\b)[a-z]\s+[a-z]{3,}\b", low):
+            return True
+        if re.search(r"\b[a-z]{3,}\s+(?:ves|tion|tions|ment|ments|ing|ed|er|ers|al|ally|ity|ities|es)\b", low):
+            return True
         words = re.findall(r"[a-z]+", low)
         if not words:
             return True
@@ -22381,6 +23206,11 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
         x = re.sub(r"^\s*(?:[-•*]|\d+[.)]|[a-z][.)])\s*", "", s or "", flags=re.IGNORECASE)
         x = re.sub(r"^[\W_]+|[\W_]+$", "", x)
         x = re.sub(r"\s+", " ", x).strip(" ,;:-")
+        x = re.sub(
+            r"^\s*(In|in)\s+((?:ter|form|divid|tegr|stitut|volv|clud|nov|dustr)[A-Za-z]{2,})(\b.*)$",
+            lambda m: f"{m.group(1)}{m.group(2)}{m.group(3)}",
+            x,
+        )
         if " " not in x:
             low_x = x.lower()
             glued_prefixes = (
@@ -22411,6 +23241,10 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                     right_is_suffix_fragment = bool(
                         re.fullmatch(r"(?:ve|ion|ions|al|ally|ity|ities|ing|ed|er|ers|es|s)", right, flags=re.IGNORECASE)
                     )
+                    if left[:1].isupper() and right[:1].islower() and len(right) >= 5 and not right_is_suffix_fragment:
+                        merged_parts.append(parts[i])
+                        i += 1
+                        continue
                     short_left_fragment = len(left) <= 4 and len(right) <= 8
                     if 7 <= len(combined) <= 18 and (right_is_suffix_fragment or short_left_fragment):
                         merged_parts.append(combined)
@@ -22460,6 +23294,27 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     def _label_token_set(s: str) -> set[str]:
         generic = {"school", "schools", "approach", "approaches", "model", "models", "perspective", "perspectives"}
         return {t for t in re.findall(r"[a-z0-9]{3,}", str(s or "").lower()) if t not in generic}
+
+    structural_single_word_fragments = {
+        "row", "rows", "column", "columns", "group", "groups", "discipline", "disciplines",
+        "type", "types", "kind", "kinds", "category", "categories", "figure", "fig", "table",
+        "chapter", "section", "unit", "page", "pages", "item", "items", "number", "numbers",
+    }
+    count_word_fragments = {
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen", "twenty",
+    }
+
+    def _is_structural_single_word_fragment(item_text: str) -> bool:
+        words_local = re.findall(r"[A-Za-z][A-Za-z\-']*", str(item_text or ""))
+        if len(words_local) != 1:
+            return False
+        low_word = words_local[0].lower()
+        if low_word in count_word_fragments:
+            return True
+        if low_word in structural_single_word_fragments:
+            return not any(_token_match_light(q, tok) for tok in {low_word, _light_normalize_query_token(low_word)})
+        return False
 
     raw_candidates: List[str] = []
     for ln in [x for x in raw.splitlines() if x.strip()]:
@@ -22598,6 +23453,9 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
                         continue
                 if _ocr_garbage(item):
                     _log_list_quality_rejection(item, "ocr_noise")
+                    continue
+                if _is_structural_single_word_fragment(item):
+                    _log_list_quality_rejection(item, "table_column_fragment")
                     continue
                 if re.search(r"\d", item):
                     _log_list_quality_rejection(item, "numeric_fragment")
@@ -22824,12 +23682,19 @@ def _sanitize_list_answer_text(query_text: str, answer_text: str) -> str | None:
     _uniform_single_word_set = bool(
         len(cleaned) >= 3
         and all(len(re.findall(r"[A-Za-z][A-Za-z\-']*", it)) == 1 for it in cleaned)
+        and not any(_is_structural_single_word_fragment(it) or _ocr_garbage(it) for it in cleaned)
     )
     for item in cleaned:
         adjusted = _strip_trailing_suffix_noise(item)
         adjusted = re.sub(r"\s+", " ", adjusted).strip(" ,;:-")
         if not adjusted:
             _log_list_quality_rejection(item, "empty_after_suffix_strip")
+            continue
+        if _is_structural_single_word_fragment(adjusted):
+            _log_list_quality_rejection(adjusted, "table_column_fragment")
+            continue
+        if _ocr_garbage(adjusted):
+            _log_list_quality_rejection(adjusted, "ocr_noise_final")
             continue
         if (not _uniform_single_word_set) and _is_heading_artifact(adjusted):
             _log_list_quality_rejection(adjusted, "heading_artifact")
@@ -24919,6 +25784,8 @@ def detect_query_intent(query: str) -> str:
     q = (query or "").strip().lower()
     if _detect_fact_query_type(q):
         return "fact"
+    if _is_definition_comparison_query(q):
+        return "definition"
     if _is_definition_style_query(q):
         return "definition"
     if _is_targeted_list_question(q):
@@ -24950,14 +25817,27 @@ def _classify_query_family(query: str) -> str:
     if not q:
         return "general"
 
-    if _detect_fact_query_type(q):
-        return "fact_entity"
-
     if _is_definition_style_query(q):
         return "definition_entity"
 
+    definition_comparison_reason = _definition_comparison_reason(q)
+    if definition_comparison_reason:
+        _log_query_family_fix(q, "definition_comparison", definition_comparison_reason)
+        return "definition_comparison"
+
+    if _is_relationship_or_explanation_query(q):
+        _log_query_family_fix(q, "relationship_explanation", "relationship_or_explanation_signal")
+        return "relationship_explanation"
+
+    if _is_compare_query(q):
+        _log_query_family_fix(q, "compare", "generic_compare_signal")
+        return "overview_chapter_compare"
+
     if _is_targeted_list_question(q):
         return "list_structure"
+
+    if _detect_fact_query_type(q):
+        return "fact_entity"
     return "overview_chapter_compare"
 
 
@@ -24966,14 +25846,19 @@ def _classify_query_family_v2(query: str) -> str:
     if not q:
         return "explanatory_compare"
 
-    if _detect_fact_query_type(q):
-        return "fact_entity"
-
     if _is_definition_style_query(q):
         return "definition_entity"
 
+    definition_comparison_reason = _definition_comparison_reason(q)
+    if definition_comparison_reason:
+        _log_query_family_fix(q, "definition_comparison", definition_comparison_reason)
+        return "definition_comparison"
+
     if _is_targeted_list_question(q):
         return "list_entity"
+
+    if _detect_fact_query_type(q):
+        return "fact_entity"
 
     return "explanatory_compare"
 
@@ -25227,6 +26112,21 @@ def _query_main_entity_tokens(query_text: str, family_v2: str = "") -> tuple[lis
     surviving token of the phrase is treated as the entity. No domain words are
     used; this is purely positional/syntactic.
     """
+    if family_v2 in {"definition_entity", "definition_comparison"}:
+        has_entity, entity = _extract_entity_from_definition_query(query_text)
+        entity_tokens: list[str] = []
+        if has_entity and entity:
+            seen_entity: set[str] = set()
+            for raw in re.findall(r"[a-z0-9]{3,}", str(entity or "").lower()):
+                norm = _light_normalize_query_token(raw)
+                if norm and norm not in seen_entity:
+                    seen_entity.add(norm)
+                    entity_tokens.append(norm)
+        if entity_tokens:
+            all_tokens = _query_section_tokens(query_text, family_v2)
+            struct_tokens = [tok for tok in all_tokens if tok not in set(entity_tokens)]
+            return entity_tokens[:6], struct_tokens[:4]
+
     section_phrases = _query_section_phrases(query_text)
     stop = {
         "the", "a", "an", "all", "some", "any", "main", "major", "key", "important",
@@ -25990,7 +26890,7 @@ def _apply_heading_boost_for_family(query_text: str, family_v2: str, docs: list[
         if family_v2 in {"toc_structure"}:
             if "table of contents" in hay:
                 boost += 0.85
-        if family_v2 in {"definition_entity", "fact_entity"}:
+        if family_v2 in {"definition_entity", "definition_comparison", "fact_entity"}:
             if re.search(r"\bdefined\s+as\b|\brefers\s+to\b", hay):
                 boost += 1.1
 
@@ -26533,7 +27433,7 @@ def _is_weak_retrieval_evidence(query_text: str, family: str, retrieved_docs: li
     if family == "out_of_scope_candidate":
         return (coverage < 0.50) or (focus_ratio <= 0.0) or (max_similarity < 0.18)
 
-    if family == "definition_entity":
+    if family in {"definition_entity", "definition_comparison"}:
         return (coverage < 0.15 and focus_ratio <= 0.0 and max_similarity < 0.12)
 
     if family == "overview_chapter_compare":
@@ -26913,7 +27813,7 @@ def _looks_like_document_question(query: str) -> bool:
         return True
     try:
         family_v2 = _classify_query_family_v2(query)
-        if family_v2 in {"definition_entity", "list_entity", "fact_entity", "explanatory_compare", "sequence_lookup", "lesson_lookup", "toc_structure"}:
+        if family_v2 in {"definition_entity", "definition_comparison", "list_entity", "fact_entity", "explanatory_compare", "sequence_lookup", "lesson_lookup", "toc_structure"}:
             return True
     except Exception:
         pass
@@ -27075,7 +27975,10 @@ def _apply_not_found_ux(query: str, answer: str, doc_dicts: List[Dict[str, Any]]
         if _is_arabic_text(raw):
             cleaned = _polish_final_response_text(query, raw)
         else:
-            cleaned = _cleanup_final_answer_text(raw)
+            if _is_definition_comparison_query(query):
+                cleaned = _cleanup_definition_comparison_answer_text(raw)
+            else:
+                cleaned = _cleanup_final_answer_text(raw)
             cleaned = _polish_final_response_text(query, cleaned)
         if cleaned != raw:
             logger.info("[OCR CLEANUP APPLIED] before=%s | after=%s", raw[:180], cleaned[:180])
@@ -28121,6 +29024,7 @@ def _is_answer_grounded_in_docs(answer: str, retrieved_docs: list[dict], query_t
         q.startswith("what is ")
         or q.startswith("define ")
         or re.search(r"\bmeaning\s+of\b", q)
+        or _is_definition_comparison_query(q)
     )
 
     if substantive == 0:
@@ -28341,7 +29245,8 @@ def _enforce_runtime_answer_acceptance(query: str, decision: Dict[str, Any], ret
         or re.match(r"^\s*(?:what|which)\s+are\b", q_low)
     )
     is_definition_mode = bool(
-        family == "definition_entity"
+        family in {"definition_entity", "definition_comparison"}
+        or _is_definition_comparison_query(q_low)
         or q_low.startswith("what is")
         or q_low.startswith("define")
     )
@@ -29671,7 +30576,7 @@ def _shared_rag_final_answer_decision( # type: ignore
 
         def _is_definition_answer_valid(ans_text: str) -> bool:
             q_low = re.sub(r"\s+", " ", str(query or "")).strip().lower()
-            if not (q_low.startswith("what is") or q_low.startswith("define") or family_v2 == "definition_entity"):
+            if not (q_low.startswith("what is") or q_low.startswith("define") or family_v2 in {"definition_entity", "definition_comparison"}):
                 return True
             cand = re.sub(r"\s+", " ", str(ans_text or "")).strip()
             if not cand or cand == RAG_NO_MATCH_RESPONSE:
@@ -29683,6 +30588,11 @@ def _shared_rag_final_answer_decision( # type: ignore
                 return False
             if not _definition_entity_or_reference_match(query, cand):
                 return False
+            if family_v2 == "definition_comparison":
+                sentences_local = [s for s in re.split(r"(?<=[.!?])\s+", cand) if s.strip()]
+                if len(sentences_local) > 4:
+                    return False
+                return True
             # MP-C14 — For definition_entity, generic_grounded_check is NOT
             # sufficient. The candidate must satisfy the strict shared
             # `_is_valid_definition_sentence` validator (entity present,
@@ -29734,7 +30644,10 @@ def _shared_rag_final_answer_decision( # type: ignore
                 return False, None
             return True, shaped
 
-        cleaned_ans = _cleanup_final_answer_text(ans or "") if ans is not None else ans
+        if ans is not None and family_v2 == "definition_comparison":
+            cleaned_ans = _cleanup_definition_comparison_answer_text(ans or "")
+        else:
+            cleaned_ans = _cleanup_final_answer_text(ans or "") if ans is not None else ans
         if ans is not None and family_v2 == "fact_entity":
             cleaned_ans = _normalize_validated_fact_answer(fact_type, str(cleaned_ans or ""))
         if ans is not None and _is_targeted_list_question(query):
@@ -29754,12 +30667,17 @@ def _shared_rag_final_answer_decision( # type: ignore
         if cleaned_ans is not None and cleaned_ans != RAG_NO_MATCH_RESPONSE and family_v2 != "fact_entity" and str(answer_type or "") != "definition_structure_recovery":
             if not _is_definition_answer_valid(str(cleaned_ans)):
                 rescued = False
-                if family_v2 == "definition_entity":
+                if family_v2 in {"definition_entity", "definition_comparison"}:
                     support_docs = routed_docs or doc_dicts or []
-                    rescue_ans = _extract_best_scored_concept_sentence_from_docs(query, support_docs, max_docs=3)
+                    rescue_ans = _extract_definition_comparison_answer(query, support_docs) if family_v2 == "definition_comparison" else None
+                    if not rescue_ans:
+                        rescue_ans = _extract_best_scored_concept_sentence_from_docs(query, support_docs, max_docs=3)
                     if not rescue_ans:
                         rescue_ans = _extract_simple_definition_sentence(query, support_docs)
-                    rescue_ans = _cleanup_final_answer_text(str(rescue_ans or "")).strip() if rescue_ans else ""
+                    if rescue_ans and family_v2 == "definition_comparison":
+                        rescue_ans = _cleanup_definition_comparison_answer_text(str(rescue_ans or "")).strip()
+                    else:
+                        rescue_ans = _cleanup_final_answer_text(str(rescue_ans or "")).strip() if rescue_ans else ""
                     if rescue_ans and _is_definition_answer_valid(str(rescue_ans)):
                         logger.info("[DEFINITION VALIDATION RESCUE] accepted=true answer=%s", str(rescue_ans)[:220])
                         cleaned_ans = rescue_ans
@@ -29817,7 +30735,7 @@ def _shared_rag_final_answer_decision( # type: ignore
     )
     route_docs = list(routed_docs or doc_dicts or [])
     cmp_left_early, cmp_right_early = _compare_terms_from_query(query)
-    if cmp_left_early and cmp_right_early:
+    if family_v2 != "definition_comparison" and cmp_left_early and cmp_right_early:
         answer_source_mode = "compare"
         cmp_answer_early = _compare_answer_from_docs(query, route_docs)
         if not cmp_answer_early:
@@ -29828,6 +30746,16 @@ def _shared_rag_final_answer_decision( # type: ignore
             return _result(cmp_answer_early, used_llm=False, answer_type="compare_explanation_fallback", items_count=0)
 
     if answer_route == "definition":
+        if family_v2 == "definition_comparison":
+            comparison_route_answer = _extract_definition_comparison_answer(query, route_docs)
+            if comparison_route_answer:
+                answer_source_mode = "definition"
+                logger.info("[ANSWER ROUTE] mode=definition_comparison deterministic=true answer=%s", comparison_route_answer[:220])
+                return _result(comparison_route_answer, used_llm=False, answer_type="definition_comparison_extractor", items_count=1)
+            answer_source_mode = "not_found_guard"
+            logger.info("[DEFINITION COMPARISON] rejected reason=no_supported_structured_answer")
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="definition_comparison_not_found", items_count=0)
+
         route_answer = _extract_definition_route_answer(query, route_docs)
         if route_answer:
             logger.info("[ANSWER ROUTE] mode=definition deterministic=true answer=%s", route_answer[:220])
@@ -29841,6 +30769,11 @@ def _shared_rag_final_answer_decision( # type: ignore
         # query short-circuits with RAG_NO_MATCH_RESPONSE (used_llm=False)
         # so the WS layer never streams a provisional weak LLM answer that
         # would later be replaced. Generic — no domain words.
+        if family_v2 == "definition_comparison":
+            answer_source_mode = "not_found_guard"
+            logger.info("[DEFINITION COMPARISON] rejected reason=no_supported_structured_answer")
+            return _result(RAG_NO_MATCH_RESPONSE, used_llm=False, answer_type="definition_comparison_not_found", items_count=0)
+
         if family_v2 == "definition_entity":
             _has_ent, _ent = _extract_entity_from_definition_query(query)
             _ent_l = re.sub(r"\s+", " ", str(_ent or "").strip().lower()) if _has_ent else ""
@@ -30958,7 +31891,7 @@ def _shared_rag_final_answer_decision( # type: ignore
     items = extract_list_items(list_context) if family == "list_entity" else []
 
     weak_retrieval = _is_weak_retrieval_evidence(query, family, doc_dicts)
-    allow_structured_attempt = bool(routed_docs or doc_dicts) and family in {"definition_entity", "list_entity", "explanatory_compare"}
+    allow_structured_attempt = bool(routed_docs or doc_dicts) and family in {"definition_entity", "definition_comparison", "list_entity", "explanatory_compare"}
     if weak_retrieval and not allow_structured_attempt:
         return {
             "intent": intent,
@@ -32206,7 +33139,7 @@ def _validate_query_ui_equivalent(query: str) -> dict:
         top_k_req = FACT_MAX_TOP_K
     elif family_v2 == "list_entity" or family == "list_structure":
         top_k_req = 10
-    elif _is_definition_style_query(text):
+    elif family_v2 == "definition_comparison" or _is_definition_style_query(text):
         top_k_req = 12
     else:
         top_k_req = 6
@@ -32246,14 +33179,14 @@ def _validate_query_ui_equivalent(query: str) -> dict:
     # In the real WS path, reranking is applied ONLY for families NOT in this set:
     family_v2_current = _classify_query_family_v2(text)
     family_legacy_current = _classify_query_family(text)
-    _rerank_excluded = {"definition_entity", "list_entity", "explanatory_compare"}
+    _rerank_excluded = {"definition_entity", "definition_comparison", "list_entity", "explanatory_compare"}
     if family_v2_current not in _rerank_excluded:
         doc_dicts = _rerank_docs_for_query_intent(text, doc_dicts)
         doc_dicts = _retrieve_with_section_bias(text, doc_dicts, top_k=min(max(6, len(doc_dicts)), 12))
 
 
     doc_dicts = sorted(doc_dicts, key=lambda x: x.get("score", 0), reverse=True)
-    is_definition_query = _is_definition_style_query(text) and (_classify_query_family_v2(text) != "fact_entity")
+    is_definition_query = (family_v2_current == "definition_comparison" or _is_definition_style_query(text)) and (_classify_query_family_v2(text) != "fact_entity")
     is_fact_query = _classify_query_family_v2(text) == "fact_entity"
     _is_list_family = (family_legacy_current == "list_structure" or family_v2_current == "list_entity")
     keep_n = 5 if (is_definition_query or is_fact_query or _is_list_family) else 3
@@ -32520,14 +33453,15 @@ async def call_llm_with_rag(text: str, connection_id: str, user):  # pyright: ig
         logger.info(f"RAG: Searching knowledge base for: {text}")
         is_simple_factual_query = _is_simple_factual_text_query(text)
         query_family = _classify_query_family(text)
-        is_fact_query = _classify_query_family_v2(text) == "fact_entity"
+        query_family_v2 = _classify_query_family_v2(text)
+        is_fact_query = query_family_v2 == "fact_entity"
         is_definition_fast = (not is_fact_query) and _is_safe_definition_fast_path_query(text)
         is_controlled_def_entity = _is_controlled_definition_entity_query(text)
         if _is_force_overview_paragraph_query(text):
             top_k_req = 2
         elif is_fact_query:
             top_k_req = FACT_MAX_TOP_K
-        elif is_controlled_def_entity:
+        elif is_controlled_def_entity or query_family_v2 == "definition_comparison":
             top_k_req = 12
         elif is_generation_query_requested:
             top_k_req = 12
@@ -32561,14 +33495,15 @@ async def call_llm_with_rag(text: str, connection_id: str, user):  # pyright: ig
             force_overview_retry = bool(has_corrected_variant and _is_force_overview_paragraph_query(corrected_query))
             if (no_matched_tokens or weak_scores or force_overview_retry) and has_corrected_variant:
                     corrected_family = _classify_query_family(corrected_query)
-                    corrected_is_fact = _classify_query_family_v2(corrected_query) == "fact_entity"
+                    corrected_family_v2 = _classify_query_family_v2(corrected_query)
+                    corrected_is_fact = corrected_family_v2 == "fact_entity"
                     corrected_is_def_fast = (not corrected_is_fact) and _is_safe_definition_fast_path_query(corrected_query)
                     corrected_is_controlled_def_entity = _is_controlled_definition_entity_query(corrected_query)
                     if _is_force_overview_paragraph_query(corrected_query):
                         corrected_top_k = 2
                     elif corrected_is_fact:
                         corrected_top_k = FACT_MAX_TOP_K
-                    elif corrected_is_controlled_def_entity:
+                    elif corrected_is_controlled_def_entity or corrected_family_v2 == "definition_comparison":
                         corrected_top_k = 12
                     elif _is_llm_generation_query(original_query_text):
                         corrected_top_k = 12
@@ -32644,7 +33579,7 @@ async def call_llm_with_rag(text: str, connection_id: str, user):  # pyright: ig
             "overview",
             "summary",
         ])
-        keep_for_definition = (_classify_query_family(text) == "definition_entity")
+        keep_for_definition = (_classify_query_family(text) in {"definition_entity", "definition_comparison"})
         if keep_for_structure or keep_for_manifest or keep_for_overview or keep_for_definition:
             logger.info("RAG context reliability gate bypassed for targeted query='%s'", text[:80])
         else:
@@ -32904,9 +33839,9 @@ async def call_llm_with_rag(text: str, connection_id: str, user):  # pyright: ig
 
         query_l = (text or "").lower()
         family_v2_current = _classify_query_family_v2(text)
-        is_compare_query = _is_compare_query(text) or bool(all(_compare_terms_from_query(text)))
+        is_compare_query = (family_v2_current != "definition_comparison") and (_is_compare_query(text) or bool(all(_compare_terms_from_query(text))))
         is_definition_query = (
-            _is_definition_style_query(text)
+            (family_v2_current == "definition_comparison" or _is_definition_style_query(text))
             and (not is_compare_query)
             and (family_v2_current != "fact_entity")
             and (not is_generation_query_requested)
@@ -35115,6 +36050,11 @@ async def send_final_response(
                     if cleaned_line:
                         cleaned_lines.append(cleaned_line)
                 s = "\n".join(cleaned_lines) if cleaned_lines else re.sub(r"\s+", " ", s).strip()
+            elif "definition_comparison" in str(branch or ""):
+                try:
+                    s = _cleanup_definition_comparison_answer_text(s)
+                except Exception:
+                    s = re.sub(r"\s+", " ", s).strip()
             else:
                 try:
                     s = _cleanup_final_answer_text(s)
@@ -36632,7 +37572,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         family_v2 = _classify_query_family_v2(text)
         if family_v2 == "fact_entity":
             top_k_req = FACT_MAX_TOP_K
-        elif _is_controlled_definition_entity_query(text):
+        elif _is_controlled_definition_entity_query(text) or family_v2 == "definition_comparison":
             top_k_req = 12
         elif is_generation_query_requested:
             top_k_req = 12
@@ -36670,7 +37610,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             retrieval_ms,
         )
 
-    if _classify_query_family_v2(text) not in {"definition_entity", "list_entity", "explanatory_compare"}:
+    if _classify_query_family_v2(text) not in {"definition_entity", "definition_comparison", "list_entity", "explanatory_compare"}:
         t_meta["rerank_start"] = time.perf_counter()
         relevant_docs = _rerank_docs_for_query_intent(text, relevant_docs)
         relevant_docs = _retrieve_with_section_bias(text, relevant_docs, top_k=top_k_req if 'top_k_req' in locals() else 10)
@@ -36718,7 +37658,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
         ql = text.lower()
         keep_for_structure = _query_requires_structure(text)
         family_v2_guard = _classify_query_family_v2(text)
-        if family_v2_guard in {"definition_entity", "list_entity", "toc_structure"}:
+        if family_v2_guard in {"definition_entity", "definition_comparison", "list_entity", "toc_structure"}:
             keep_for_structure = True
         if keep_for_structure:
             logger.info("%s context_reliability_bypass | query='%s'", connection_id, text[:80])
@@ -36735,7 +37675,7 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
 
     if (not is_greeting) and (not relevant_docs):
         rescue_family = _classify_query_family_v2(text)
-        if rescue_family == "definition_entity":
+        if rescue_family in {"definition_entity", "definition_comparison"}:
             relevant_docs = _search_fast_definition_minimal(text) or []
 
     if (not is_greeting) and (not relevant_docs):
@@ -36867,8 +37807,9 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             ])
 
         query_l = (text or "").lower()
-        is_compare_query = _is_compare_query(text) or bool(all(_compare_terms_from_query(text)))
-        is_definition_query = _is_definition_style_query(text) and (not is_compare_query) and (_classify_query_family_v2(text) != "fact_entity")
+        family_v2_current = _classify_query_family_v2(text)
+        is_compare_query = (family_v2_current != "definition_comparison") and (_is_compare_query(text) or bool(all(_compare_terms_from_query(text))))
+        is_definition_query = (family_v2_current == "definition_comparison" or _is_definition_style_query(text)) and (not is_compare_query) and (family_v2_current != "fact_entity")
         _has_entity, _query_entity = _extract_entity_from_definition_query(text)
         if is_compare_query:
             _has_entity, _query_entity = (False, "")
@@ -37089,7 +38030,6 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                         bool(definition_docs), len(definition_docs), len(doc_dicts))
 
         family_legacy_current = _classify_query_family(text)
-        family_v2_current = _classify_query_family_v2(text)
         needs_early_section_rerank = (
             family_v2_current in {"list_entity", "toc_structure"}
             or family_legacy_current in {"list_structure", "overview_chapter_compare"}
@@ -37252,11 +38192,28 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
             _emit_perf_report(t_meta, perf_start, text, short_answer, connection_id)
             return
 
-        explanation_mode = bool(
-            _is_explanation_intent_query(original_query_text)
-            or _is_explanation_intent_query(text)
-            or (arabic_mode and _is_explanation_intent_query(original_arabic_text))
+        simple_recovery_type = _classify_simple_recovery_query_type(
+            text,
+            original_query_text=original_query_text,
+            original_arabic_text=(original_arabic_text if arabic_mode else ""),
         )
+        logger.info(
+            "[SIMPLE QUERY TRACE] category=%s family_v2=%s ar_type=%s definition=%s list=%s fact=%s explanation_intent=%s docs=%d candidates=%d",
+            simple_recovery_type,
+            _classify_query_family_v2(text),
+            ar_query_type,
+            bool(is_definition_query),
+            bool(_is_targeted_list_question(text)),
+            bool(_classify_query_family_v2(text) == "fact_entity"),
+            bool(
+                _is_explanation_intent_query(original_query_text)
+                or _is_explanation_intent_query(text)
+                or (arabic_mode and _is_explanation_intent_query(original_arabic_text))
+            ),
+            len(doc_dicts or []),
+            len(explanation_candidate_doc_dicts or []),
+        )
+        explanation_mode = bool(simple_recovery_type == "relationship_explanation")
         if explanation_mode and not is_generation_query_requested:
             explanation_source_docs = _dedup_docs_exact_text(
                 list(doc_dicts or []) + [
@@ -37310,18 +38267,69 @@ async def call_llm_streaming(websocket: WebSocket, text: str, connection_id: str
                             external_query_provider,
                             len(external_docs_raw or []) if 'external_docs_raw' in locals() else 0,
                         )
-            explanation_source_docs = explanation_ranked_docs
             answer_generation_t0 = time.perf_counter()
-            if explanation_source_docs:
-                explanation_answer = await _build_controlled_explanation_answer(
+            semantic_top_docs = _dedup_docs_exact_text(
+                _prepare_rag_doc_dicts_shared(relevant_docs or [], explanation_builder_query)
+                if relevant_docs else []
+            )
+            explanation_answer = RAG_NO_MATCH_RESPONSE
+            explanation_source_docs = []
+            explanation_stage = "not_found"
+            fallback_stages: list[tuple[str, list[dict], int]] = [
+                ("explanation_ranked_docs", explanation_ranked_docs or [], 3),
+                ("reranker_top_docs", list(doc_dicts or []), 5),
+                ("semantic_top_docs", semantic_top_docs, 5),
+            ]
+            for stage_name, stage_docs, stage_limit in fallback_stages:
+                stage_docs = _dedup_docs_exact_text(list(stage_docs or []))[:stage_limit]
+                if not stage_docs:
+                    logger.info("[FINAL GATE TRACE] category=%s stage=%s docs=0 decision=skip_empty", simple_recovery_type, stage_name)
+                    continue
+                candidate_answer = await _build_controlled_explanation_answer(
                     explanation_builder_query,
-                    explanation_source_docs,
+                    stage_docs,
                     language=("ar" if arabic_mode else "en"),
                     original_query_text=(original_arabic_text if arabic_mode else original_query_text),
                 )
+                candidate_answer = str(candidate_answer or "").strip() or RAG_NO_MATCH_RESPONSE
+                accepted = candidate_answer.lower() != RAG_NO_MATCH_RESPONSE.lower()
+                logger.info(
+                    "[FINAL GATE TRACE] category=%s stage=%s docs=%d accepted=%s answer_chars=%d",
+                    simple_recovery_type,
+                    stage_name,
+                    len(stage_docs),
+                    bool(accepted),
+                    len(candidate_answer),
+                )
+                if accepted:
+                    explanation_answer = candidate_answer
+                    explanation_source_docs = stage_docs
+                    explanation_stage = stage_name
+                    break
+            if explanation_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                extraction_docs = _dedup_docs_exact_text(
+                    list(explanation_ranked_docs or [])
+                    + list(doc_dicts or [])
+                    + list(semantic_top_docs or [])
+                )[:8]
+                extracted_answer = _safe_grounded_concise_explanation_extraction(explanation_builder_query, extraction_docs, max_lines=2)
+                extracted_answer = str(extracted_answer or "").strip() or RAG_NO_MATCH_RESPONSE
+                accepted_extraction = extracted_answer.lower() != RAG_NO_MATCH_RESPONSE.lower()
+                logger.info(
+                    "[FINAL GATE TRACE] category=%s stage=safe_grounded_concise_extraction docs=%d accepted=%s answer_chars=%d",
+                    simple_recovery_type,
+                    len(extraction_docs),
+                    bool(accepted_extraction),
+                    len(extracted_answer),
+                )
+                if accepted_extraction:
+                    explanation_answer = extracted_answer
+                    explanation_source_docs = extraction_docs
+                    explanation_stage = "safe_grounded_concise_extraction"
+            if explanation_answer.lower() == RAG_NO_MATCH_RESPONSE.lower():
+                logger.info("[EXPLANATION MODE] fallback=not_found_after_cascade")
             else:
-                logger.info("[EXPLANATION MODE] fallback=weak_ranked_docs_before_builder")
-                explanation_answer = RAG_NO_MATCH_RESPONSE
+                logger.info("[EXPLANATION MODE] cascade_accept stage=%s docs=%d", explanation_stage, len(explanation_source_docs or []))
             t_meta["answer_generation_ms"] = int(round((time.perf_counter() - answer_generation_t0) * 1000))
             explanation_answer = str(explanation_answer or "").strip() or RAG_NO_MATCH_RESPONSE
             try:
