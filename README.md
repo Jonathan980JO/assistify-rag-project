@@ -1,6 +1,6 @@
 # Assistify v1.0
 
-![Assistify Banner](assets/banner.png)
+![Assistify Banner](assets/screenshots/banner.png)
 
 <div align="center">
 
@@ -24,7 +24,7 @@ Built with a modular architecture, Assistify combines local LLM inference, vecto
 
 ## Key Features
 
-![Features](assets/features.png)
+![Features](assets/screenshots/features.png)
 
 ### AI-Powered Support
 - Retrieval-Augmented Generation (RAG)
@@ -101,8 +101,7 @@ Monitor system usage, performance, RAG effectiveness, and user activity.
 
 # System Architecture
 
-![Architecture](assets/architecture.png)
-
+![Architecture](assets/screenshots/architecture.png)
 Assistify follows a modular service-oriented architecture:
 
 ```text
