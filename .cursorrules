@@ -1,0 +1,95 @@
+# ASSISTIFY CORE ENGINEERING RULE
+
+## Genericity Requirement
+
+This system is a document-agnostic RAG platform.
+
+Every implementation must work for:
+- current documents
+- future documents
+- unknown document types
+- unknown industries
+- unknown companies
+- unknown datasets
+
+The code must not depend on any specific document content.
+
+## Forbidden Implementations
+
+Never implement logic that depends on:
+- company names
+- product names
+- document names
+- PDF names
+- section names
+- metrics
+- percentages
+- dollar amounts
+- dates
+- specific entities
+- known answers
+
+Forbidden examples:
+
+if "CompanyX" in query:
+    ...
+
+if "ProductY" in query:
+    ...
+
+if filename == "...":
+    ...
+
+return "$250,000"
+return "16.12"
+return "0.7272"
+return "1.5%"
+
+## Allowed Implementations
+
+Allowed solutions must derive answers from evidence.
+
+Examples:
+- table parsing
+- sentence extraction
+- entity extraction
+- semantic retrieval
+- reranking
+- metadata filtering
+- chunk analysis
+- evidence validation
+- document structure analysis
+
+## Evidence Rule
+
+Every answer must originate from retrieved document evidence.
+
+If a value is returned:
+- currency
+- percentage
+- ratio
+- date
+- count
+- metric
+
+the implementation must be able to demonstrate exactly where that value was found in retrieved content.
+
+No answer may originate from a code constant.
+
+## Future Document Test
+
+Before completing any task, ask:
+
+"Would this implementation still work if tomorrow the system receives a completely new document from a domain that has never existed before?"
+
+If the answer is no:
+the implementation is rejected.
+
+## Completion Requirement
+
+Before closing any task provide:
+1. Genericity Assessment
+2. Evidence-Origin Assessment
+3. Future-Document Compatibility Assessment
+
+If any answer depends on a known entity, known value, known document, or known dataset, the task is not complete.

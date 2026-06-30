@@ -1,0 +1,225 @@
+# =========================
+
+# Environment variables
+
+# =========================
+
+.env
+.env.local
+.env.production
+
+# =========================
+
+# Python
+
+# =========================
+
+**pycache**/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =========================
+
+# Database
+
+# =========================
+
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+chroma_db_v3/
+chroma_db_reindex/
+
+# =========================
+
+# IDE / OS
+
+# =========================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# =========================
+
+# Logs
+
+# =========================
+
+logs/
+*.log
+
+# =========================
+
+# Secrets and credentials
+
+# =========================
+
+secrets/
+credentials/
+*.pem
+*.key
+*.cert
+
+# =========================
+
+# Testing
+
+# =========================
+
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+
+# Models (VERY LARGE)
+
+# =========================
+
+backend/Models/
+*.gguf
+*.bin
+*.safetensors
+*.pth
+*.pt
+Qwen2.5-7B-GGUF/
+
+# =========================
+
+# Assets (local PDFs only)
+
+# =========================
+
+backend/assets/*.pdf
+
+# =========================
+
+# TEMP / DEBUG FILES (IMPORTANT)
+
+# =========================
+
+tmp/
+tmp_*
+tmp_*.txt
+*.diff
+
+# =========================
+
+# RAG Evaluation / Outputs
+
+# =========================
+
+run_queries_results_*
+phase_eval_*
+ws_*
+# ws_* targets generated output files; keep the WS router source tracked.
+!backend/routers/ws_router.py
+**results**
+**patchcheck**
+**diagnostic**
+**debug**
+
+# =========================
+
+# Large backups
+
+# =========================
+
+*.zip
+
+Backup/
+Json/
+
+scratch/
+*.txt
+
+models/
+TTS_local_backup/
+archived_pdfs/
+*.wav
+*.bak
+tools/testing/*.last.json
+
+# =========================
+
+# Scan / cleanup artifacts
+
+# =========================
+
+*.pre_mt_backup
+temp_launchers/
+temp_phase*.py
+._*
+rag_verification_report.json
+docs/UNNECESSARY_FILES_REPORT.md
+docs/unnecessary_files.json
+
+# >>> runtime hygiene
+_runtime_hygiene_archive/
+Notepad_Test_Results/
+LOGSS/
+repo_tree_*.txt
+TTS/
+TTS_local_backup/
+# <<< runtime hygiene
+
+# >>> cleanup_repo.py
+# Repo cleanup / archive
+_archived_cleanup/
+**/final_rag_report*.json
+backend/conversations.json
+scripts/tmp_*.py
+backend/tmp_*.py
+tools/testing/_legacy_xtts/
+start_xtts_service.bat.disabled
+non_functional/old_python/
+# <<< cleanup_repo.py
+
+# =========================
+
+# Dependencies
+
+# =========================
+
+node_modules/
+
+# =========================
+
+# Next.js build outputs
+
+# =========================
+
+.next/
+
+# =========================
+*.db
+*.db.backup
+*.sqlite
+*.sqlite3
+# =========================

@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Assistify Admin — Knowledge Base</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Segoe+UI:400,700&display=swap">
+  <style>
+    body{font-family:'Segoe UI',Arial,sans-serif;background:#111;color:#fff;margin:0;padding:24px}
+    h1,h2{color:#10a37f}
+    table{width:100%;border-collapse:collapse;margin-top:16px}
+    th,td{padding:10px 12px;border-bottom:1px solid #222;text-align:left;font-size:0.92em}
+    th{color:#10a37f;background:#1a1a1a;position:sticky;top:0}
+    button{background:#10a37f;color:#000;border:none;padding:8px 14px;border-radius:6px;cursor:pointer;font-weight:600}
+    button:disabled{opacity:.5;cursor:default}
+    .danger{background:#ff6b6b;color:#fff}
+    .secondary{background:#444;color:#fff}
+    .warn{background:#e08a00;color:#fff}
+    .note{color:#9ca3af;margin-top:8px;font-size:0.9em}
+    .toolbar{margin-top:18px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .status{color:#9ca3af;font-size:0.9em;min-height:1.2em}
+    .section{background:#1a1a1a;border-radius:10px;padding:20px;margin-top:24px}
+    .text-preview{color:#aaa;font-size:0.85em;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .back-link{color:#10a37f;text-decoration:none;font-size:0.9em}
+    .cache-btn{background:#e74c3c;color:#fff;font-weight:700;padding:10px 18px;border-radius:8px;font-size:0.95em}
+    .cache-btn:hover:not(:disabled){background:#c0392b}
+    .cache-notice{background:#2d1f00;border:1px solid #e08a00;border-radius:8px;padding:12px 16px;margin-top:12px;font-size:0.9em;color:#fbbf24;display:none}
+    .cache-notice b{color:#fff}
+    .event-feed{list-style:none;padding:0;margin:0;max-height:220px;overflow-y:auto;font-size:0.82em}
+    .event-feed li{padding:6px 8px;border-bottom:1px solid #2a2a2a;display:flex;gap:8px;align-items:baseline}
+    .event-feed .ev-time{color:#666;white-space:nowrap;min-width:90px}
+    .event-feed .ev-action{font-weight:700;min-width:70px}
+    .ev-upload{color:#10a37f}.ev-reindex{color:#e08a00}.ev-delete{color:#ff6b6b}
+    .ev-update{color:#60a5fa}.ev-reindex_all{color:#a78bfa}.ev-clear_cache{color:#f59e0b}
+    .ev-file{color:#ccc;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px}
+    .live-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#10a37f;margin-right:6px;animation:pulse 1.5s infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+    .monitor-link{color:#10a37f;font-size:0.88em;text-decoration:none;margin-left:auto}
+    .monitor-link:hover{text-decoration:underline}
+  </style>
+</head>
+<body>
+  <a class="back-link" href="/admin/analytics">&larr; Back to Dashboard</a>
+  <h1>Knowledge Base Manager</h1>
+  <p class="note">Lists every file indexed in ChromaDB with its chunk count. Use <b>Reindex All</b> once to fix old duplicate/orphan entries.</p>
+
+  <div class="toolbar">
+    <button id="refresh">↻ Refresh</button>
+    <button id="reindex-all" class="warn">⚠ Reindex All Files</button>
+    <button id="clear-cache" class="cache-btn">🧹 Clear All Caches</button>
+    <span id="status-msg" class="status"></span>
+  </div>
+
+  <div id="cache-notice" class="cache-notice">
+    <b>⚠ Stale cache detected:</b> The knowledge base was recently changed. If the AI is still giving old answers,
+    click <b>Clear All Caches</b> above to force a full reset (conversations + LLM model memory).
+  </div>
+
+  <!-- Uploaded files table -->
+  <div class="section">
+    <h2>Uploaded Files</h2>
+    <table id="filesTable">
+      <thead>
+        <tr><th>Filename</th><th>Chunks</th><th>Doc ID Prefix</th><th>Actions</th></tr>
+      </thead>
+      <tbody><tr><td colspan="4">Loading…</td></tr></tbody>
+    </table>
+  </div>
+
+  <!-- Live KB Event Feed -->
+  <div class="section">
+    <h2 style="display:flex;align-items:center"><span class="live-dot" id="ws-dot" style="background:#666"></span>Live KB Events <a class="monitor-link" href="/admin/kb-monitor">Open Monitor Dashboard &rarr;</a></h2>
+    <p class="note" id="ws-status">Connecting to live event feed&hellip;</p>
+    <ul class="event-feed" id="event-feed"></ul>
+  </div>
+  <div class="section">
+    <h2>Raw ChromaDB Entries <button id="load-debug" class="secondary" style="font-size:0.8em;padding:4px 10px">Load</button></h2>
+    <p class="note">Shows every entry stored in the vector DB — useful for finding duplicates or orphans.</p>
+    <div id="debug-count" class="note"></div>
+    <table id="debugTable" style="display:none">
+      <thead>
+        <tr><th>ID</th><th>Filename</th><th>Chunk #</th><th>Text Preview</th></tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <script>
+    const msg = () => document.getElementById('status-msg');
+
+    // ---- FILES TABLE ----
+    async function fetchFiles(){
+      const res = await fetch('/rag/files', {credentials:'same-origin'});
+      if(!res.ok) throw new Error('Failed to fetch files');
+      return res.json();
+    }
+
+    function fileRow(f){
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${esc(f.filename)}</td>
+        <td>${f.chunks}</td>
+        <td style="font-size:0.82em;color:#888">${esc(f.doc_id)}</td>
+        <td>
+          <button class="secondary" onclick="reindex('${encodeURIComponent(f.filename)}')">Reindex</button>
+          <button class="danger"    onclick="deleteFile('${encodeURIComponent(f.filename)}','${encodeURIComponent(f.doc_id)}')">Delete</button>
+        </td>`;
+      return tr;
+    }
+
+    async function populate(){
+      const tbody = document.querySelector('#filesTable tbody');
+      tbody.innerHTML = '<tr><td colspan="4">Loading…</td></tr>';
+      try{
+        const data = await fetchFiles();
+        const files = data.files || [];
+        if(!files.length){ tbody.innerHTML = '<tr><td colspan="4">No uploaded files found.</td></tr>'; return; }
+        tbody.innerHTML = '';
+        files.forEach(f => tbody.appendChild(fileRow(f)));
+      }catch(e){ tbody.innerHTML = `<tr><td colspan="4">Error: ${esc(e.message)}</td></tr>`; }
+    }
+
+    async function reindex(filename){
+      if(!confirm('Reindex: ' + decodeURIComponent(filename) + '?')) return;
+      msg().textContent = 'Reindexing…';
+      const res = await fetch('/rag/reindex-file?filename=' + filename, {method:'POST', credentials:'same-origin'});
+      const data = await res.json().catch(()=>({}));
+      if(res.ok){
+        msg().textContent = `✓ Reindexed ${data.reindexed_chunks||'?'} chunks (deleted ${data.deleted_old||0} old) — caches cleared`;
+        populate();
+      } else { msg().textContent = '✗ ' + (data.detail || res.statusText); }
+    }
+
+    async function deleteFile(filename, docId){
+      if(!confirm('Delete ALL chunks for this file? Cannot be undone.')) return;
+      msg().textContent = 'Deleting…';
+      // Delete by both prefix and filename to be thorough
+      const res1 = await fetch('/rag/delete?doc_prefix=' + docId, {method:'POST', credentials:'same-origin'});
+      const res2 = await fetch('/rag/delete?doc_prefix=' + filename, {method:'POST', credentials:'same-origin'});
+      msg().textContent = '✓ Deleted — caches cleared';
+      populate();
+    }
+
+    // ---- REINDEX ALL ----
+    document.getElementById('reindex-all').onclick = async () => {
+      if(!confirm('This will clear ALL indexed chunks and rebuild from disk files.\\n\\nFixes duplicates/orphans.\\n\\nContinue?')) return;
+      const btn = document.getElementById('reindex-all');
+      btn.disabled = true;
+      msg().textContent = 'Reindexing all files…';
+      try{
+        const res = await fetch('/rag/reindex-all', {method:'POST', credentials:'same-origin'});
+        const data = await res.json();
+        if(res.ok){
+          msg().textContent = `✓ Reindexed ${data.reindexed} file(s) — caches cleared`;
+          populate();
+        } else { msg().textContent = '✗ Error: ' + JSON.stringify(data); }
+      }catch(e){ msg().textContent = '✗ ' + e.message;
+      }finally{ btn.disabled = false; }
+    };
+
+    // ---- DEBUG TABLE ----
+    document.getElementById('load-debug').onclick = async () => {
+      const tbl = document.getElementById('debugTable');
+      const cnt = document.getElementById('debug-count');
+      tbl.style.display = 'table';
+      cnt.textContent = 'Loading…';
+      try{
+        const res = await fetch('/rag/debug', {credentials:'same-origin'});
+        const data = await res.json();
+        cnt.textContent = `Total entries in DB: ${data.count}`;
+        const tbody = tbl.querySelector('tbody');
+        tbody.innerHTML = '';
+        if(!data.entries.length){ tbody.innerHTML = '<tr><td colspan="4">Empty</td></tr>'; return; }
+        data.entries.forEach(e => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `
+            <td style="font-size:0.82em">${esc(e.id)}</td>
+            <td>${esc(e.filename)}</td>
+            <td>${e.chunk_index}</td>
+            <td class="text-preview" title="${esc(e.text_preview)}">${esc(e.text_preview)}</td>`;
+          tbody.appendChild(tr);
+        });
+      }catch(e){ cnt.textContent = 'Error: ' + e.message; }
+    };
+
+    function esc(s){ return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+
+    document.getElementById('refresh').onclick = populate;
+    populate();
+
+    // ---- CLEAR ALL CACHES ----
+    document.getElementById('clear-cache').onclick = async () => {
+      const btn = document.getElementById('clear-cache');
+      const origText = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = 'Clearing…';
+      msg().textContent = 'Flushing all caches…';
+      try {
+        const res = await fetch('/rag/clear-cache', {method:'POST', credentials:'same-origin'});
+        const data = await res.json();
+        if (res.ok) {
+          msg().textContent = '✓ ' + (data.message || 'All caches cleared');
+          document.getElementById('cache-notice').style.display = 'none';
+          localStorage.removeItem('assistify_kb_dirty');
+        } else {
+          msg().textContent = '✗ Error: ' + (data.detail || res.statusText);
+        }
+      } catch(e) {
+        msg().textContent = '✗ ' + e.message;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+      }
+    };
+
+    // Show stale cache notice if KB was recently modified
+    if (localStorage.getItem('assistify_kb_dirty')) {
+      document.getElementById('cache-notice').style.display = 'block';
+    }
+
+    // Mark KB as dirty after any mutation (reindex, delete, upload)
+    const _origReindex = window.reindex;
+    const _origDelete = window.deleteFile;
+    function markDirty() {
+      localStorage.setItem('assistify_kb_dirty', Date.now());
+      document.getElementById('cache-notice').style.display = 'block';
+    }
+
+    // ---- LIVE KB EVENT FEED via /ws/kb-events ----
+    const feed = document.getElementById('event-feed');
+    const wsDot = document.getElementById('ws-dot');
+    const wsStatus = document.getElementById('ws-status');
+    let kbWs = null;
+    let kbWsReconnectTimer = null;
+
+    const ACTION_COLORS = {
+      upload: 'ev-upload', reindex: 'ev-reindex', delete: 'ev-delete',
+      update: 'ev-update', reindex_all: 'ev-reindex_all', clear_cache: 'ev-clear_cache',
+    };
+
+    function addFeedEvent(evt) {
+      const li = document.createElement('li');
+      const colorClass = ACTION_COLORS[evt.action] || '';
+      const ts = evt.timestamp ? evt.timestamp.replace('T', ' ').replace('Z', '') : '';
+      li.innerHTML = `<span class="ev-time">${esc(ts)}</span>`
+        + `<span class="ev-action ${colorClass}">${esc(evt.action || '?')}</span>`
+        + `<span class="ev-file">${esc(evt.filename || '')} `
+        + (evt.chunks_added ? `<span style="color:#10a37f">+${evt.chunks_added}</span> ` : '')
+        + (evt.chunks_deleted ? `<span style="color:#ff6b6b">−${evt.chunks_deleted}</span> ` : '')
+        + `<span style="color:#555">v${evt.kb_version||'?'}</span></span>`;
+      feed.prepend(li);
+      // Cap to 50 items
+      while (feed.children.length > 50) feed.removeChild(feed.lastChild);
+    }
+
+    function connectKbWs() {
+      const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+      kbWs = new WebSocket(`${protocol}://${location.host}/ws/kb-events`);
+
+      kbWs.onopen = () => {
+        wsDot.style.background = '#10a37f';
+        wsStatus.textContent = 'Connected — receiving live events';
+      };
+
+      kbWs.onmessage = (e) => {
+        try {
+          const evt = JSON.parse(e.data);
+          if (evt.type === 'connected') {
+            wsStatus.textContent = `Connected — KB v${evt.kb_version}, ${evt.active_sessions} active session(s)`;
+          } else if (evt.type === 'kb_updated') {
+            addFeedEvent(evt);
+            msg().textContent = `✓ KB updated by ${esc(evt.triggered_by || 'system')}: ${esc(evt.action)} on ${esc(evt.filename)}`;
+            populate(); // refresh file list
+          }
+        } catch (_) {}
+      };
+
+      kbWs.onclose = () => {
+        wsDot.style.background = '#666';
+        wsStatus.textContent = 'Disconnected — reconnecting in 5 s…';
+        kbWsReconnectTimer = setTimeout(connectKbWs, 5000);
+      };
+
+      kbWs.onerror = () => {
+        wsDot.style.background = '#ff6b6b';
+        wsStatus.textContent = 'Connection error';
+      };
+    }
+
+    connectKbWs();
+    window.addEventListener('beforeunload', () => { clearTimeout(kbWsReconnectTimer); if(kbWs) kbWs.close(); });
+  </script>
+</body>
+</html>

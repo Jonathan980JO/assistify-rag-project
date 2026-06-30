@@ -1,0 +1,121 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Assistify Admin - Users</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Segoe+UI:400,700&display=swap">
+  <style>
+    body{background:#1e1e1e;color:#fff;font-family:Segoe UI, Arial;padding:2rem}
+    .card{background:#232323;padding:1.5rem;border-radius:8px;max-width:900px;margin:1rem auto}
+    table{width:100%;border-collapse:collapse}
+    th,td{padding:10px;border-bottom:1px solid #333;text-align:left}
+    th{color:#10a37f}
+    .btn{background:#10a37f;color:#fff;padding:8px 12px;border-radius:6px;border:none;cursor:pointer}
+    .danger{background:#ff5c5c}
+    .small{font-size:0.9rem}
+    input,select{padding:8px;border-radius:6px;border:1px solid #333;background:#1e1e1e;color:#fff}
+    .row{display:flex;gap:0.5rem;align-items:center}
+  </style>
+</head>
+<body>
+  <h1>Admin - User Management</h1>
+  <div class="card">
+    <h3>Create User</h3>
+    <div class="row">
+      <input id="new-username" placeholder="username" />
+      <input id="new-password" placeholder="password" type="password" />
+      <select id="new-role">
+        <option value="customer">customer</option>
+        <option value="employee">employee</option>
+        <option value="admin">admin</option>
+      </select>
+      <button class="btn" id="create-btn">Create</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3>Users</h3>
+    <table id="users-table">
+      <thead><tr><th>ID</th><th>Username</th><th>Role</th><th>MFA</th><th>Actions</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+<script>
+// Read CSRF token cookie
+function getCookie(name) {
+  const v = `; ${document.cookie}`;
+  const parts = v.split(`; ${name}=`);
+  if (parts.length === 2) return parts.pop().split(';').shift();
+}
+const CSRF = getCookie('csrf_token') || '';
+
+async function fetchUsers() {
+  const res = await fetch('/users', { credentials: 'same-origin' });
+  const data = await res.json();
+  return data.users || [];
+}
+
+function renderUsers(users) {
+  const tbody = document.querySelector('#users-table tbody');
+  tbody.innerHTML = '';
+  users.forEach(u => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${u.id}</td>
+      <td>${u.username}</td>
+      <td><select data-id="${u.id}" class="role-select"><option value="customer">customer</option><option value="employee">employee</option><option value="admin">admin</option></select></td>
+      <td>${u.mfa_enabled ? 'Yes' : 'No'}</td>
+      <td>
+        <button class="btn update-btn" data-id="${u.id}">Update</button>
+        <button class="btn danger delete-btn" data-id="${u.id}">Delete</button>
+        <button class="btn" data-id="${u.id}" data-action="mfa">Enable MFA</button>
+      </td>`;
+    tbody.appendChild(tr);
+    tr.querySelector('.role-select').value = u.role;
+  });
+  attachHandlers();
+}
+
+function attachHandlers() {
+  document.querySelectorAll('.update-btn').forEach(b => b.onclick = async (e) => {
+    const id = e.target.dataset.id;
+    const role = document.querySelector(`select[data-id='${id}']`).value;
+    const payload = { role };
+    await fetch(`/users/${id}`, { method: 'PUT', credentials: 'same-origin', headers: {'Content-Type':'application/json','X-CSRF-Token': CSRF}, body: JSON.stringify(payload) });
+    load();
+  });
+  document.querySelectorAll('.delete-btn').forEach(b => b.onclick = async (e) => {
+    if (!confirm('Delete user?')) return;
+    const id = e.target.dataset.id;
+    await fetch(`/users/${id}`, { method: 'DELETE', credentials: 'same-origin', headers: {'X-CSRF-Token': CSRF} });
+    load();
+  });
+  document.querySelectorAll('button[data-action="mfa"]').forEach(b=>b.onclick=async(e)=>{
+    const id = e.target.dataset.id;
+    const res = await fetch(`/users/${id}/mfa-enable`, { method: 'POST', credentials:'same-origin', headers: {'X-CSRF-Token': CSRF} });
+    const data = await res.json();
+    alert('MFA secret/provisioning URI:\n' + JSON.stringify(data, null, 2));
+  });
+}
+
+document.getElementById('create-btn').onclick = async () => {
+  const username = document.getElementById('new-username').value;
+  const password = document.getElementById('new-password').value;
+  const role = document.getElementById('new-role').value;
+  if (!username || !password) { alert('Provide username/password'); return; }
+  await fetch('/users', { method: 'POST', credentials:'same-origin', headers: {'Content-Type':'application/json','X-CSRF-Token': CSRF}, body: JSON.stringify({username,password,role}) });
+  document.getElementById('new-username').value = '';
+  document.getElementById('new-password').value = '';
+  load();
+}
+
+async function load(){
+  const users = await fetchUsers();
+  renderUsers(users);
+}
+
+load();
+</script>
+</body>
+</html>
