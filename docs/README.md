@@ -1,6 +1,6 @@
 # Documentation
 
-Active documentation for the **Assistify RAG** public-release branch. Historical phase reports and deprecated development notes live under [`archive/`](archive/).
+Active documentation for **Assistify v1.0**. Historical phase reports and deprecated development notes live under [`archive/`](archive/).
 
 ## Getting started
 

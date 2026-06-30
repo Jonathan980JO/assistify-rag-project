@@ -1,4 +1,4 @@
-# Assistify RAG — Local setup and run guide (Windows)
+# Assistify v1.0 — Local setup and run guide (Windows)
 
 Assistify is a help-desk stack with several services started by one launcher:
 
@@ -175,7 +175,7 @@ python start_main_servers.py
 | Assistify Ollama | Ollama | 11434 |
 | Assistify Piper | Piper TTS | 5002 |
 | Assistify LLM | LLM shim | 8010 |
-| Assistify RAG | RAG server | 7000 |
+| Assistify | RAG server | 7000 |
 | Assistify Login | Login UI | 7001 |
 
 Services already listening are skipped. The coordinator waits until each reports **Ready**, then prints http://127.0.0.1:7001/login. **Close each `Assistify *` window** to stop that service; Ctrl+C in the coordinator only exits the coordinator.

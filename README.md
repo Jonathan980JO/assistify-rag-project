@@ -1,4 +1,4 @@
-# Assistify RAG — Enterprise AI Help-Desk Platform
+# Assistify v1.0 — Enterprise AI Help-Desk Platform
 
 > **Multi-tenant, RAG-powered customer support** with local LLM inference, voice interaction, role-based access control, and tenant-isolated knowledge bases.
 

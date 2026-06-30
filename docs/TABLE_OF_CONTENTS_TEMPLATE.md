@@ -1,5 +1,5 @@
 # Table of Contents - Recommended Structure
-## Assistify RAG System Documentation (IEEE Compliant)
+## Assistify v1.0 Documentation (IEEE Compliant)
 
 ---
 

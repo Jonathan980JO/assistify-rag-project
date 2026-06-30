@@ -1,5 +1,5 @@
 # IEEE Standards Compliance Checklist
-## Assistify RAG System Documentation Review
+## Assistify v1.0 Documentation Review
 
 ### IEEE 830 (Software Requirements Specification) Checklist
 

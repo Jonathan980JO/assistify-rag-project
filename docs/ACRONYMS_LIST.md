@@ -1,5 +1,5 @@
 # List of Acronyms and Abbreviations
-## Assistify RAG System Documentation
+## Assistify v1.0 Documentation
 
 ### Technical Acronyms
 
@@ -107,7 +107,7 @@
 | Acronym | Full Form | Definition |
 |---------|-----------|------------|
 | **AAST** | Arab Academy for Science and Technology | Educational institution |
-| **Assistify** | Assistify RAG System | Name of the graduation project |
+| **Assistify** | Assistify v1.0 | Enterprise AI help-desk platform |
 | **TOON** | Token-Optimized Object Notation | Custom format for RAG context (40-60% token savings) |
 
 ### Standards & Protocols

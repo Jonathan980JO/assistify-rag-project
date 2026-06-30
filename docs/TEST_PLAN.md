@@ -1,4 +1,4 @@
-# Assistify RAG System — Comprehensive Test Plan
+# Assistify v1.0 — Comprehensive Test Plan
 
 *Generated: 2026-06-25. Based on ARCHITECTURE_DISCOVERY.md.*
 
