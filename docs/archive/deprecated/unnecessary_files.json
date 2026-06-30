@@ -1,0 +1,4080 @@
+{
+  "generated_at": "2026-06-29T23:58:24.985226+00:00",
+  "repo_root": "G:\\Grad_Project\\assistify-rag-project-main",
+  "total_flagged": 255,
+  "by_tier": {
+    "A": 94,
+    "B": 129,
+    "C": 25,
+    "D": 7,
+    "E": 0
+  },
+  "findings": [
+    {
+      "path": "._assistify_session_secret",
+      "tier": "A",
+      "reasons": [
+        "gitignore_mismatch",
+        "os_junk"
+      ],
+      "size_bytes": 96,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/auto_selftest_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 49704,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/rag_eval_21_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 32682,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/retrieval_debug_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 122530,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/smoke5_debug_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 31151,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/tmp_patch_results.json",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1270,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Login_system/users.db.pre_mt_backup",
+      "tier": "A",
+      "reasons": [
+        "gitignore_mismatch",
+        "pre_mt_backup"
+      ],
+      "size_bytes": 77824,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/temp_db.txt",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 10068,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_iter1_full.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 498112,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_iter2_full.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 499418,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_iter3_full.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 499926,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_iter4_full.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 481836,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_iter5_full.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 499874,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_psychology_source.txt",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 128,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_scidef_debug_out.txt",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 61886,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_ws_entity_logs.txt",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 3635,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_ws_entity_logs_utf8.txt",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 3635,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_ws_final7_proof.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1361,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_ws_live_backend.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 5074,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/tmp_ws_live_backend.out.log",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 5074,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/tmp_validation_Principles_of_Management.pdf",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2827821,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/analytics.db.pre_mt_backup",
+      "tier": "A",
+      "reasons": [
+        "gitignore_mismatch",
+        "pre_mt_backup"
+      ],
+      "size_bytes": 53248,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/conversations.db.pre_mt_backup",
+      "tier": "A",
+      "reasons": [
+        "gitignore_mismatch",
+        "pre_mt_backup"
+      ],
+      "size_bytes": 49152,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/conversations.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 15605,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_fact_self_test.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 6527,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_generation_validation.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 3162,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_list_logs_after.json",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 14030,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_list_logs_after2.json",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 14976,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_list_logs_before.json",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 168572,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_one_query_debug.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1236,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_prompt_quality_eval.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1112,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/tmp_rag_quality_eval.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 3854,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/temp_parse.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 363,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/temp_test.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1666,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_activation_lifecycle_result.json",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 5374,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_auth_check.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 454,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_auto_pdf_selftest.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 16865,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_check_collections.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1082,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_check_live_rag.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 729,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_compare_p3.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1384,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_compare_p3b.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1385,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_compare_p4.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1383,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_debug_steps_query.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 570,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_def_decision_debug.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 687,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_def_pipeline_debug3.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 751,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_def_select_pages_patchcheck.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1095,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_def_selection_winner_fix.diff",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 30847,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_definition_priority_validation.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 772,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_definition_typo_validation.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 803,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_direct_phase_runner.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 3593,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_entity_select_debug.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1256,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_eval_run.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2693,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_failed6_check.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1597,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_final_answer_quality_validation.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 4235,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_final_diff_req4.diff",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 22132,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_force_promote_patch.diff",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 12122,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_http_smoke.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 368,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_inspect_chroma.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1243,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_latency5_final_recovery.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1603,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_latency_safety_validate.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1979,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_manual_upload_check.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 884,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_perf_validation_final_opt.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1114,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_rebuild_adaptive_psych.py",
+      "tier": "A",
+      "reasons": [
+        "stale_path",
+        "temp_scratch"
+      ],
+      "size_bytes": 1326,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_req5_diff.diff",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 19764,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_retrieval_debug_pass.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 4287,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_retrieve_debug_auth.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1132,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_scientific_sentences_probe.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 892,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_single_mode_stability_loop.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 5171,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_validate_activation_pipeline.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 4449,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_4_queries_patch.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2859,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_7_queries.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2719,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_acceptance_5.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2959,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_debug_done.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1640,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_definition_routing_test.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2080,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_eval.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1903,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_exact3_patchcheck.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2416,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_explain_operant_validation.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1810,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_final_target7.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1873,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_mandatory_8.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2331,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_one.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1087,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_perf3.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1449,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_perf_new.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1310,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_phase_runner.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 4196,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_phase_tests.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2658,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_required_7_structural.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2257,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_smoke.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 929,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_smoke_france.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 925,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_smoke_ft.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 698,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_target_5_realpath.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1983,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_target_eval.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2695,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_validate_stream.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 1356,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/non_functional/TMP_Codes/tmp_ws_validation_exact.py",
+      "tier": "A",
+      "reasons": [
+        "temp_scratch"
+      ],
+      "size_bytes": 2882,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "tests/eval_dual_corpus_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 4773,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "tests/farco_car_kb_eval_report.json",
+      "tier": "A",
+      "reasons": [
+        "eval_output"
+      ],
+      "size_bytes": 35131,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": ".remember/.gitignore",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2,
+      "stale_path": false,
+      "duplicate_of": [
+        ".gitignore",
+        "legacy/ui-drafts/assistify-ui-design (1)/.gitignore",
+        "legacy/ui-drafts/assistify-ui-design (2)/.gitignore"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": ".vscode/settings.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 188,
+      "stale_path": false,
+      "duplicate_of": [
+        "Backup/project_config_backup/20260311_000646/.vscode/settings.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/.vscode/settings.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 56,
+      "stale_path": false,
+      "duplicate_of": [
+        ".vscode/settings.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/body.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 81,
+      "stale_path": false,
+      "duplicate_of": [
+        "Json/body.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/environment_main.yml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1314,
+      "stale_path": false,
+      "duplicate_of": [
+        "environment_main.yml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/environment_main_locked.yml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4404,
+      "stale_path": false,
+      "duplicate_of": [
+        "environment_main_locked.yml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/environment_xtts.yml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1040,
+      "stale_path": false,
+      "duplicate_of": [
+        "environment_xtts.yml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Backup/project_config_backup/20260311_000646/environment_xtts_locked.yml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4658,
+      "stale_path": false,
+      "duplicate_of": [
+        "environment_xtts_locked.yml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Json/body.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 81,
+      "stale_path": false,
+      "duplicate_of": [
+        "Backup/project_config_backup/20260311_000646/body.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Login_system/core/dependencies.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1087,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/core/dependencies.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Login_system/static/favicon.ico",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 872,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/favicon.ico",
+        "assistify-ui-design/out/favicon.ico",
+        "backend/assets/favicon.ico"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Login_system/utils/validation.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2296,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/retrieval/validation.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Qwen2.5-7B-GGUF/README.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4329,
+      "stale_path": false,
+      "duplicate_of": [
+        "README.md",
+        "archived_pdfs/docs/README.md",
+        "archived_pdfs/docs/diagrams/README.md",
+        "docs/README.md",
+        "docs/diagrams/README.md",
+        "legacy/stubs/README.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "TTS/api.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 235,
+      "stale_path": false,
+      "duplicate_of": [
+        "TTS_local_backup/api.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "TTS_local_backup/api.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 235,
+      "stale_path": false,
+      "duplicate_of": [
+        "TTS/api.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archive/audits/assistify_refactor_audit/assistify_rag_server.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2145280,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/assistify_rag_server.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archive/audits/assistify_refactor_audit/login_server.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 235045,
+      "stale_path": false,
+      "duplicate_of": [
+        "Login_system/login_server.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archive/audits/assistify_refactor_audit/pdf_ingestion_rag.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 98428,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/pdf_ingestion_rag.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/ACRONYMS_LIST.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 7994,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/ACRONYMS_LIST.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/ACTUAL_SYSTEM_IMPLEMENTATION.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 47821,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/ACTUAL_SYSTEM_IMPLEMENTATION.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/EMAILJS_SETUP.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 8792,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/EMAILJS_SETUP.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/ENV_SETUP_COMPLETE.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2363,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/ENV_SETUP_COMPLETE.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/FASTER_WHISPER_MIGRATION.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 8063,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/FASTER_WHISPER_MIGRATION.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/FASTER_WHISPER_SETUP.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 5424,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/FASTER_WHISPER_SETUP.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/GOOGLE_OAUTH_SETUP.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 7845,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/GOOGLE_OAUTH_SETUP.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/IEEE_STANDARDS_CHECKLIST.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 5488,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/IEEE_STANDARDS_CHECKLIST.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/METADATA_FIX_FINAL_REPORT.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 9184,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/METADATA_FIX_FINAL_REPORT.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/OWASP_IMPLEMENTATION_REPORT.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 16493,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/OWASP_IMPLEMENTATION_REPORT.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/PROFILE_AND_PASSWORD_RESET.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 11115,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/PROFILE_AND_PASSWORD_RESET.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/PROJECT_BRIEFING.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 38652,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/PROJECT_BRIEFING.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/QUICK_SECURITY_SETUP.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4577,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/QUICK_SECURITY_SETUP.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/README.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1545,
+      "stale_path": false,
+      "duplicate_of": [
+        "Qwen2.5-7B-GGUF/README.md",
+        "README.md",
+        "archived_pdfs/docs/diagrams/README.md",
+        "docs/README.md",
+        "docs/diagrams/README.md",
+        "legacy/stubs/README.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/RESPONSE_VALIDATION_SETUP.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 6301,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/RESPONSE_VALIDATION_SETUP.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/SECURITY_IMPLEMENTATION.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 11973,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/SECURITY_IMPLEMENTATION.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/STABLE_RELEASE_NOTES.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3195,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/STABLE_RELEASE_NOTES.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/SYSTEM_AUDIT_REPORT.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 9734,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/SYSTEM_AUDIT_REPORT.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/TABLE_OF_CONTENTS_TEMPLATE.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 12130,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/TABLE_OF_CONTENTS_TEMPLATE.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/TOON_IMPLEMENTATION.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 9749,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/TOON_IMPLEMENTATION.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/XTTS_PATCHES.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4336,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/XTTS_PATCHES.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/diagrams/1_sequence_diagram.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3738,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/diagrams/1_sequence_diagram.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/diagrams/2_activity_flowchart.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 6810,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/diagrams/2_activity_flowchart.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/diagrams/3_class_diagram.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 10361,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/diagrams/3_class_diagram.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/diagrams/4_process_flow.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 8389,
+      "stale_path": false,
+      "duplicate_of": [
+        "docs/diagrams/4_process_flow.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "archived_pdfs/docs/diagrams/README.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 6139,
+      "stale_path": false,
+      "duplicate_of": [
+        "Qwen2.5-7B-GGUF/README.md",
+        "README.md",
+        "archived_pdfs/docs/README.md",
+        "docs/README.md",
+        "docs/diagrams/README.md",
+        "legacy/stubs/README.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/ChromaDB/chroma.sqlite3",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 167936,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/chroma_db_production/chroma.sqlite3",
+        "chroma_db_production/chroma.sqlite3"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/assets/favicon.ico",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 872,
+      "stale_path": false,
+      "duplicate_of": [
+        "Login_system/static/favicon.ico",
+        "assistify-ui-design/app/favicon.ico",
+        "assistify-ui-design/out/favicon.ico"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/chroma_db_production/chroma.sqlite3",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1933312,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/ChromaDB/chroma.sqlite3",
+        "chroma_db_production/chroma.sqlite3"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/core/config.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 5054,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/voice_audio/config.py",
+        "config.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/core/dependencies.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 893,
+      "stale_path": false,
+      "duplicate_of": [
+        "Login_system/core/dependencies.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/retrieval/validation.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 18689,
+      "stale_path": false,
+      "duplicate_of": [
+        "Login_system/utils/validation.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/voice_audio/config.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1835,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/core/config.py",
+        "config.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/voice_audio/stt/routes.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3904,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/voice_audio/tts/routes.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/voice_audio/tts/routes.py",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4465,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/voice_audio/stt/routes.py"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "chroma_db_production/chroma.sqlite3",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 167936,
+      "stale_path": false,
+      "duplicate_of": [
+        "backend/ChromaDB/chroma.sqlite3",
+        "backend/chroma_db_production/chroma.sqlite3"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/stubs/README.md",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1256,
+      "stale_path": false,
+      "duplicate_of": [
+        "Qwen2.5-7B-GGUF/README.md",
+        "README.md",
+        "archived_pdfs/docs/README.md",
+        "archived_pdfs/docs/diagrams/README.md",
+        "docs/README.md",
+        "docs/diagrams/README.md"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/.gitignore",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 223,
+      "stale_path": false,
+      "duplicate_of": [
+        ".gitignore",
+        ".remember/.gitignore",
+        "legacy/ui-drafts/assistify-ui-design (2)/.gitignore"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 8547,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 10579,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 10021,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/layout.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3766,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/layout.tsx",
+        "assistify-ui-design/app/(auth)/layout.tsx",
+        "assistify-ui-design/app/(guest)/layout.tsx",
+        "assistify-ui-design/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/layout.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 7290,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 11002,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 12617,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/globals.css",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3311,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/globals.css",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/globals.css"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/layout.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1498,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/layout.tsx",
+        "assistify-ui-design/app/(auth)/layout.tsx",
+        "assistify-ui-design/app/(guest)/layout.tsx",
+        "assistify-ui-design/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/layout.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 115,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 449,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/components.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/assistify.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1026,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/assistify.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/assistify.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/chat-area.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4941,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/chat-area.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/chat-area.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/chat-message.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 865,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/chat-message.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/chat-message.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/header.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2920,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/header.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/header.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/kb-banner.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 582,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/kb-banner.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/kb-banner.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/sidebar.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2332,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/sidebar.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/sidebar.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/thinking-indicator.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 498,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/thinking-indicator.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/thinking-indicator.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/ui/button.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3256,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/ui/button.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/ui/button.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/components/voice-overlay.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2892,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/voice-overlay.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/components/voice-overlay.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/next.config.mjs",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 192,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/next.config.mjs",
+        "legacy/ui-drafts/assistify-ui-design (2)/next.config.mjs"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/package.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 857,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/.next/build/package.json",
+        "assistify-ui-design/.next/package.json",
+        "assistify-ui-design/package.json",
+        "legacy/ui-drafts/assistify-ui-design (2)/package.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/pnpm-lock.yaml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 129258,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/pnpm-lock.yaml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/postcss.config.mjs",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 152,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/postcss.config.mjs",
+        "legacy/ui-drafts/assistify-ui-design (2)/postcss.config.mjs"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/apple-icon.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2626,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/apple-icon.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/icon-dark-32x32.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 585,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/icon-dark-32x32.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/icon-light-32x32.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 566,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/icon-light-32x32.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/icon.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1329,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/icon.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-logo.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 568,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-logo.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-logo.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3208,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-logo.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-user.jpg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1635,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-user.jpg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder.jpg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1064,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder.jpg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3253,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (1)/tsconfig.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 736,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/tsconfig.json",
+        "legacy/ui-drafts/assistify-ui-design (2)/tsconfig.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/.gitignore",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 223,
+      "stale_path": false,
+      "duplicate_of": [
+        ".gitignore",
+        ".remember/.gitignore",
+        "legacy/ui-drafts/assistify-ui-design (1)/.gitignore"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 9257,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 8547,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 10579,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 10021,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/layout.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4012,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/layout.tsx",
+        "assistify-ui-design/app/(auth)/layout.tsx",
+        "assistify-ui-design/app/(guest)/layout.tsx",
+        "assistify-ui-design/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/layout.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 9257,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 7290,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 11002,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 11213,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 12617,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/globals.css",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3311,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/globals.css",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/globals.css"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/layout.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1498,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/layout.tsx",
+        "assistify-ui-design/app/(auth)/layout.tsx",
+        "assistify-ui-design/app/(guest)/layout.tsx",
+        "assistify-ui-design/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/layout.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/layout.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 6589,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/app/page.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 115,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/app/(app)/admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/admin/page.tsx",
+        "assistify-ui-design/app/(app)/admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/employee/customers/page.tsx",
+        "assistify-ui-design/app/(app)/employee/page.tsx",
+        "assistify-ui-design/app/(app)/employee/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/main/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/access-requests/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/admins/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/analytics/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/audit-logs/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/knowledge/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/tickets/page.tsx",
+        "assistify-ui-design/app/(app)/master_admin/users/page.tsx",
+        "assistify-ui-design/app/(app)/my-tickets/page.tsx",
+        "assistify-ui-design/app/(app)/notifications/page.tsx",
+        "assistify-ui-design/app/(app)/profile/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-email-change/page.tsx",
+        "assistify-ui-design/app/(app)/profile/verify-password-change/page.tsx",
+        "assistify-ui-design/app/(app)/select-business/page.tsx",
+        "assistify-ui-design/app/(app)/superadmin/page.tsx",
+        "assistify-ui-design/app/(auth)/change-username/page.tsx",
+        "assistify-ui-design/app/(auth)/forgot-password/page.tsx",
+        "assistify-ui-design/app/(auth)/login/page.tsx",
+        "assistify-ui-design/app/(auth)/register/page.tsx",
+        "assistify-ui-design/app/(auth)/reset-password/page.tsx",
+        "assistify-ui-design/app/(auth)/verify-otp/page.tsx",
+        "assistify-ui-design/app/(guest)/guest/page.tsx",
+        "assistify-ui-design/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/app/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/access-requests/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/analytics/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/audit-logs/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/knowledge-base/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/notifications/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/profile/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/superadmin/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/admin/users/page.tsx",
+        "legacy/ui-drafts/assistify-ui-design (2)/app/login/page.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 449,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/components.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/assistify.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1026,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/assistify.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/assistify.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/chat-area.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 4941,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/chat-area.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/chat-area.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/chat-message.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 865,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/chat-message.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/chat-message.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/header.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2920,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/header.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/header.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/kb-banner.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 582,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/kb-banner.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/kb-banner.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/sidebar.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2332,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/sidebar.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/sidebar.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/thinking-indicator.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 498,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/thinking-indicator.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/thinking-indicator.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/ui/button.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3256,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/ui/button.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/ui/button.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/components/voice-overlay.tsx",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2892,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/components/voice-overlay.tsx",
+        "legacy/ui-drafts/assistify-ui-design (1)/components/voice-overlay.tsx"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/next.config.mjs",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 192,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/next.config.mjs",
+        "legacy/ui-drafts/assistify-ui-design (1)/next.config.mjs"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/package.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 857,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/.next/build/package.json",
+        "assistify-ui-design/.next/package.json",
+        "assistify-ui-design/package.json",
+        "legacy/ui-drafts/assistify-ui-design (1)/package.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/pnpm-lock.yaml",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 129258,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/pnpm-lock.yaml"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/postcss.config.mjs",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 152,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/postcss.config.mjs",
+        "legacy/ui-drafts/assistify-ui-design (1)/postcss.config.mjs"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/apple-icon.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 2626,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/apple-icon.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/icon-dark-32x32.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 585,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/icon-dark-32x32.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/icon-light-32x32.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 566,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/icon-light-32x32.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/icon.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1329,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/icon.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-logo.png",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 568,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-logo.png"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-logo.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3208,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-logo.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder-user.jpg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1635,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder-user.jpg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder.jpg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 1064,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder.jpg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/public/placeholder.svg",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 3253,
+      "stale_path": false,
+      "duplicate_of": [
+        "legacy/ui-drafts/assistify-ui-design (1)/public/placeholder.svg"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "legacy/ui-drafts/assistify-ui-design (2)/tsconfig.json",
+      "tier": "B",
+      "reasons": [
+        "duplicate_basename"
+      ],
+      "size_bytes": 736,
+      "stale_path": false,
+      "duplicate_of": [
+        "assistify-ui-design/tsconfig.json",
+        "legacy/ui-drafts/assistify-ui-design (1)/tsconfig.json"
+      ],
+      "unreferenced": false
+    },
+    {
+      "path": "Environment_Validation_Report.md",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 4249,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "LAUNCHER_README.md",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 4319,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "Notepad_Test_Results/traceback.txt",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 334,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/extract_headings.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1266,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/inspect_chroma.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1622,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/run_query.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1100,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/test_chroma_query.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 865,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/test_list_direct.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 887,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/test_list_full.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1596,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "backend/test_ocr.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1121,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/_rag_score_probe.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 577,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/_rag_smoke_test.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1008,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/_env.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 839,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/run_llm.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 437,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/run_login.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 446,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/run_ollama.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 1601,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/run_piper.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 450,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/launch_windows/run_rag.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 444,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/scan_unnecessary_files.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 20577,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "scripts/test_six_ms.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 2395,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "start_piper_service.bat",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 745,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "test_search.py",
+      "tier": "C",
+      "reasons": [
+        "root_debug_clutter",
+        "stale_path",
+        "unreferenced"
+      ],
+      "size_bytes": 906,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": true
+    },
+    {
+      "path": "tools/experiments/dump_chunks_sql_v3.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 2494,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "tools/experiments/get_chunks.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 2449,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "tools/testing/piper_smoke_load.py",
+      "tier": "C",
+      "reasons": [
+        "stale_path"
+      ],
+      "size_bytes": 672,
+      "stale_path": true,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "AGENT_TASK_PROMPT.md",
+      "tier": "D",
+      "reasons": [
+        "audit_markdown"
+      ],
+      "size_bytes": 5500,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "_write_phase13d_report.py",
+      "tier": "D",
+      "reasons": [
+        "root_debug_clutter",
+        "unreferenced"
+      ],
+      "size_bytes": 25374,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": true
+    },
+    {
+      "path": "backend/test",
+      "tier": "D",
+      "reasons": [
+        "misnamed_test"
+      ],
+      "size_bytes": 127,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": false
+    },
+    {
+      "path": "cleanup_repo.py",
+      "tier": "D",
+      "reasons": [
+        "root_debug_clutter",
+        "unreferenced"
+      ],
+      "size_bytes": 8382,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": true
+    },
+    {
+      "path": "conftest.py",
+      "tier": "D",
+      "reasons": [
+        "root_debug_clutter",
+        "unreferenced"
+      ],
+      "size_bytes": 271,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": true
+    },
+    {
+      "path": "hotswap_validation.py",
+      "tier": "D",
+      "reasons": [
+        "root_debug_clutter",
+        "unreferenced"
+      ],
+      "size_bytes": 18518,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": true
+    },
+    {
+      "path": "test_list_patch.py",
+      "tier": "D",
+      "reasons": [
+        "root_debug_clutter",
+        "unreferenced"
+      ],
+      "size_bytes": 1377,
+      "stale_path": false,
+      "duplicate_of": [],
+      "unreferenced": true
+    }
+  ]
+}

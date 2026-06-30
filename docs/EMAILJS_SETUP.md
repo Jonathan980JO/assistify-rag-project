@@ -154,9 +154,7 @@ EmailJS allows you to send emails directly from the browser without a backend em
 
 ## Step 5: Configure Assistify
 
-Edit `verify_otp.html` and replace the placeholders:
-
-1. Open: `Login_system/templates/verify_otp.html`
+1. Open `assistify-ui-design/app/(auth)/verify-otp/page.tsx` (or the EmailJS config module used by auth pages) and replace the placeholders:
 2. Find line 7:
    ```javascript
    publicKey: "YOUR_EMAILJS_PUBLIC_KEY_HERE",
@@ -181,7 +179,7 @@ Edit `verify_otp.html` and replace the placeholders:
 
 1. **Start your server**:
    ```powershell
-   python project_start_server.py --enforce-gpu --n-gpu-layers 40
+   python start_main_servers.py
    ```
 
 2. **Register a new user**:

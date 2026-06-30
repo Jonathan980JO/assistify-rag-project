@@ -29,7 +29,7 @@ Assistify is an enterprise-grade AI-powered help desk system that provides real-
 ### High-Level Architecture
 ```
 ┌─────────────────┐
-│   Web Browser   │ (Frontend: HTML/JS/CSS)
+│   Web Browser   │ (Frontend: React static export at /frontend/*)
 └────────┬────────┘
          │ WebSocket + HTTP
          ▼
@@ -78,11 +78,12 @@ Assistify is an enterprise-grade AI-powered help desk system that provides real-
 - **itsdangerous**: Cryptographic signing for sessions
 
 #### Frontend
-- **Vanilla JavaScript**: No frameworks, pure ES6+
-- **WebSocket API**: Real-time bidirectional communication
-- **Web Audio API**: Audio capture and processing
+- **Next.js 16 + React 19**: Static export served at `/frontend/*` from Login server
+- **TypeScript + Tailwind CSS 4**: Component-based dashboards and chat UI
+- **WebSocket API**: Real-time bidirectional communication (via Login proxy)
+- **Web Audio API**: Audio capture and processing for voice mode
 - **Piper TTS (server-side)**: Spoken responses streamed from RAG server
-- **Chart.js**: Analytics visualization
+- **react-markdown**: Assistant message rendering
 
 #### ML/AI
 - **qwen2.5:3b (Ollama)**: Local LLM for chat and RAG answers
@@ -101,21 +102,19 @@ Assistify is an enterprise-grade AI-powered help desk system that provides real-
 
 ### Root Directory Files
 ```
-├── project_start_server.py       # Main server launcher script
+├── start_main_servers.py         # Recommended one-command launcher
+├── scripts/project_start_server.py  # Multi-service launcher (used by start_main_servers.py)
 ├── config.py                     # Centralized configuration (ports, secrets, paths)
-├── requirements.txt              # Python package dependencies
-├── README.md                     # Basic project documentation
-├── sample_kb.txt                 # Sample knowledge base document
-└── users.db                      # SQLite database for user accounts
+├── environment_main.yml          # Conda environment definition
+├── README.md                     # Project documentation
+└── .env.example                  # Environment template
 ```
 
-**project_start_server.py**
-- Entry point for launching all three servers
-- Command-line arguments: `--enforce-gpu`, `--n-gpu-layers`
-- Spawns Login Server (7001), RAG Server (7000), Piper TTS (5002)
-- Requires Ollama running separately (`ollama serve`, model `qwen2.5:3b` pulled)
-- Monitors server health and handles graceful shutdown
-- Purpose: Single-command deployment of entire stack
+**start_main_servers.py**
+- Entry point for launching the full stack on Windows
+- Builds React UI when needed, starts Ollama/Piper/LLM/RAG/Login services
+- Supports `--status`, `--single-console`, `--no-piper`, `--no-ollama`, and other flags
+- See [SETUP_WINDOWS.md](SETUP_WINDOWS.md) and [LAUNCHER_README.md](../LAUNCHER_README.md)
 
 **config.py**
 - SESSION_SECRET: Cryptographic key for session cookies
@@ -243,186 +242,38 @@ backend/
 ### Login System Directory (`Login_system/`)
 ```
 Login_system/
-├── login_server.py              # Authentication & session server (Port 7001)
-└── templates/                   # Jinja2 HTML templates
-    ├── Login.html               # Login page
-    ├── main.html                # Customer dashboard
-    ├── employee.html            # Employee dashboard (read-only KB access)
-    ├── admin.html               # Admin dashboard
-    ├── admin_users.html         # User management interface
-    ├── admin_knowledge.html     # Knowledge base file manager
-    └── admin_analytics.html     # Analytics visualization
+├── login_server.py              # Authentication, RBAC, REST/WS proxy (Port 7001)
+├── init_users_db.py             # Bootstrap users.db (superadmin / superadmin)
+├── rbac.py                      # Role hierarchy
+├── memberships.py               # Customer tenant memberships
+└── users.db                     # SQLite auth database
 ```
 
 **login_server.py** (Port 7001)
-- **Purpose**: Central authentication gateway and frontend server
+- **Purpose**: Application gateway — auth, sessions, RBAC, API/WebSocket proxy, static React UI
 - **Key Responsibilities**:
   - User login/logout with session cookies
   - CSRF token validation
-  - WebSocket proxy to RAG server (same-origin workaround)
-  - Serves frontend static files with no-cache headers
-  - Admin API endpoints for user/KB management
-  - Employee read-only knowledge base access
+  - WebSocket proxy to RAG server (same-origin)
+  - Serves React static export from `assistify-ui-design/out/` at `/frontend/*`
+  - Admin and tenant management API endpoints
 - **Key Routes**:
-  - `GET /`: Login page
-  - `POST /login`: Authentication endpoint (redirects based on role)
-  - `GET /admin`: Admin dashboard (requires admin role)
-  - `GET /employee`: Employee dashboard (requires employee role)
-  - `GET /main`: Customer dashboard
-  - `GET /frontend/{path}`: Serves frontend files
+  - `GET /login` → redirects to `/frontend/login/`
+  - `POST /login`: Authentication endpoint
+  - `GET /frontend/*`: React static pages
   - `WebSocket /ws`: Proxies to RAG server WebSocket
-- **Admin API Routes**:
-  - `GET /api/users`: List all users (admin only)
-  - `POST /api/users/create`: Create new user (admin only)
-  - `POST /api/users/{id}/activate|deactivate`: Toggle user status (admin only)
-  - `DELETE /api/users/{id}/delete`: Remove user (admin only)
-  - `GET /api/knowledge/files`: List knowledge base files (admin + employee)
-  - `GET /api/knowledge/files/{filename}`: Read file content (admin + employee)
-  - `PUT /api/knowledge/files/{filename}`: Edit file content (admin only)
-  - `DELETE /api/knowledge/files/{filename}`: Delete file (admin only)
-  - `GET /api/knowledge/files/{filename}/download`: Download file (admin + employee)
-  - `POST /proxy/upload_rag`: Upload document to knowledge base (admin only)
-- **Session Management**:
-  - URLSafeSerializer with SESSION_SECRET
-  - httponly cookies (secure in production)
-  - CSRF cookie (csrf_token) for form protection
-  - Role-based redirection: admin → `/admin`, employee → `/employee`, customer → `/main`
-- **Access Control Functions**:
-  - `require_login(role)`: Requires specific role (strict match)
-  - `require_role(*roles)`: Requires any of the specified roles (flexible)
-  - `get_current_user()`: Extracts user from session cookie
-- **WebSocket Proxy Flow**:
-  1. Browser connects to `ws://127.0.0.1:7001/ws`
-  2. Login server validates session cookie
-  3. Opens client WebSocket to `ws://127.0.0.1:7000/ws`
-  4. Bidirectional message forwarding (text and binary)
-  5. Preserves same-origin policy for frontend
-- **Dependencies**: FastAPI, Jinja2, passlib, itsdangerous
+- **Bootstrap account**: `superadmin` / `superadmin` (see `init_users_db.py`)
+- **Dependencies**: FastAPI, passlib, itsdangerous, authlib (OAuth)
 
-**templates/admin.html**
-- **Purpose**: Main admin dashboard with section-based navigation
-- **Sections**:
-  - Quick Actions: Launch chat, Logout
-  - Analytics & Monitoring: View analytics, View error logs
-  - RAG System: Manage knowledge base, Upload documents
-  - User Management: Manage users
-- **Features**:
-  - Responsive grid layout (mobile-friendly)
-  - File upload with CSRF protection
-  - Navigation functions to other admin pages
-  - Dark theme UI (#232323 bg, #10a37f accent)
+### Frontend (`assistify-ui-design/`)
 
-**templates/admin_users.html**
-- **Purpose**: Complete user CRUD interface
-- **Features**:
-  - Create users with role selection (admin/customer/employee)
-  - User list table: ID, username, role, status
-  - Activate/Deactivate users
-  - Delete users (cannot delete self)
-  - Password minimum 8 characters
-  - Real-time updates via fetch API
-- **Security**: CSRF token required for all mutations
+The canonical UI is a **Next.js static export** built to `out/` and served by the Login server.
 
-**templates/admin_knowledge.html**
-- **Purpose**: Knowledge base file management
-- **Features**:
-  - List all .txt/.pdf files with size and modified date
-  - Preview documents in modal (extracts PDF text)
-  - Edit text files directly in browser
-  - Download any document
-  - Delete documents
-  - Upload new documents
-  - Re-indexes edited files into ChromaDB
-- **File Operations**:
-  - Read: Displays content in modal
-  - Edit: Textarea editor, saves and re-indexes
-  - Delete: Removes file from filesystem
-  - Download: FileResponse with original filename
-- **Security**: Path traversal protection (resolves and validates paths)
+- **Auth pages**: `/frontend/login/`, `/frontend/register/`, `/frontend/verify-otp/`, etc.
+- **Chat**: `/frontend/` (authenticated), `/frontend/guest/` (public)
+- **Dashboards**: `/frontend/admin/*`, `/frontend/master_admin/*`, `/frontend/employee/*`, `/frontend/superadmin/`
 
-**templates/admin_analytics.html**
-- **Purpose**: Visual analytics dashboard with charts
-- **Features**:
-  - Summary statistics: Total queries, success rate, total errors, active users
-  - Pie chart: Usage by role (Chart.js doughnut)
-  - Line chart: Error activity over last 24 hours
-  - Recent errors table with timestamps
-  - Auto-refresh every 30 seconds
-  - Manual refresh button
-- **Data Sources**:
-  - `http://127.0.0.1:7000/analytics/summary`
-  - `http://127.0.0.1:7000/analytics/errors`
-- **Dependencies**: Chart.js 4.4.0 (CDN)
-
-**templates/Login.html**
-- **Purpose**: User authentication page
-- **Features**:
-  - Username/password form
-  - Error message display (red banner)
-  - Dark theme consistent with other pages
-  - Autofocus on username field
-  - Mobile-responsive layout
-
-**templates/employee.html**
-- **Purpose**: Dedicated dashboard for employee users
-- **Features**:
-  - Welcome message with employee badge (blue)
-  - Launch chat assistant button
-  - Read-only knowledge base table with preview/download
-  - Document preview modal with full text display
-  - Responsive design for mobile/tablet
-  - **Restrictions**: Cannot edit, upload, or delete KB files
-- **Actions Available**:
-  - Preview KB documents in modal
-  - Download KB documents
-  - Access chat assistant
-  - Logout
-
-**templates/main.html**
-- **Purpose**: Landing page for customer users
-- **Features**:
-  - Welcome message with username and role badge
-  - "Launch Voice Chat Assistant" button → /frontend/index.html
-  - Logout button
-  - Dark theme matching admin pages
-
-### Frontend Directory (`frontend/`)
-```
-frontend/
-├── index.html                   # Main voice chat interface
-└── Website_ChatGpt/             # Legacy/test files
-    ├── Chatgpt_test.html
-    └── rag_test.html
-```
-
-**index.html**
-- **Purpose**: Real-time voice and text chat interface
-- **Key Features**:
-  - Voice recording with Start/Stop/Mute buttons
-  - WebSocket communication for real-time transcription
-  - Text-to-Speech with emoji filtering
-  - Message history display (user and AI)
-  - Audio buffer clearing to prevent bleed-through
-- **Audio Processing**:
-  - MediaRecorder API for microphone capture
-  - AudioContext for PCM16 conversion (16kHz, mono)
-  - Sends binary audio frames over WebSocket
-  - Handles control messages to clear backend buffers
-- **WebSocket Protocol**:
-  - Binary messages: Audio data (PCM16)
-  - Text messages: JSON control/transcript/response
-    - `{type: 'control', action: 'stop_recording'}`: Clears buffers
-    - `{type: 'transcript', text: '...'}`: User's transcribed speech
-    - `{type: 'response', text: '...'}`: AI response
-    - `{type: 'error', message: '...'}`: Error notification
-- **TTS Implementation**:
-  - Server-side Piper TTS via RAG WebSocket (audio chunks streamed from port 5002)
-  - Client plays received PCM/WAV audio; browser Speech Synthesis API is not the primary path
-- **Duplicate Message Fix**:
-  - Removed client-side `appendMsg()` on form submit
-  - Relies solely on server echo to display messages
-  - Prevents same message appearing twice
-- **CSS**: Dark theme (#232323), responsive layout, message bubbles
+See [FRONTEND_TECHNICAL_SPEC.md](FRONTEND_TECHNICAL_SPEC.md) for the full route map.
 
 ---
 
@@ -431,30 +282,24 @@ frontend/
 ### Complete User Journey: Voice Query
 
 #### Step 1: Authentication
-1. User visits `http://127.0.0.1:7001/`
-2. Login page loads (Login.html)
-3. User submits username/password
+1. User visits `http://127.0.0.1:7001/login` (redirects to `/frontend/login/`)
+2. React login page loads
+3. User submits username/password or uses Google OAuth
 4. POST /login → `login_server.py` validates credentials
 5. Creates session cookie with URLSafeSerializer
-6. Sets CSRF cookie for form protection
-7. Redirects to `/admin` (admin role) or `/main` (other roles)
+6. Sets CSRF cookie for API protection
+7. Redirects to role-appropriate React route (e.g. `/frontend/superadmin/`, `/frontend/admin/`, `/frontend/main/`)
 
 #### Step 2: Dashboard Access
-1. User redirected based on role after login:
-   - Admin → `/admin` (full dashboard with all controls)
-   - Employee → `/employee` (chat + read-only KB viewer)
-   - Customer → `/main` (chat access only)
-2. Dashboard loads with role-specific features
-3. Employee dashboard loads KB file list via `GET /api/knowledge/files`
-4. Employee can preview/download but cannot edit/delete files
+1. User lands on role-specific React dashboard under `/frontend/*`
+2. Dashboard components fetch data via Login server API (`/api/*`)
+3. Admin and employee pages include knowledge-base and ticket tools as React feature modules
 
 #### Step 3: Chat Interface Access
-1. User clicks "Launch Chat Assistant" button
-2. Navigates to `/frontend/index.html`
-3. Login server serves file with no-cache headers
-4. JavaScript loads, connects WebSocket to `/ws`
-5. Login server validates session cookie
-6. Opens proxy WebSocket to RAG server at `ws://127.0.0.1:7000/ws`
+1. User opens chat from sidebar or navigates to `/frontend/`
+2. Login server serves static export from `assistify-ui-design/out/`
+3. React app connects WebSocket to `/ws` on the Login server
+4. Login server validates session cookie and proxies to RAG server at `ws://127.0.0.1:7000/ws`
 
 #### Step 4: Voice Recording Start
 1. User clicks "Start Recording" button

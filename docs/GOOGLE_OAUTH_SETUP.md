@@ -99,13 +99,13 @@ pip install -r requirements.txt
 
 ## Step 6: Test the Integration
 
-1. **Start the server**:
+1. **Start the stack**:
    ```powershell
-   python project_start_server.py --enforce-gpu --n-gpu-layers 40
+   python start_main_servers.py
    ```
 
 2. **Navigate to the login page**:
-   - Open: `http://localhost:7001/`
+   - Open: `http://127.0.0.1:7001/frontend/login/`
 
 3. **Click "Continue with Google"**:
    - You should be redirected to Google's sign-in page

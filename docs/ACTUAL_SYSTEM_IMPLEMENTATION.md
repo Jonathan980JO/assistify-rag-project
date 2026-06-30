@@ -911,16 +911,9 @@ The `?` placeholder prevent SQL injection because value is escaped by SQLite dri
 
 #### F. XSS Prevention
 
-**Output escaping in Jinja2 templates:**
+**Output escaping in React UI:**
 
-Jinja2 auto-escape HTML by default:
-```html
-<!-- User input automatically escaped -->
-<p>Welcome {{ username }}</p>
-
-<!-- If username = "<script>alert('XSS')</script>" -->
-<!-- Rendered as: <p>Welcome &lt;script&gt;alert('XSS')&lt;/script&gt;</p> -->
-```
+React escapes text in JSX by default. User-supplied content is rendered through controlled components and `react-markdown` rather than raw HTML injection.
 
 **Content Security Policy header:**
 ```python

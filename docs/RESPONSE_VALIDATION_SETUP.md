@@ -175,7 +175,7 @@ If you want to upgrade to **Intermediate** or **Advanced** levels later:
 ## 🔧 Troubleshooting
 
 ### **Validation not working?**
-1. Check server logs: `python project_start_server.py`
+1. Check server logs while running `python start_main_servers.py`
 2. Look for: `"Response validation FAILED"` messages
 3. Verify import: `from backend.response_validator import validate_response`
 
@@ -200,7 +200,7 @@ In `assistify_rag_server.py`, comment out validation section (lines ~246-274)
 - `backend/response_validator.py` - Main validation logic
 - `backend/assistify_rag_server.py` - Integration point
 - `test_validation.py` - Test suite
-- `Login_system/templates/admin_analytics.html` - Dashboard
+- `assistify-ui-design/src/features/` - Admin analytics dashboard UI
 
 ---
 

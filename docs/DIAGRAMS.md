@@ -743,18 +743,16 @@ flowchart TB
 ```mermaid
 flowchart TB
     subgraph login7001 [Login Server :7001]
-        Jinja[Jinja templates]
-        StaticChat["/frontend/index.html"]
-        StaticJS["/static/security.js navigation.js"]
+        ReactUI["React static export /frontend/*"]
+        StaticJS["CSRF + session middleware"]
     end
     subgraph rag7000 [RAG Server :7000]
         WS["WebSocket /ws"]
         REST["/conversations /tts /arabic/*"]
-        RagAdmin[backend/templates admin pages]
     end
-    Jinja --> StaticJS
-    StaticChat --> WS
-    StaticChat --> REST
+    ReactUI --> StaticJS
+    ReactUI --> WS
+    ReactUI --> REST
 ```
 
 *Source: `docs/FRONTEND_TECHNICAL_SPEC.md:54`*

@@ -13,68 +13,42 @@
 ### 1.1 Directory Tree
 
 ```
-assistify-rag-project-final-rag-system/
+assistify-rag-project-main/
 ├── config.py                    # Central config — env vars, tenant helpers
 ├── .env.example                 # Example env file
 ├── start_main_servers.py        # Top-level launcher script
 ├── backend/                     # RAG + voice server
-│   ├── assistify_rag_server.py  # Main FastAPI app — RAG, WS, KB, analytics (2MB)
+│   ├── assistify_rag_server.py  # FastAPI entry — wires routers and services
+│   ├── app_factory.py           # Application factory
+│   ├── routers/                 # HTTP/WS route modules
+│   ├── services/                # RAG, conversation, KB, analytics services
 │   ├── knowledge_base.py        # ChromaDB wrapper — ingest, search, delete
 │   ├── pdf_ingestion_rag.py     # PDF pipeline — VectorStore, cross-encoder reranker
 │   ├── response_validator.py    # PII/profanity/relevance post-filter
-│   ├── config_head.py           # Server-side startup + prompt constants
 │   ├── database.py              # SQLite conv/session DB
 │   ├── analytics.py             # SQLite analytics DB
 │   ├── tenant_access.py         # Chat tenant validation + membership checks
 │   ├── chat_store.py            # In-memory + SQLite conversation store
 │   ├── toon.py                  # Token-efficient RAG context formatter
-│   ├── rag_query_prep.py        # Query normalisation before retrieval
-│   ├── rag_middleware.py        # CSRF + other middleware helpers
-│   ├── rag_chunk_heuristics.py  # Chunk classification helpers
-│   ├── adaptive_chunk_manager.py
-│   ├── retrieval_filter.py
-│   ├── spelling_fallback.py
-│   ├── sqlite_compat.py         # Monkey-patches sqlite3 for Windows compat
 │   ├── voice_audio/             # Voice pipeline sub-package
-│   │   ├── ws/handler.py        # WebSocket entry point for voice+text
-│   │   ├── ws/audio_pipeline.py # Whisper STT pipeline
-│   │   ├── ws/capture.py        # Conversation capture WS adapter
-│   │   ├── tts/streaming.py     # TTS streaming helpers
-│   │   ├── deps.py              # VoiceWebSocketDeps dataclass
-│   │   ├── config.py            # Voice-specific config
-│   │   ├── state.py             # Semaphore, interrupt events, write locks
-│   │   └── memory_guard.py      # GPU memory safeguards
 │   ├── Models/                  # Downloaded ML model binaries
-│   │   └── models--Systran--faster-whisper-*/
-│   ├── templates/               # Jinja/HTML admin pages (legacy)
 │   ├── chroma_db_v3/            # ChromaDB persistent store (gitignored data)
 │   └── assets/                  # Uploaded PDFs/TXTs (per-tenant subdirs)
 ├── Login_system/                # Auth + user management server
-│   ├── login_server.py          # FastAPI auth app (port 7001)
+│   ├── login_server.py          # FastAPI auth app (port 7001), serves React /frontend/
 │   ├── rbac.py                  # Role hierarchy definitions
 │   ├── memberships.py           # Customer to tenant membership logic
 │   ├── guest_session.py         # Anonymous guest cookie handling
-│   ├── persistent_state.py      # Rate limits, session invalidation (SQLite)
-│   ├── session_validation.py    # Shared token load+validate helper
 │   ├── init_users_db.py         # DB schema init
-│   ├── create_seed_users.py     # Dev seed data
 │   └── users.db                 # SQLite user/tenant/membership DB
-├── assistify-ui-design/         # Next.js 16 React frontend
+├── assistify-ui-design/         # Next.js 16 React frontend (canonical UI)
 │   ├── app/                     # App Router pages
-│   │   ├── (app)/               # Authenticated routes (AuthGuard + RoleGuard)
-│   │   ├── (auth)/              # Public auth routes (login, register, OTP)
-│   │   └── (guest)/             # Public guest chat
 │   ├── components/              # Shared UI components
-│   ├── src/
-│   │   ├── hooks/               # React hooks (WS, voice, conversations, profile)
-│   │   ├── features/            # Page-level feature components
-│   │   ├── components/          # UI primitives (Card, Toast, AuthGuard, RoleGuard)
-│   │   └── lib/                 # apiClient, navigation, types, audioUtils
-│   └── package.json
+│   └── src/                     # hooks, features, lib
 ├── scripts/                     # Launch helpers, build scripts
 ├── docs/                        # Project documentation
 ├── tests/                       # pytest suite
-├── TTS/ tts_service/ xtts_service/  # XTTS v2 microservice (separate conda env)
+├── tts_service/ xtts_service/   # TTS microservices
 └── logs/                        # Rotating log files
 ```
 
@@ -676,7 +650,7 @@ graph TD
 - XTTS v2 microservice startup, health check, and failover behavior not documented in code.
 - `main_llm_server.py` (port 8010) appears to be dead code but scripts still reference it.
 - `backend/toon.py` TOON context format is undocumented.
-- Stale UI copies (`assistify-ui-design (1)/`, `assistify-ui-design (2)/`) at repo root.
+- Legacy UI drafts (if present) live under `legacy/ui-drafts/` and are not served in production.
 
 ### 4.3 Tenant Isolation Risks (explicit and blunt)
 
@@ -706,7 +680,7 @@ When `doc_prefix` is provided to `delete_documents_by_source_identity()` with `t
 - **`WHISPER_BEAM_SIZE` mismatch**: `config.py` sets it to 5; `_system_preflight()` warns if it is not 1. This triggers a warning on every startup with default config.
 - **Dead LLM shim**: `main_llm_server.py` and port 8010 remain in launch scripts and env vars but are confirmed unused for actual LLM inference.
 - **Three conversation stores**: `conversations.json` (JSON file), `conversations.db / ui_conversations` (SQLite), and an in-memory `defaultdict` all coexist. Precedence and consistency between them is not obvious.
-- **Stale UI copies**: `assistify-ui-design (1)/` and `assistify-ui-design (2)/` at repo root suggest uncleaned copies.
+- **Legacy UI drafts**: Optional copies under `legacy/ui-drafts/` are not referenced by launchers.
 - **`config_head.py` god-module pattern**: imports and re-exports from multiple backend modules at the top level, making import order fragile.
 - **`chroma_db_reindex/` vs `chroma_db_v3/`**: two ChromaDB data directories exist; relationship is unclear.
 

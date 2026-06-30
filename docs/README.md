@@ -1,39 +1,63 @@
 # Documentation
 
-This directory contains all project documentation, implementation reports, and setup guides.
+Active documentation for the **Assistify RAG** public-release branch. Historical phase reports and deprecated development notes live under [`archive/`](archive/).
 
-## Setup Guides
+## Getting started
 
-- **ENV_SETUP_COMPLETE.md** - Environment setup completion checklist
-- **GOOGLE_OAUTH_SETUP.md** - Google OAuth 2.0 integration setup
-- **EMAILJS_SETUP.md** - EmailJS configuration for email notifications
-- **QUICK_SECURITY_SETUP.md** - Quick security implementation guide
-- **RESPONSE_VALIDATION_SETUP.md** - Response validation setup instructions
+| Document | Description |
+|----------|-------------|
+| [SETUP_WINDOWS.md](SETUP_WINDOWS.md) | Windows install, conda env, launcher, and day-to-day runbook |
+| [CANONICAL_PROJECT_PATH.md](CANONICAL_PROJECT_PATH.md) | Project root, runtime data paths, and preflight checks |
+| [WINDOWS_TROUBLESHOOTING.md](WINDOWS_TROUBLESHOOTING.md) | Additional Windows-specific fixes |
+| [../LAUNCHER_README.md](../LAUNCHER_README.md) | `start_main_servers.py` launcher reference |
 
-## Implementation Reports
+## Architecture
 
-- **OWASP_IMPLEMENTATION_REPORT.md** - Complete OWASP Top 10 2021 security implementation
-- **TOON_IMPLEMENTATION.md** - TOON format implementation with 40-60% token savings
-- **SECURITY_IMPLEMENTATION.md** - Comprehensive security measures documentation
-- **SYSTEM_AUDIT_REPORT.md** - System security audit findings and remediation
+| Document | Description |
+|----------|-------------|
+| [SYSTEM_ARCHITECTURE.md](SYSTEM_ARCHITECTURE.md) | End-to-end technical architecture |
+| [ARCHITECTURE_DISCOVERY.md](ARCHITECTURE_DISCOVERY.md) | Codebase inventory and service map |
+| [TENANT_SELECTOR_ARCHITECTURE.md](TENANT_SELECTOR_ARCHITECTURE.md) | Per-conversation tenant selection |
+| [FRONTEND_TECHNICAL_SPEC.md](FRONTEND_TECHNICAL_SPEC.md) | React/Next.js UI structure and routes |
+| [RAG_RETRIEVAL.md](RAG_RETRIEVAL.md) | Retrieval pipeline details |
+| [TOON_IMPLEMENTATION.md](TOON_IMPLEMENTATION.md) | TOON context format (token savings) |
+| [DIAGRAMS.md](DIAGRAMS.md) | Consolidated Mermaid diagrams |
+| [diagrams/](diagrams/) | Individual sequence, activity, class, and process diagrams |
 
-## Feature Documentation
+## Security & compliance
 
-- **PROFILE_AND_PASSWORD_RESET.md** - User profile management and password reset flow
-- **PROJECT_BRIEFING.md** - Project overview and objectives
+| Document | Description |
+|----------|-------------|
+| [SECURITY_IMPLEMENTATION.md](SECURITY_IMPLEMENTATION.md) | Security controls overview |
+| [OWASP_IMPLEMENTATION_REPORT.md](OWASP_IMPLEMENTATION_REPORT.md) | OWASP Top 10 mapping |
+| [QUICK_SECURITY_SETUP.md](QUICK_SECURITY_SETUP.md) | Fast security hardening checklist |
+| [RESPONSE_VALIDATION_SETUP.md](RESPONSE_VALIDATION_SETUP.md) | LLM response validation setup |
 
-## Quick Links
+## Integrations & features
 
-### Security
-- [OWASP Implementation Report](OWASP_IMPLEMENTATION_REPORT.md)
-- [Security Implementation Guide](SECURITY_IMPLEMENTATION.md)
-- [System Audit Report](SYSTEM_AUDIT_REPORT.md)
+| Document | Description |
+|----------|-------------|
+| [GOOGLE_OAUTH_SETUP.md](GOOGLE_OAUTH_SETUP.md) | Google OAuth 2.0 configuration |
+| [EMAILJS_SETUP.md](EMAILJS_SETUP.md) | EmailJS for OTP and notifications |
+| [FASTER_WHISPER_SETUP.md](FASTER_WHISPER_SETUP.md) | Speech-to-text (faster-whisper) setup |
+| [PROFILE_AND_PASSWORD_RESET.md](PROFILE_AND_PASSWORD_RESET.md) | Profile, password reset, and email change flows |
 
-### Features
-- [TOON Implementation](TOON_IMPLEMENTATION.md) - 40-60% token savings for LLM
-- [Profile & Password Reset](PROFILE_AND_PASSWORD_RESET.md)
+## Project reference
 
-### Setup
-- [Environment Setup](ENV_SETUP_COMPLETE.md)
-- [Google OAuth Setup](GOOGLE_OAUTH_SETUP.md)
-- [EmailJS Setup](EMAILJS_SETUP.md)
+| Document | Description |
+|----------|-------------|
+| [PROJECT_BRIEFING.md](PROJECT_BRIEFING.md) | Project overview and technical briefing |
+| [ACTUAL_SYSTEM_IMPLEMENTATION.md](ACTUAL_SYSTEM_IMPLEMENTATION.md) | Implementation deep-dive |
+| [TEST_PLAN.md](TEST_PLAN.md) | Test strategy and manual checks |
+| [ACRONYMS_LIST.md](ACRONYMS_LIST.md) | Terminology and acronyms |
+| [IEEE_STANDARDS_CHECKLIST.md](IEEE_STANDARDS_CHECKLIST.md) | Documentation standards checklist |
+| [TABLE_OF_CONTENTS_TEMPLATE.md](TABLE_OF_CONTENTS_TEMPLATE.md) | TOC template for long documents |
+
+## Archive
+
+| Location | Contents |
+|----------|----------|
+| [archive/](archive/) | Phase reports, cleanup plans, evidence bundles |
+| [archive/deprecated/](archive/deprecated/) | Superseded release notes, audit reports, migration notes |
+
+Do not treat archived documents as current runbooks unless explicitly linked from an active doc above.

@@ -95,9 +95,9 @@ Assistify enables organizations to:
 ### Repository Layout
 
 ```
-assistify-rag-project-final-rag-system/
-├── assistify-ui-design/     # Canonical React/Next.js UI (static export → out/)
-├── backend/                 # RAG server, knowledge base, LLM shim, voice_audio/
+assistify-rag-project-main/
+├── assistify-ui-design/     # React/Next.js UI (static export → out/)
+├── backend/                 # RAG server, routers, services, voice_audio/
 ├── Login_system/            # Login server, users.db, RBAC, sessions
 ├── tts_service/             # Piper TTS microservice (:5002)
 ├── xtts_service/            # Legacy XTTS v2 alternative (:5002)
@@ -108,8 +108,6 @@ assistify-rag-project-final-rag-system/
 ├── start_main_servers.py    # One-command launcher
 └── environment_main.yml     # Conda environment
 ```
-
-> **Note:** `assistify-ui-design (1)` and `assistify-ui-design (2)` are stale duplicates. Use **`assistify-ui-design`** only.
 
 ---
 
@@ -1606,7 +1604,7 @@ Tunnels port 7001 via cloudflared or ngrok. Prints public URL and `.env` hints.
 | Chroma vector search | 10–50ms | HNSW index, candidate pool tuning |
 | PDF OCR fallback | Seconds per page | Skip OCR for text-rich PDFs |
 | Voice pipeline | 2–5s end-to-end | Progressive TTS chunking, prebuffer |
-| Monolithic RAG server | ~44k lines in one file | Modularization planned (see Roadmap) |
+| Cold RAG boot | Whisper model load on first start | Pre-download models; `--no-whisper` for text-only |
 
 ### Optimization Recommendations
 
@@ -1639,7 +1637,7 @@ Tunnels port 7001 via cloudflared or ngrok. Prints public URL and `.env` hints.
 
 | Priority | Enhancement | Rationale |
 |----------|-------------|-----------|
-| High | Modularize RAG server | 44k-line monolith → separate router modules |
+| Medium | Expand router coverage | Move remaining orchestration from entry module into routers |
 | High | Authenticate internal endpoints | Security hardening for `/health`, TTS, LLM shim |
 | High | PostgreSQL migration option | SQLite limits for multi-instance deployment |
 | Medium | BM25 hybrid search | Improve lexical matching alongside dense vectors |
@@ -1657,7 +1655,6 @@ Tunnels port 7001 via cloudflared or ngrok. Prints public URL and `.env` hints.
 | LLM port mismatch | `config.LLM_SERVER_PORT=8010` vs `main_llm_server.py __main__` on 8000 | Use launcher default 8010 |
 | `retrieval_filter.py` unused | `apply_retrieval_filters()` not wired into live pipeline | Filtering done inline in VectorStore |
 | Prefinal TTS disabled | `prefinal_tts_enabled_for_query = False` hardcoded | TTS runs after full LLM response |
-| Stale UI duplicates | `assistify-ui-design (1)` and `(2)` folders exist | Use `assistify-ui-design` only |
 | `_XTTS_SYNTH_SEM` undefined | Referenced in inline LLM TTS consumer but not imported | Active path uses `xtts_synth_sem` |
 | Ticket REST API partial | Ticket pages exist but some REST endpoints only in login_server | Use existing `/api/support/ticket/*` |
 
@@ -1679,7 +1676,7 @@ Tunnels port 7001 via cloudflared or ngrok. Prints public URL and `.env` hints.
 - **Performance** — Starlette-based, faster than Flask for concurrent WS connections
 - **Auto OpenAPI** — Self-documenting API (used during development)
 
-**Tradeoff:** Monolithic RAG server grew to 44k lines; would benefit from router modularization.
+**Tradeoff:** RAG orchestration is split across routers and services; further extraction would improve test isolation.
 
 ### Why ChromaDB?
 
@@ -1866,7 +1863,8 @@ Assistify transforms static knowledge-base documents into an interactive AI supp
 | [docs/RAG_RETRIEVAL.md](docs/RAG_RETRIEVAL.md) | RAG retrieval pipeline details |
 | [docs/TOON_IMPLEMENTATION.md](docs/TOON_IMPLEMENTATION.md) | TOON context format specification |
 | [docs/PROJECT_BRIEFING.md](docs/PROJECT_BRIEFING.md) | Project briefing and goals |
-| [docs/ENV_SETUP_COMPLETE.md](docs/ENV_SETUP_COMPLETE.md) | Environment setup reference |
+| [docs/SETUP_WINDOWS.md](docs/SETUP_WINDOWS.md) | Windows install, launcher, and troubleshooting |
+| [docs/CANONICAL_PROJECT_PATH.md](docs/CANONICAL_PROJECT_PATH.md) | Project root and data directory layout |
 
 ---
 

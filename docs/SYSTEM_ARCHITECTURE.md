@@ -3,7 +3,7 @@
 **Version:** 1.0  
 **Audience:** Developers, solution architects, platform engineers  
 **Scope:** End-to-end request lifecycle from user prompt to rendered response  
-**Codebase:** `assistify-rag-project-final-rag-system` (Assistify help-desk stack)
+**Codebase:** `assistify-rag-project-main` (Assistify help-desk stack)
 
 ---
 

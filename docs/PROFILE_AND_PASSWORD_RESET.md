@@ -272,22 +272,20 @@ POST /profile/verify-password-change → Verify OTP & update password
 ## File Changes Summary
 
 ### Modified Files
-1. `Login_system/login_server.py` - Added 9 new routes, updated init_db, updated verify_otp
-2. `Login_system/templates/Login.html` - Added forgot password link and success message
-3. `Login_system/templates/admin.html` - Added Profile Settings nav link
-4. `Login_system/templates/employee.html` - Added Profile Settings nav link
-5. `Login_system/templates/main.html` - Added Profile Settings nav link
+1. `Login_system/login_server.py` - Added profile, password reset, and email-change routes
+2. `assistify-ui-design/app/(auth)/*` - Login, forgot-password, reset-password pages
+3. `assistify-ui-design/app/(app)/profile/` - Profile management dashboard
+4. `assistify-ui-design/src/features/` - Profile and auth feature components
 
-### New Files
-1. `Login_system/templates/forgot_password.html` - Password reset request
-2. `Login_system/templates/reset_password.html` - OTP + new password form
-3. `Login_system/templates/profile.html` - Profile management dashboard
-4. `Login_system/templates/verify_email_change.html` - Email change OTP verification
-5. `Login_system/templates/verify_password_change.html` - Password change OTP verification
+### New UI routes (React)
+1. `/frontend/forgot-password/` - Password reset request
+2. `/frontend/reset-password/` - OTP + new password form
+3. `/frontend/profile/` - Profile management dashboard
+4. `/frontend/verify-otp/` - OTP verification flows
 
 ## Design Consistency
 
-All templates follow the established design system:
+All React pages follow the established design system:
 - **Colors**: Dark theme with accent green (#10a37f)
 - **Typography**: Segoe UI, clean hierarchy
 - **Components**: Consistent button styles, input fields, error/success messages

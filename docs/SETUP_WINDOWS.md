@@ -308,7 +308,7 @@ Get-ChildItem tests\test_*.py | Where-Object { $_.Name -ne "test_arabic_tts.py" 
 
 | Symptom | What to try |
 |---------|-------------|
-| `can't open file ... scripts\project_start_server.py` | `cd` into the **project root** (two nested `assistify-rag-project-final-rag-system` folders). |
+| `can't open file ... scripts\project_start_server.py` | `cd` into the **project root** where `start_main_servers.py` lives (see [CANONICAL_PROJECT_PATH.md](CANONICAL_PROJECT_PATH.md)). |
 | Launcher exits immediately / "All servers stopped" | Check `logs\rag.log` and `logs\piper.log`; ensure Ollama is running and the model is pulled. |
 | RAG stuck starting / long first boot | Normal on first run while faster-whisper downloads; wait up to ~10 minutes or check `logs\rag.log`. |
 | `$env:KMP_DUPLICATE_LIB_OK` error in **cmd** | Use PowerShell, or `set KMP_DUPLICATE_LIB_OK=TRUE` in cmd. |
@@ -331,9 +331,9 @@ Get-ChildItem tests\test_*.py | Where-Object { $_.Name -ne "test_arabic_tts.py" 
 ## 6. Project layout (short)
 
 ```
-assistify-rag-project-final-rag-system/
+assistify-rag-project-main/
 ├── assistify-ui-design/     # React/Next.js UI (static export → out/)
-├── backend/                 # RAG server, knowledge base, Ollama LLM shim
+├── backend/                 # RAG server, routers, services, voice_audio/
 ├── Login_system/            # Login server, users.db (API + serves React /frontend/)
 ├── tts_service/             # Piper TTS microservice (port 5002)
 ├── scripts/
