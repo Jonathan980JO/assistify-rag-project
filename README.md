@@ -1,376 +1,215 @@
 # Assistify v1.0
 
-<p align="center">
-  <h3 align="center">AI-Powered Enterprise Help Desk Platform</h3>
-  <p align="center">
-    Retrieval-Augmented Generation (RAG) • Local LLMs • Voice Assistant • Multi-Tenant Architecture
-  </p>
-</p>
+![Assistify Banner](assets/banner.png)
+
+<div align="center">
+
+### AI-Powered Enterprise Help Desk Platform
+
+Retrieval-Augmented Generation (RAG) • Multi-Tenant Architecture • Voice Intelligence • Knowledge Base Management • Analytics & Monitoring
+
+</div>
 
 ---
 
 ## Overview
 
-Assistify is an enterprise AI help desk platform that transforms organizational knowledge into an intelligent support assistant.
+Assistify is an AI-powered enterprise help desk platform that enables organizations to build intelligent customer support systems using Retrieval-Augmented Generation (RAG).
 
-Organizations can upload their own documents, policies, manuals, and knowledge-base content, allowing users to receive accurate, context-aware answers through natural language conversations.
+The platform allows administrators to upload company knowledge bases, manage users and permissions, monitor analytics, and provide employees and customers with accurate AI-generated answers grounded in organizational documents.
 
-Unlike traditional chatbots, Assistify uses Retrieval-Augmented Generation (RAG) to ground responses in uploaded documents, reducing hallucinations and improving answer reliability.
-
-The platform supports:
-
-- AI-powered support conversations
-- Knowledge-base management
-- Multi-tenant organizations
-- Voice interaction
-- Role-based access control
-- Analytics and monitoring
-- Local AI inference for privacy and cost efficiency
-
----
-
-## Why Assistify?
-
-Organizations face several challenges with traditional customer support:
-
-- Large amounts of information scattered across PDFs and documents
-- Repetitive customer questions
-- Slow response times
-- High support costs
-- Limited support availability
-- Inconsistent answers between agents
-
-Assistify addresses these problems by providing a 24/7 AI assistant capable of retrieving information directly from organizational knowledge bases and generating grounded responses.
+Built with a modular architecture, Assistify combines local LLM inference, vector search, voice capabilities, and multi-tenant management into a single platform.
 
 ---
 
 ## Key Features
 
-### AI Support Assistant
+![Features](assets/features.png)
 
+### AI-Powered Support
 - Retrieval-Augmented Generation (RAG)
-- Context-aware responses
-- Tenant-specific knowledge retrieval
-- Conversation history
-- Streaming responses
+- Context-aware document retrieval
+- Hallucination reduction through grounded responses
+- Tenant-isolated knowledge bases
 
 ### Knowledge Base Management
-
-- PDF document upload
-- Automatic document indexing
-- Semantic search
-- Vector embeddings
-- Document re-indexing
-
-### Voice Assistant
-
-- Speech-to-Text
-- Text-to-Speech
-- English voice support
-- Arabic voice support
-- Real-time voice conversations
+- PDF document ingestion
+- Automatic chunking and embeddings
+- Vector search with ChromaDB
+- Re-indexing and document management
 
 ### Multi-Tenant Architecture
-
-- Multiple organizations on one platform
 - Complete tenant isolation
-- Tenant-specific knowledge bases
-- Tenant-specific users and conversations
+- Independent knowledge bases
+- Role-based administration
+- Tenant-specific analytics
 
-### Security & Authentication
+### User Management
+- SuperAdmin management
+- Master Admin management
+- Admin accounts
+- Employee accounts
+- Customer accounts
 
-- Session-based authentication
-- OTP verification
-- Google OAuth
-- Multi-Factor Authentication (MFA)
-- Role-Based Access Control (RBAC)
-- CSRF protection
-- Security event logging
+### Voice Intelligence
+- Speech-to-text integration
+- Voice-based interaction
+- Text-to-speech responses
+- Real-time voice workflow
 
 ### Analytics & Monitoring
-
+- Query tracking
+- Response performance metrics
 - Usage analytics
-- Feedback tracking
-- Audit logs
-- Knowledge-base monitoring
-- Support ticket management
+- RAG hit-rate monitoring
 
 ---
 
-## System Architecture
+# Screenshots
+
+## AI Chat Interface
+
+![AI Chat](assets/screenshots/chat.png)
+
+Real-time AI support assistant powered by Retrieval-Augmented Generation.
+
+---
+
+## Admin Dashboard
+
+![Admin Dashboard](assets/screenshots/admin-dashboard.png)
+
+Centralized management portal for users, tenants, documents, and system operations.
+
+---
+
+## Knowledge Base Management
+
+![Knowledge Base](assets/screenshots/knowledge-base.png)
+
+Upload, index, manage, and search enterprise knowledge base documents.
+
+---
+
+## Analytics Dashboard
+
+![Analytics](assets/screenshots/analytics.png)
+
+Monitor system usage, performance, RAG effectiveness, and user activity.
+
+---
+
+# System Architecture
+
+![Architecture](assets/architecture.png)
+
+Assistify follows a modular service-oriented architecture:
 
 ```text
-┌─────────────────────┐
-│     React UI        │
-│     Next.js         │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│    Login Server     │
-│      FastAPI        │
-│      Port 7001      │
-└──────────┬──────────┘
-           │
-           ▼
-┌─────────────────────┐
-│     RAG Server      │
-│      FastAPI        │
-│      Port 7000      │
-└──────┬─────┬────────┘
-       │     │
-       │     │
-       ▼     ▼
- ┌────────┐ ┌─────────┐
- │ChromaDB│ │ Ollama  │
- └────────┘ └─────────┘
-       │
-       ▼
- ┌─────────┐
- │ Piper   │
- │   TTS   │
- └─────────┘
+Browser
+    │
+    ▼
+Login Server (FastAPI)
+    │
+    ├── Authentication
+    ├── Session Management
+    └── Frontend Delivery
+    │
+    ▼
+RAG Server (FastAPI)
+    │
+    ├── Retrieval Engine
+    ├── Vector Search
+    ├── Response Validation
+    └── Analytics
+    │
+    ├───────────────┐
+    ▼               ▼
+ChromaDB        LLM Service
+(Vector DB)     (Qwen/Ollama)
+    │
+    ▼
+Knowledge Base
 ```
 
 ---
 
-## Technology Stack
+# Technology Stack
 
-### Frontend
+## Backend
+
+- Python
+- FastAPI
+- SQLite
+- ChromaDB
+- Sentence Transformers
+- Ollama
+- Qwen Models
+
+## Frontend
 
 - React
 - Next.js
 - TypeScript
 - Tailwind CSS
 
-### Backend
+## AI & Retrieval
 
-- Python
-- FastAPI
-- WebSockets
+- Retrieval-Augmented Generation (RAG)
+- Vector Embeddings
+- Semantic Search
+- Document Chunking
 
-### AI & RAG
+## Voice
 
-- Ollama
-- Qwen Models
-- ChromaDB
-- Sentence Transformers
-- Cross Encoder Reranking
-
-### Voice
-
-- Faster Whisper
+- Faster-Whisper
 - Piper TTS
 
-### Database
+---
 
-- SQLite
+# User Roles
 
-### Authentication
-
-- Session Cookies
-- Google OAuth
-- OTP Verification
-- MFA
+| Role | Permissions |
+|--------|-------------|
+| SuperAdmin | Create tenants and manage the entire platform |
+| Master Admin | Manage tenant administrators |
+| Admin | Manage users and knowledge bases |
+| Employee | Internal AI assistant access |
+| Customer | Customer-facing AI support access |
 
 ---
 
-## User Roles
+# Installation
 
-### SuperAdmin
-
-Platform-wide administration.
-
-Capabilities:
-
-- Create tenants
-- Manage organizations
-- Create Master Admins
-- Monitor platform usage
-
-### Master Admin
-
-Organization owner.
-
-Capabilities:
-
-- Manage tenant administrators
-- Manage tenant resources
-- View analytics
-- Manage users
-
-### Admin
-
-Organization administrator.
-
-Capabilities:
-
-- Manage employees
-- Manage customers
-- Manage knowledge base
-- Review support tickets
-
-### Employee
-
-Support staff.
-
-Capabilities:
-
-- Assist customers
-- Access organizational knowledge
-- Manage assigned tickets
-
-### Customer
-
-End users.
-
-Capabilities:
-
-- Chat with AI assistant
-- Use voice assistant
-- Access organization knowledge
-- Submit support requests
-
----
-
-## RAG Pipeline
-
-Assistify uses a Retrieval-Augmented Generation workflow:
-
-### 1. Upload
-
-Administrator uploads PDF documents.
-
-### 2. Processing
-
-Documents are:
-
-- Extracted
-- Cleaned
-- Chunked
-- Embedded
-
-### 3. Storage
-
-Embeddings are stored in ChromaDB.
-
-### 4. Retrieval
-
-Relevant document chunks are retrieved using semantic search.
-
-### 5. Reranking
-
-Retrieved results are reranked for relevance.
-
-### 6. Generation
-
-The LLM generates a response grounded in retrieved content.
-
-### 7. Validation
-
-Responses pass through validation before being delivered to the user.
-
----
-
-## Voice Pipeline
-
-```text
-User Speech
-      │
-      ▼
-Speech-To-Text
-(Faster Whisper)
-      │
-      ▼
-RAG Retrieval
-      │
-      ▼
-LLM Generation
-      │
-      ▼
-Text-To-Speech
-(Piper)
-      │
-      ▼
-Audio Response
-```
-
----
-
-## Repository Structure
-
-```text
-Assistify-v1.0
-│
-├── assistify-ui-design/
-│   ├── app/
-│   ├── components/
-│   ├── hooks/
-│   └── out/
-│
-├── backend/
-│   ├── routers/
-│   ├── services/
-│   ├── repositories/
-│   ├── voice_audio/
-│   └── assets/
-│
-├── Login_system/
-│
-├── tts_service/
-│
-├── xtts_service/
-│
-├── docs/
-│
-├── tests/
-│
-├── scripts/
-│
-├── environment_main.yml
-│
-└── start_main_servers.py
-```
-
----
-
-## Installation
-
-### 1. Clone Repository
+## 1. Clone Repository
 
 ```bash
 git clone https://github.com/Jonathan980JO/assistify-rag-project.git
-
 cd assistify-rag-project
 ```
 
-### 2. Create Environment
+## 2. Create Environment
 
 ```bash
 conda env create -f environment_main.yml
-```
-
-### 3. Activate Environment
-
-```bash
 conda activate assistify_main
 ```
 
-### 4. Create Configuration File
+## 3. Configure Environment
 
 ```bash
 copy .env.example .env
 ```
 
-Configure values as needed.
+Update any required environment variables.
 
-### 5. Initialize Database
+## 4. Initialize Database
 
 ```bash
 python Login_system/init_users_db.py
 ```
 
-### 6. Start System
+## 5. Start Platform
 
 ```bash
 python start_main_servers.py
@@ -378,100 +217,72 @@ python start_main_servers.py
 
 ---
 
-## First Login
+# Default Bootstrap Account
 
-Default bootstrap account:
+A fresh installation creates a single bootstrap account:
 
 ```text
 Username: superadmin
 Password: superadmin
 ```
 
-After login:
-
-1. Create tenants
-2. Create Master Admins
-3. Assign administrators
-4. Upload knowledge-base documents
-5. Start using the platform
+Use this account to create tenants, administrators, employees, and customers.
 
 ---
 
-## Screenshots
+# Project Structure
 
-Add screenshots here:
-
-### Dashboard
-
-![Dashboard](docs/screenshots/dashboard.png)
-
-### Chat Interface
-
-![Chat](docs/screenshots/chat.png)
-
-### Knowledge Base
-
-![Knowledge Base](docs/screenshots/knowledge-base.png)
-
-### Analytics
-
-![Analytics](docs/screenshots/analytics.png)
-
----
-
-## Project Highlights
-
-- Enterprise AI Help Desk Platform
-- Retrieval-Augmented Generation (RAG)
-- Local LLM Inference
-- Multi-Tenant SaaS Architecture
-- Voice Assistant Support
-- Tenant-Isolated Knowledge Bases
-- Role-Based Access Control
-- Real-Time Chat & Voice
-- Analytics & Monitoring
-- Secure Authentication System
+```text
+Assistify-v1.0
+│
+├── Login_system/
+├── backend/
+├── assistify-ui-design/
+├── docs/
+├── assets/
+│   ├── banner.png
+│   ├── architecture.png
+│   ├── features.png
+│   └── screenshots/
+│
+├── start_main_servers.py
+├── environment_main.yml
+└── README.md
+```
 
 ---
 
-## Future Improvements
+# Security
 
-Potential future enhancements:
+- Environment-based configuration
+- Session management
+- Tenant isolation
+- Role-based access control
+- Knowledge base separation
+- Local deployment support
 
-- Human-agent escalation
-- Mobile applications
-- CRM integrations
+---
+
+# Future Enhancements
+
+- Additional LLM providers
 - Advanced analytics
-- Additional language support
-- Cloud deployment options
-- Enterprise integrations
+- Ticket workflow automation
+- Extended voice capabilities
+- Enhanced tenant customization
 
 ---
 
-## Academic Project
-
-This project was developed as a Bachelor of Science Graduation Project at the Arab Academy for Science, Technology & Maritime Transport (AAST). :contentReference[oaicite:0]{index=0}
-
-### Team
-
-- Ahmed Khaled
-- Ahmed Ayman
-- Ahmed Fateh
-- Yassin Adel
-- Jonathan Samy
-
-### Supervisor
-
-- Dr. Ahmed Salem
-
----
-
-## License
+# License
 
 This repository is provided for educational, research, and portfolio purposes.
 
 ---
 
-## Assistify v1.0
+<div align="center">
 
-Transforming organizational knowledge into intelligent support.
+### Assistify v1.0
+
+AI-Powered Enterprise Help Desk Platform
+
+</div>
